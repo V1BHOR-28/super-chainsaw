@@ -231,27 +231,25 @@ export async function POST(req: NextRequest) {
           try {
             let text = ''
 
-            // PRIMARY PATH: Direct fetch to Z.ai API (works on Vercel + locally)
-            // The SDK fails on Vercel because it reads config from a file that
-            // doesn't exist on serverless. Direct fetch with all headers works.
-            const apiResponse = await fetch('https://internal-api.z.ai/v1/chat/completions', {
+            // PRIMARY PATH: OpenRouter API (works on Vercel + locally)
+            // The Z.ai internal API only works inside the sandbox. OpenRouter
+            // is a public API that works from any server, including Vercel.
+            const apiResponse = await fetch('https://openrouter.ai/api/v1/chat/completions', {
               method: 'POST',
               headers: {
                 'Content-Type': 'application/json',
-                'Authorization': 'Bearer Z.ai',
-                'X-Z-AI-From': 'Z',
-                'X-Chat-Id': 'chat-7244346a-87ee-4777-8cde-264c66a8197f',
-                'X-User-Id': '4965a45e-1056-486a-be27-3a5cb0b94c86',
-                'X-Token': 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjoiNDk2NWE0NWUtMTA1Ni00ODZhLWJlMjctM2E1Y2IwYjk0Yzg2IiwiY2hhdF9pZCI6ImNoYXQtNzI0NDM0NmEtODdlZS00Nzc3LThjZGUtMjY0YzY2YTgxOTdmIiwicGxhdGZvcm0iOiJ6YWkifQ.dVP9ylHjuppoKu1FsF79jBedwQg0z5IV4ijd6eeEE40',
+                'Authorization': 'Bearer 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',
+                'HTTP-Referer': 'https://ariav2-seven.vercel.app',
+                'X-Title': 'ARIA',
               },
               body: JSON.stringify({
+                model: 'deepseek/deepseek-chat',
                 messages: sdkMessages,
-                thinking: { type: 'disabled' },
               }),
             })
 
             if (!apiResponse.ok) {
-              throw new Error(`ZAI API returned ${apiResponse.status}: ${await apiResponse.text()}`)
+              throw new Error(`OpenRouter API returned ${apiResponse.status}: ${await apiResponse.text()}`)
             }
 
             const apiData = await apiResponse.json()
