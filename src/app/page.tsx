@@ -26,7 +26,10 @@ export default function HomePage() {
   } = useAriaStore()
 
   // ─── Auth state bootstrap ───
-  // Check /api/auth/session on mount to determine which screen to show.
+  // Use the session from useSession() directly — the JWT callback already
+  // sets token.onboarded, and the session callback passes it to the client.
+  // This eliminates the extra /api/auth/session API call which can race
+  // on Vercel serverless (causing Google users to skip onboarding).
   useEffect(() => {
     if (status === 'loading') return
 
@@ -35,29 +38,28 @@ export default function HomePage() {
       return
     }
 
-    // Authenticated — check if onboarded
-    ;(async () => {
-      try {
-        const res = await fetch('/api/auth/session')
-        if (!res.ok) {
-          setAuthState('unauthenticated')
-          return
-        }
-        const data = await res.json()
-        if (!data.authenticated || !data.user) {
-          setAuthState('unauthenticated')
-          return
-        }
-        setUser(data.user)
-        if (!data.user.onboarded) {
-          setAuthState('needs-onboarding')
-          return
-        }
-        setAuthState('authenticated')
-      } catch {
-        setAuthState('unauthenticated')
-      }
-    })()
+    // Authenticated — check onboarding status directly from the session
+    // (set by the JWT callback → session callback)
+    const userEmail = session.user.email || ''
+    const userName = session.user.name || ''
+    const userImage = (session.user as { image?: string | null }).image || null
+    const userId = (session.user as { id?: string }).id || ''
+    const onboarded = (session.user as { onboarded?: boolean }).onboarded
+
+    // Set basic user info from session
+    setUser({
+      id: userId,
+      email: userEmail,
+      name: userName,
+      image: userImage,
+      tier: 'Partner',
+    } as any)
+
+    if (!onboarded) {
+      setAuthState('needs-onboarding')
+    } else {
+      setAuthState('authenticated')
+    }
   }, [status, session, setAuthState, setUser])
 
   // ─── App data bootstrap (only when authenticated + onboarded) ───
@@ -143,7 +145,7 @@ export default function HomePage() {
 
   // Authenticated but not onboarded → onboarding screen
   if (authState === 'needs-onboarding') {
-    return <OnboardingScreen email={session?.user?.email || useAriaStore.getState().user?.email || ''} />
+    return <OnboardingScreen email={session?.user?.email || ''} />
   }
 
   // Fully authenticated + onboarded → the app

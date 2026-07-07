@@ -52,8 +52,10 @@ export function OnboardingScreen({ email }: { email: string }) {
       }
       const data = await res.json()
       setUser(data.user)
-      setAuthState('authenticated')
       toast.success(`Welcome, ${name.trim().split(' ')[0]}. ARIA is here.`)
+      // Reload the page so the NextAuth session updates with the new
+      // onboarded=true status from the DB
+      setTimeout(() => window.location.reload(), 1000)
     } catch (err) {
       toast.error((err as Error).message)
     } finally {

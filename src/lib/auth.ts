@@ -133,8 +133,6 @@ export const authOptions: NextAuthOptions = {
         token.userId = user.id
 
         // For ALL providers: load the user from DB to get the ID + onboarding status.
-        // For Google, the user object from OAuth doesn't have our DB ID.
-        // For credentials, the user object has the ID but not onboarding status.
         const dbUser = await db.user.findUnique({
           where: { email: user.email! },
         })
@@ -143,6 +141,22 @@ export const authOptions: NextAuthOptions = {
           token.onboarded = dbUser.onboarded
         }
       }
+
+      // ALWAYS re-read onboarding status from DB on every request.
+      // This ensures the token is up-to-date after the user completes onboarding
+      // (the onboarding API updates the DB, but the JWT token is stale until
+      // the next jwt callback run).
+      if (token.userId) {
+        const freshUser = await db.user.findUnique({
+          where: { id: token.userId as string },
+          select: { onboarded: true, name: true, persona: true },
+        })
+        if (freshUser) {
+          token.onboarded = freshUser.onboarded
+          if (freshUser.name) token.name = freshUser.name
+        }
+      }
+
       return token
     },
 
