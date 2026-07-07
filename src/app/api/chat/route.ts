@@ -238,7 +238,7 @@ export async function POST(req: NextRequest) {
               method: 'POST',
               headers: {
                 'Content-Type': 'application/json',
-                'Authorization': 'Bearer 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',
+                'Authorization': `Bearer ${process.env.OPENROUTER_API_KEY}`,
                 'HTTP-Referer': 'https://ariav2-seven.vercel.app',
                 'X-Title': 'ARIA',
               },
