@@ -8,7 +8,7 @@ const nextConfig: NextConfig = {
   // Force Node.js runtime for all API routes (Prisma requires Node.js, not Edge)
   experimental: {
     // Next.js 16: serverComponentsExternalPackages replaces serverExternalPackages
-    serverComponentsExternalPackages: ["@prisma/client", "bcryptjs", "resend"],
+    serverComponentsExternalPackages: ["@prisma/client", "bcryptjs", "resend", "nodemailer"],
   },
 };
 

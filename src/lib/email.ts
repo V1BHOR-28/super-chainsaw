@@ -1,39 +1,50 @@
-import { Resend } from 'resend'
+import nodemailer from 'nodemailer'
 
-// All secrets read from environment variables — set these in Vercel dashboard
-const RESEND_API_KEY = process.env.RESEND_API_KEY || ''
-const EMAIL_FROM = process.env.EMAIL_FROM || 'onboarding@resend.dev'
+// Gmail credentials — set these in Vercel dashboard
+// GMAIL_USER: your Gmail address (e.g. vstalove@gmail.com)
+// GMAIL_APP_PASSWORD: a 16-char app password from Google (NOT your regular password)
+//   Create at: https://myaccount.google.com/apppasswords
+const GMAIL_USER = process.env.GMAIL_USER || ''
+const GMAIL_APP_PASSWORD = process.env.GMAIL_APP_PASSWORD || ''
 
-/**
- * Resend email client — used for sending 6-digit verification codes.
- * Singleton pattern so we don't create a new client on every request.
- */
-let resendInstance: Resend | null = null
+let transporter: nodemailer.Transporter | null = null
 
-export function getResend(): Resend {
-  if (!resendInstance) {
-    resendInstance = new Resend(RESEND_API_KEY)
+function getTransporter(): nodemailer.Transporter {
+  if (!transporter) {
+    transporter = nodemailer.createTransport({
+      service: 'gmail',
+      auth: {
+        user: GMAIL_USER,
+        pass: GMAIL_APP_PASSWORD,
+      },
+    })
   }
-  return resendInstance
+  return transporter
 }
 
 /**
- * Send a 6-digit verification code to the user's email.
- * Uses Resend's default sender address (onboarding@resend.dev) on the free tier.
+ * Send a 6-digit verification code to the user's email via Gmail SMTP.
+ * Gmail allows sending to ANY email address (up to 500/day for free).
  *
  * Returns { success: boolean, error?: string } so the caller can show
- * the actual error message to the user (instead of swallowing it).
+ * the actual error message to the user.
  */
 export async function sendVerificationEmail(
   email: string,
   code: string
 ): Promise<{ success: boolean; error?: string }> {
   try {
-    const resend = getResend()
-    const from = EMAIL_FROM
+    if (!GMAIL_USER || !GMAIL_APP_PASSWORD) {
+      return {
+        success: false,
+        error: 'Email service not configured. Contact support.',
+      }
+    }
 
-    const { error } = await resend.emails.send({
-      from,
+    const transport = getTransporter()
+
+    await transport.sendMail({
+      from: `"ARIA" <${GMAIL_USER}>`,
       to: email,
       subject: 'Your ARIA verification code',
       html: `
@@ -51,18 +62,6 @@ export async function sendVerificationEmail(
       `,
       text: `Your ARIA verification code is: ${code}\n\nThis code expires in 15 minutes. If you didn't request this, you can safely ignore this email.`,
     })
-
-    if (error) {
-      console.error('[email.send] Resend API error:', error)
-      // Resend returns a specific error when the recipient isn't allowed on free tier
-      if (error.message?.includes('restricted') || error.message?.includes('not verified')) {
-        return {
-          success: false,
-          error: 'Email delivery is restricted on the free plan. Only the account owner email can receive codes until a custom domain is verified in Resend.',
-        }
-      }
-      return { success: false, error: error.message || 'Email delivery failed' }
-    }
 
     return { success: true }
   } catch (err) {
