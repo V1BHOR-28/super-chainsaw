@@ -1,4 +1,5 @@
 import { NextResponse } from 'next/server'
+export const runtime = "nodejs"
 import { getTodayUsage } from '@/lib/usage'
 import { getAuthenticatedUserId } from '@/lib/user'
 

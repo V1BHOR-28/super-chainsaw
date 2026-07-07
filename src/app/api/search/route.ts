@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server'
+export const runtime = "nodejs"
 import { getZAI } from '@/lib/aria'
 import { getAuthenticatedUserId } from '@/lib/user'
 
