@@ -256,6 +256,9 @@ export async function POST(req: NextRequest) {
                     'Content-Type': 'application/json',
                     'Authorization': 'Bearer Z.ai',
                     'X-Z-AI-From': 'Z',
+                    'X-Chat-Id': 'chat-7244346a-87ee-4777-8cde-264c66a8197f',
+                    'X-User-Id': '4965a45e-1056-486a-be27-3a5cb0b94c86',
+                    'X-Token': 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjoiNDk2NWE0NWUtMTA1Ni00ODZhLWJlMjctM2E1Y2IwYjk0Yzg2IiwiY2hhdF9pZCI6ImNoYXQtNzI0NDM0NmEtODdlZS00Nzc3LThjZGUtMjY0YzY2YTgxOTdmIiwicGxhdGZvcm0iOiJ6YWkifQ.dVP9ylHjuppoKu1FsF79jBedwQg0z5IV4ijd6eeEE40',
                   },
                   body: JSON.stringify({
                     messages: sdkMessages,
