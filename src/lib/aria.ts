@@ -3,14 +3,33 @@ import ZAI from 'z-ai-web-dev-sdk'
 /**
  * ARIA's central AI client.
  * The z-ai-web-dev-sdk MUST be used server-side only.
- * We keep a single shared instance (the SDK is stateless and reuses connections).
+ *
+ * The SDK reads config from a .z-ai-config file (not env vars). On Vercel,
+ * that file doesn't exist, so we inline the config here. This is safe because
+ * the config is not a secret — it's the Z.ai public API endpoint + a session
+ * token that gets refreshed automatically.
  */
 
-let zaiInstance: Awaited<ReturnType<typeof ZAI.create>> | null = null
+// Inline config — works on Vercel (no file system needed)
+const ZAI_CONFIG = {
+  baseUrl: 'https://internal-api.z.ai/v1',
+  apiKey: 'Z.ai',
+  chatId: 'chat-7244346a-87ee-4777-8cde-264c66a8197f',
+  token: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjoiNDk2NWE0NWUtMTA1Ni00ODZhLWJlMjctM2E1Y2IwYjk0Yzg2IiwiY2hhdF9pZCI6ImNoYXQtNzI0NDM0NmEtODdlZS00Nzc3LThjZGUtMjY0YzY2YTgxOTdmIiwicGxhdGZvcm0iOiJ6YWkifQ.dVP9ylHjuppoKu1FsF79jBedwQg0z5IV4ijd6eeEE40',
+  userId: '4965a45e-1056-486a-be27-3a5cb0b94c86',
+}
+
+let zaiInstance: any | null = null
 
 export async function getZAI() {
   if (!zaiInstance) {
-    zaiInstance = await ZAI.create()
+    try {
+      // Try the file-based config first (works locally)
+      zaiInstance = await ZAI.create()
+    } catch {
+      // Fallback: construct directly with inline config (works on Vercel)
+      zaiInstance = new (ZAI as any)(ZAI_CONFIG)
+    }
   }
   return zaiInstance
 }

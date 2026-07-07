@@ -266,7 +266,11 @@ export async function POST(req: NextRequest) {
               await new Promise((r) => setTimeout(r, isPunct ? 40 : 12))
             }
           } catch (e) {
-            console.error('[chat.llm]', e)
+            console.error('[chat.llm] Detailed error:', {
+              message: e instanceof Error ? e.message : String(e),
+              stack: e instanceof Error ? e.stack : undefined,
+              name: e instanceof Error ? e.name : undefined,
+            })
             fullText =
               "I lost my train of thought there for a moment. The connection to my reasoning layer dropped. Try sending that again — I'm here."
             send({ type: 'token', value: fullText })
