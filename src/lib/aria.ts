@@ -26,7 +26,19 @@ export async function getZAI() {
       zaiInstance = await ZAI.create()
     } catch {
       // Fallback: construct directly with inline config (works on Vercel)
-      zaiInstance = new ZAI(ZAI_CONFIG)
+      try {
+        zaiInstance = new ZAI(ZAI_CONFIG)
+      } catch {
+        // If even the constructor fails, return a mock object so the
+        // chat route can still work via direct fetch (the primary path).
+        // web_search and image_gen won't work, but chat will.
+        zaiInstance = {
+          chat: { completions: { create: async () => ({ choices: [] }) } },
+          functions: { invoke: async () => [] },
+          images: { generations: { create: async () => ({ data: [] }) } },
+          audio: { tts: { create: async () => new Response() } },
+        }
+      }
     }
   }
   return zaiInstance
