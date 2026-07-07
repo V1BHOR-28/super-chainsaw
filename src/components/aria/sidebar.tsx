@@ -22,7 +22,6 @@ import {
 } from 'lucide-react'
 import { useAriaStore } from '@/lib/store'
 import { SidePanels } from '@/components/aria/side-panels'
-import { UsageMeter } from '@/components/aria/usage-meter'
 import { toast } from 'sonner'
 import type { Conversation } from '@/lib/types'
 
@@ -238,9 +237,6 @@ export function Sidebar() {
             <SidePanels />
           )}
         </div>
-
-        {/* Usage meter */}
-        <UsageMeter />
 
         {/* User profile */}
         <div className="pt-4 border-t relative" style={{ borderColor: 'var(--aria-border)' }}>

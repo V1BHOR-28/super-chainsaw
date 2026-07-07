@@ -17,6 +17,7 @@ import { useAriaStore } from '@/lib/store'
 import { useAriaChat } from '@/hooks/use-aria-chat'
 import { MessageBubble } from './message-bubble'
 import { MemoryAskCard } from './memory-ask-card'
+import { UsageMeter } from './usage-meter'
 import { toast } from 'sonner'
 
 export function ChatArea() {
@@ -156,7 +157,7 @@ export function ChatArea() {
   return (
     <main className="flex-1 flex flex-col relative overflow-hidden" style={{ background: 'var(--aria-bg)' }}>
       {/* Top bar */}
-      <div className="absolute top-0 left-0 right-0 h-[56px] sm:h-[60px] flex items-center px-4 sm:px-6 z-10">
+      <div className="absolute top-0 left-0 right-0 h-[56px] sm:h-[60px] flex items-center justify-between px-4 sm:px-6 z-10">
         <button
           onClick={toggleSidebar}
           className="w-9 h-9 rounded-lg flex items-center justify-center transition-colors"
@@ -169,6 +170,7 @@ export function ChatArea() {
         >
           <Menu size={18} />
         </button>
+        <UsageMeter />
       </div>
 
       {/* Ambient glow */}
