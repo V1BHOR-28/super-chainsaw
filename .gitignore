@@ -1,0 +1,84 @@
+# See https://help.github.com/articles/ignoring-files/ for more about files.
+
+# ─── Dependencies ───
+node_modules
+/.pnp
+.pnp.*
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/versions
+
+# ─── Environment variables (NEVER commit secrets) ───
+.env
+.env.local
+.env.development
+.env.production
+.env.*.local
+# Note: .env.example IS committed (it has no secrets)
+!.env.example
+
+# ─── Next.js ───
+/.next/
+/out/
+next-env.d.ts
+
+# ─── Production build ───
+/build
+
+# ─── Database (local SQLite — we use Neon Postgres in production) ───
+db/*.db
+db/*.db-journal
+db/*.db-wal
+db/*.db-shm
+
+# ─── Debug logs ───
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+.pnpm-debug.log*
+dev.log
+server.log
+*.log
+
+# ─── Misc ───
+.DS_Store
+*.pem
+*.tsbuildinfo
+
+# ─── Vercel ───
+.vercel
+
+# ─── IDE / Editor ───
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# ─── OS ───
+Thumbs.db
+
+# ─── ARIA dev artifacts (not needed in the repo) ───
+local-*
+.claude
+.z-ai-config
+test
+prompt
+upload/
+tool-results/
+download/
+agent-ctx/
+.zscripts/
+
+# ─── Screenshots (dev only) ───
+*.png
+
+# ─── Skills directory (not part of the app) ───
+/skills/
+
+# ─── Sandbox config (not needed in production) ───
+Caddyfile
+worklog.md
+examples/
+mini-services/

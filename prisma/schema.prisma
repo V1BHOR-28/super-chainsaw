@@ -1,0 +1,156 @@
+// ARIA — Autonomous Reasoning Intelligent Assistant
+// Prisma schema — now on PostgreSQL (Neon) for multi-user production
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id            String    @id @default(cuid())
+  email         String    @unique
+  name          String?
+  passwordHash  String?   // null for OAuth-only users (Google)
+  image         String?   // profile picture URL (from Google OAuth)
+  emailVerified DateTime? // null until email verification completes
+  verifyCode    String?   // hashed 6-digit code
+  verifyExpires DateTime? // when the code expires (15 min)
+  // Onboarding (collected after first login)
+  persona       String?   // "student" | "professional"
+  age           Int?
+  occupation    String?
+  onboarded     Boolean   @default(false)
+  // Existing fields
+  tier          String    @default("Partner")
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  conversations   Conversation[]
+  memories        Memory[]
+  memoryDecisions MemoryDecision[]
+  moods           Mood[]
+  reminders       Reminder[]
+  settings        UserSettings?
+  usage           Usage[]
+}
+
+model Conversation {
+  id        String   @id @default(cuid())
+  title     String   @default("New Conversation")
+  userId    String
+  pinned    Boolean  @default(false)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  messages  Message[]
+
+  @@index([userId, updatedAt])
+}
+
+model Message {
+  id              String   @id @default(cuid())
+  conversationId  String
+  role            String   // "user" | "assistant" | "system"
+  content         String
+  attachmentsJson String?  // JSON string of attachment URLs / base64 refs
+  toolUsed        String?  // "web_search" | "image_generation" | "vision" | null
+  createdAt       DateTime @default(now())
+
+  conversation Conversation @relation(fields: [conversationId], references: [id], onDelete: Cascade)
+
+  @@index([conversationId, createdAt])
+}
+
+// Persistent memories — ARIA remembers facts about the user across all conversations
+model Memory {
+  id        String   @id @default(cuid())
+  userId    String
+  content   String
+  category  String   @default("general")
+  pinned    Boolean  @default(false)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+}
+
+// Memory decisions — logs every Save/Skip so ARIA learns the user's pattern
+model MemoryDecision {
+  id            String   @id @default(cuid())
+  userId        String
+  candidateText String
+  category      String   @default("general")
+  accepted      Boolean
+  createdAt     DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+}
+
+// Mood logs
+model Mood {
+  id        String   @id @default(cuid())
+  userId    String
+  mood      String   // "great" | "good" | "okay" | "low" | "rough"
+  note      String?
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+}
+
+// Reminders
+model Reminder {
+  id          String    @id @default(cuid())
+  userId      String
+  title       String
+  dueAt       DateTime?
+  completed   Boolean   @default(false)
+  completedAt DateTime?
+  createdAt   DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, completed, dueAt])
+}
+
+// Per-user ARIA settings
+model UserSettings {
+  userId           String   @id
+  tone             String   @default("Warm & Honest")
+  responseLength   String   @default("Balanced")
+  soundEffects     Boolean  @default(true)
+  localEncryption  Boolean  @default(true)
+  trainingOptIn    Boolean  @default(false)
+  autoDestruct     Boolean  @default(false)
+  voiceEnabled     Boolean  @default(true)
+  createdAt        DateTime @default(now())
+  updatedAt        DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+// Daily token usage — one row per user per UTC day
+model Usage {
+  id           String   @id @default(cuid())
+  userId       String
+  date         DateTime
+  tokensUsed   Int      @default(0)
+  requestCount Int      @default(0)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, date])
+  @@index([userId, date])
+}

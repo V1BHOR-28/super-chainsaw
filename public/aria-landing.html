@@ -1,0 +1,1440 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>ARIA — Not a chatbot. A partner.</title>
+<script src="https://cdn.tailwindcss.com"></script>
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Space+Grotesk:wght@300;400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --bg: #0c0a08;
+    --bg-soft: #161210;
+    --fg: #f5f1eb;
+    --fg-muted: #a89888;
+    --fg-dim: #5a4d40;
+    --accent: #f59e0b;
+    --accent-glow: #fcd34d;
+    --accent-deep: #92400e;
+    --accent-bright: #fbbf24;
+    --border: rgba(252, 211, 77, 0.12);
+    --card: rgba(252, 211, 77, 0.03);
+  }
+
+  * { box-sizing: border-box; -webkit-font-smoothing: antialiased; }
+
+  body {
+    background: var(--bg);
+    color: var(--fg);
+    font-family: 'Space Grotesk', sans-serif;
+    margin: 0;
+    overflow-x: hidden;
+  }
+
+  body.modal-open { overflow: hidden; }
+
+  .serif { font-family: 'Instrument Serif', serif; font-weight: 400; }
+  em { font-style: italic; }
+  .mono { font-family: 'JetBrains Mono', monospace; }
+
+  /* Film grain overlay */
+  body::before {
+    content: '';
+    position: fixed;
+    inset: 0;
+    background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='200' height='200'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='3'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.5'/%3E%3C/svg%3E");
+    opacity: 0.06;
+    pointer-events: none;
+    z-index: 100;
+    mix-blend-mode: overlay;
+  }
+
+  /* Navigation */
+  nav.top-nav {
+    position: fixed;
+    top: 0; left: 0; right: 0;
+    z-index: 50;
+    padding: 20px 32px;
+    backdrop-filter: blur(20px);
+    background: rgba(12, 10, 8, 0.7);
+    border-bottom: 1px solid var(--border);
+  }
+
+  .nav-link {
+    position: relative;
+    color: var(--fg-muted);
+    transition: color 0.3s ease;
+    font-size: 14px;
+    letter-spacing: 0.01em;
+  }
+  .nav-link:hover { color: var(--fg); }
+  .nav-link::after {
+    content: '';
+    position: absolute;
+    bottom: -6px; left: 0;
+    width: 0; height: 1px;
+    background: var(--accent-glow);
+    transition: width 0.3s ease;
+  }
+  .nav-link:hover::after { width: 100%; }
+
+  /* Language Dropdown */
+  .lang-dropdown {
+    position: relative;
+  }
+  .lang-btn {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    color: var(--fg-muted);
+    font-size: 14px;
+    cursor: pointer;
+    background: transparent;
+    border: none;
+    font-family: inherit;
+    transition: color 0.3s;
+  }
+  .lang-btn:hover { color: var(--fg); }
+  .lang-menu {
+    position: absolute;
+    top: 100%;
+    right: 0;
+    margin-top: 12px;
+    background: var(--bg-soft);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    overflow: hidden;
+    min-width: 120px;
+    opacity: 0;
+    visibility: hidden;
+    transform: translateY(-10px);
+    transition: all 0.3s ease;
+    z-index: 60;
+    box-shadow: 0 15px 40px rgba(0,0,0,0.5);
+  }
+  .lang-dropdown:hover .lang-menu, .lang-dropdown:focus-within .lang-menu {
+    opacity: 1;
+    visibility: visible;
+    transform: translateY(0);
+  }
+  .lang-option {
+    padding: 10px 16px;
+    font-size: 13px;
+    color: var(--fg-muted);
+    cursor: pointer;
+    transition: background 0.2s, color 0.2s;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+  }
+  .lang-option:hover { background: var(--card); color: var(--accent-glow); }
+
+  /* Buttons */
+  .btn-primary {
+    background: var(--fg);
+    color: var(--bg);
+    padding: 14px 28px;
+    border-radius: 999px;
+    font-weight: 500;
+    transition: all 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    border: none;
+    cursor: pointer;
+    font-size: 14px;
+    position: relative;
+    overflow: hidden;
+  }
+  .btn-primary::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: linear-gradient(90deg, var(--accent), var(--accent-glow));
+    transform: translateY(100%);
+    transition: transform 0.4s cubic-bezier(0.4, 0, 0.2, 1);
+  }
+  .btn-primary:hover::before { transform: translateY(0); }
+  .btn-primary span, .btn-primary svg { position: relative; z-index: 1; transition: color 0.4s; }
+  .btn-primary:hover { transform: translateY(-2px); box-shadow: 0 12px 30px rgba(245, 158, 11, 0.4); }
+  .btn-primary:hover span, .btn-primary:hover svg { color: var(--bg); }
+
+  .btn-ghost {
+    background: transparent;
+    color: var(--fg);
+    padding: 14px 28px;
+    border-radius: 999px;
+    border: 1px solid var(--border);
+    transition: all 0.3s ease;
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    cursor: pointer;
+    font-size: 14px;
+    font-family: inherit;
+  }
+  .btn-ghost:hover {
+    border-color: var(--accent-bright);
+    color: var(--accent-glow);
+    background: rgba(245, 158, 11, 0.05);
+  }
+
+  /* Status pill */
+  .status-pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    padding: 6px 14px;
+    background: rgba(245, 158, 11, 0.08);
+    border: 1px solid rgba(245, 158, 11, 0.25);
+    border-radius: 999px;
+    font-size: 11px;
+    color: var(--accent-glow);
+    letter-spacing: 0.12em;
+    font-weight: 500;
+  }
+  .status-dot {
+    width: 6px; height: 6px;
+    background: var(--accent-bright);
+    border-radius: 50%;
+    box-shadow: 0 0 10px var(--accent-bright);
+    animation: pulse 2s infinite;
+  }
+  @keyframes pulse {
+    0%, 100% { opacity: 1; transform: scale(1); }
+    50% { opacity: 0.5; transform: scale(0.85); }
+  }
+
+  /* Gradient text */
+  .gradient-text {
+    background: linear-gradient(135deg, #f59e0b 0%, #fcd34d 50%, #fbbf24 100%);
+    -webkit-background-clip: text;
+    background-clip: text;
+    color: transparent;
+  }
+
+  /* SPHERE */
+  .sphere-stage {
+    position: relative;
+    width: 100%;
+    height: 100%;
+    min-height: 600px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+  }
+
+  .orbit {
+    position: absolute;
+    border: 1px solid rgba(252, 211, 77, 0.12);
+    border-radius: 50%;
+    top: 50%; left: 50%;
+    pointer-events: none;
+  }
+  .orbit-1 { width: 480px; height: 480px; animation: spin 40s linear infinite; }
+  .orbit-2 { width: 600px; height: 600px; animation: spin 60s linear infinite reverse; border-color: rgba(252, 211, 77, 0.06); }
+  .orbit-3 { width: 740px; height: 740px; animation: spin 90s linear infinite; border-color: rgba(252, 211, 77, 0.04); }
+
+  .orbit::before {
+    content: '';
+    position: absolute;
+    width: 6px; height: 6px;
+    background: var(--accent-bright);
+    border-radius: 50%;
+    top: -3px;
+    left: 50%;
+    transform: translateX(-50%);
+    box-shadow: 0 0 14px var(--accent-glow), 0 0 4px var(--accent-bright);
+  }
+  .orbit-2::after {
+    content: '';
+    position: absolute;
+    width: 4px; height: 4px;
+    background: var(--accent-glow);
+    border-radius: 50%;
+    bottom: -2px;
+    left: 30%;
+    box-shadow: 0 0 10px var(--accent-glow);
+  }
+
+  @keyframes spin {
+    from { transform: translate(-50%, -50%) rotate(0deg); }
+    to { transform: translate(-50%, -50%) rotate(360deg); }
+  }
+
+  .sphere-wrap {
+    position: relative;
+    width: 380px;
+    height: 380px;
+    animation: floatY 6s ease-in-out infinite;
+  }
+  @keyframes floatY {
+    0%, 100% { transform: translateY(0); }
+    50% { transform: translateY(-12px); }
+  }
+
+  .sphere {
+    position: absolute;
+    inset: 0;
+    border-radius: 50%;
+    background:
+      radial-gradient(circle at 32% 28%, rgba(255, 251, 235, 0.95) 0%, transparent 25%),
+      radial-gradient(circle at 70% 75%, #451a03 0%, transparent 45%),
+      radial-gradient(circle at 50% 50%, #fbbf24 0%, #f59e0b 35%, #92400e 70%, #1c0a01 100%);
+    box-shadow:
+      0 0 80px rgba(251, 191, 36, 0.5),
+      0 0 180px rgba(251, 191, 36, 0.25),
+      inset -30px -40px 90px rgba(0, 0, 0, 0.7),
+      inset 25px 30px 70px rgba(254, 243, 199, 0.3);
+    animation: spherePulse 5s ease-in-out infinite;
+  }
+
+  @keyframes spherePulse {
+    0%, 100% {
+      box-shadow: 0 0 80px rgba(251, 191, 36, 0.5), 0 0 180px rgba(251, 191, 36, 0.25),
+        inset -30px -40px 90px rgba(0, 0, 0, 0.7), inset 25px 30px 70px rgba(254, 243, 199, 0.3);
+    }
+    50% {
+      box-shadow: 0 0 110px rgba(251, 191, 36, 0.65), 0 0 240px rgba(251, 191, 36, 0.35),
+        inset -30px -40px 90px rgba(0, 0, 0, 0.7), inset 25px 30px 80px rgba(254, 243, 199, 0.4);
+    }
+  }
+
+  .sphere::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    border-radius: 50%;
+    background: conic-gradient(from 0deg,
+      transparent 0%,
+      rgba(254, 243, 199, 0.15) 20%,
+      transparent 40%,
+      rgba(245, 158, 11, 0.2) 60%,
+      transparent 80%,
+      rgba(254, 243, 199, 0.1) 100%);
+    mix-blend-mode: overlay;
+    animation: spinInner 15s linear infinite;
+  }
+
+  .sphere::after {
+    content: '';
+    position: absolute;
+    inset: 20%;
+    border-radius: 50%;
+    background: radial-gradient(circle at 50% 50%, transparent 30%, rgba(252, 211, 77, 0.15) 55%, transparent 75%);
+    animation: spinInner 25s linear infinite reverse;
+  }
+
+  @keyframes spinInner {
+    from { transform: rotate(0deg); }
+    to { transform: rotate(360deg); }
+  }
+
+  .sphere-highlight {
+    position: absolute;
+    top: 12%; left: 22%;
+    width: 35%; height: 25%;
+    border-radius: 50%;
+    background: radial-gradient(ellipse at center, rgba(255, 251, 235, 0.4) 0%, transparent 70%);
+    filter: blur(8px);
+    pointer-events: none;
+  }
+
+  /* Chat bubbles */
+  .bubble {
+    position: absolute;
+    background: rgba(22, 18, 16, 0.85);
+    backdrop-filter: blur(16px);
+    border: 1px solid var(--border);
+    border-radius: 18px;
+    padding: 14px 18px;
+    font-size: 14px;
+    color: var(--fg);
+    max-width: 240px;
+    box-shadow: 0 10px 40px rgba(0, 0, 0, 0.5);
+    animation: bubbleFloat 6s ease-in-out infinite;
+    z-index: 5;
+  }
+  .bubble.accent { border-color: rgba(245, 158, 11, 0.3); background: rgba(40, 28, 10, 0.85); }
+
+  .bubble-label {
+    font-size: 10px;
+    letter-spacing: 0.15em;
+    margin-bottom: 4px;
+    color: var(--fg-dim);
+    text-transform: uppercase;
+  }
+  .bubble.accent .bubble-label { color: var(--accent-glow); }
+
+  @keyframes bubbleFloat {
+    0%, 100% { transform: translateY(0); }
+    50% { transform: translateY(-10px); }
+  }
+
+  /* Wave bars */
+  .wave-bar {
+    display: inline-block;
+    width: 3px;
+    background: var(--accent-bright);
+    margin: 0 1.5px;
+    border-radius: 2px;
+    animation: wave 1.2s ease-in-out infinite;
+  }
+  @keyframes wave {
+    0%, 100% { height: 6px; }
+    50% { height: 22px; }
+  }
+
+  /* Typing dots */
+  .typing-dot {
+    display: inline-block;
+    width: 5px; height: 5px;
+    background: var(--accent-glow);
+    border-radius: 50%;
+    margin: 0 2px;
+    animation: typingDot 1.4s infinite;
+  }
+  .typing-dot:nth-child(2) { animation-delay: 0.2s; }
+  .typing-dot:nth-child(3) { animation-delay: 0.4s; }
+  @keyframes typingDot {
+    0%, 60%, 100% { transform: translateY(0); opacity: 0.3; }
+    30% { transform: translateY(-5px); opacity: 1; }
+  }
+
+  /* Fade up */
+  .fade-up {
+    opacity: 0;
+    transform: translateY(40px);
+    transition: opacity 1.1s cubic-bezier(0.2, 0.7, 0.2, 1), transform 1.1s cubic-bezier(0.2, 0.7, 0.2, 1);
+  }
+  .fade-up.visible {
+    opacity: 1;
+    transform: translateY(0);
+  }
+
+  /* Scroll indicator */
+  .scroll-indicator {
+    position: absolute;
+    bottom: 32px; left: 50%;
+    transform: translateX(-50%);
+    color: var(--fg-dim);
+    font-size: 10px;
+    letter-spacing: 0.3em;
+    text-transform: uppercase;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    gap: 12px;
+  }
+  .scroll-line {
+    width: 1px; height: 50px;
+    background: linear-gradient(to bottom, transparent, var(--accent-bright));
+    animation: scrollLine 2.5s ease-in-out infinite;
+    transform-origin: top;
+  }
+  @keyframes scrollLine {
+    0%, 100% { transform: scaleY(0.2); opacity: 0.4; }
+    50% { transform: scaleY(1); opacity: 1; }
+  }
+
+  .ambient-glow {
+    position: absolute;
+    border-radius: 50%;
+    filter: blur(100px);
+    pointer-events: none;
+    z-index: 0;
+  }
+
+  /* Feature cards */
+  .feature-card {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 24px;
+    padding: 32px;
+    transition: all 0.5s cubic-bezier(0.2, 0.7, 0.2, 1);
+    position: relative;
+    overflow: hidden;
+  }
+  .feature-card::before {
+    content: '';
+    position: absolute;
+    inset: 0;
+    background: radial-gradient(circle at var(--mx, 50%) var(--my, 50%), rgba(245, 158, 11, 0.12), transparent 50%);
+    opacity: 0;
+    transition: opacity 0.5s ease;
+    pointer-events: none;
+  }
+  .feature-card:hover::before { opacity: 1; }
+  .feature-card:hover {
+    border-color: rgba(245, 158, 11, 0.3);
+    transform: translateY(-4px);
+  }
+  .feature-icon {
+    width: 48px; height: 48px;
+    border-radius: 12px;
+    background: rgba(245, 158, 11, 0.08);
+    border: 1px solid rgba(245, 158, 11, 0.2);
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    color: var(--accent-glow);
+    margin-bottom: 24px;
+  }
+
+  /* Terminal */
+  .terminal {
+    background: linear-gradient(180deg, #0a0806 0%, #050403 100%);
+    border: 1px solid var(--border);
+    border-radius: 16px;
+    overflow: hidden;
+    box-shadow: 
+      0 20px 60px rgba(0, 0, 0, 0.6),
+      0 0 80px rgba(245, 158, 11, 0.08),
+      inset 0 1px 0 rgba(252, 211, 77, 0.05);
+    font-family: 'JetBrains Mono', monospace;
+    position: relative;
+  }
+
+  .terminal::before {
+    content: '';
+    position: absolute;
+    inset: -1px;
+    border-radius: 16px;
+    padding: 1px;
+    background: linear-gradient(135deg, rgba(245, 158, 11, 0.4), transparent 40%, transparent 60%, rgba(252, 211, 77, 0.2));
+    -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+    -webkit-mask-composite: xor;
+    mask-composite: exclude;
+    pointer-events: none;
+  }
+
+  .terminal-header {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+    padding: 14px 20px;
+    background: rgba(252, 211, 77, 0.03);
+    border-bottom: 1px solid var(--border);
+  }
+
+  .terminal-dots { display: flex; gap: 6px; }
+  .terminal-dots span { width: 10px; height: 10px; border-radius: 50%; }
+  .terminal-dots span:nth-child(1) { background: rgba(245, 158, 11, 0.5); }
+  .terminal-dots span:nth-child(2) { background: rgba(252, 211, 77, 0.3); }
+  .terminal-dots span:nth-child(3) { background: rgba(254, 243, 199, 0.15); }
+
+  .terminal-title {
+    font-size: 12px; color: var(--fg-muted); flex: 1; text-align: center; letter-spacing: 0.05em;
+  }
+
+  .terminal-status {
+    display: flex; align-items: center; gap: 8px; font-size: 11px; color: var(--accent-glow); letter-spacing: 0.05em;
+  }
+
+  .terminal-body {
+    padding: 24px; height: 360px; overflow-y: auto; font-size: 13px; line-height: 1.7; scroll-behavior: smooth;
+  }
+
+  .terminal-body::-webkit-scrollbar { width: 6px; }
+  .terminal-body::-webkit-scrollbar-track { background: transparent; }
+  .terminal-body::-webkit-scrollbar-thumb { background: rgba(252, 211, 77, 0.15); border-radius: 3px; }
+
+  .term-line {
+    margin-bottom: 4px; display: flex; gap: 14px; align-items: baseline; opacity: 0; animation: termLineAppear 0.5s ease forwards;
+  }
+  @keyframes termLineAppear { to { opacity: 1; } }
+
+  .term-line.empty { height: 8px; }
+  .term-line.system { color: var(--fg-dim); font-size: 11px; letter-spacing: 0.05em; }
+  .term-line.user .term-prompt { color: var(--fg-muted); }
+  .term-line.user .term-text { color: var(--fg); }
+  .term-line.aria .term-prompt { color: var(--accent-glow); }
+  .term-line.aria .term-text { color: var(--accent-bright); }
+  .term-line.aria.thinking .term-text { color: var(--accent-glow); opacity: 0.7; }
+
+  .term-prompt { font-weight: 500; flex-shrink: 0; min-width: 36px; position: relative; }
+  .term-line.aria .term-prompt::before {
+    content: ''; position: absolute; left: -10px; top: 50%; width: 4px; height: 4px; background: var(--accent-bright); border-radius: 50%; transform: translateY(-50%); box-shadow: 0 0 6px var(--accent-bright);
+  }
+
+  .terminal-input-row {
+    display: flex; align-items: center; gap: 14px; padding: 16px 24px; border-top: 1px solid var(--border); background: rgba(252, 211, 77, 0.02);
+  }
+
+  .terminal-input-row .term-prompt { color: var(--accent-glow); font-size: 13px; }
+
+  #terminalInput {
+    flex: 1; background: transparent; border: none; outline: none; color: var(--fg); font-family: 'JetBrains Mono', monospace; font-size: 13px; caret-color: var(--accent-glow);
+  }
+
+  #terminalInput::placeholder { color: var(--fg-dim); }
+
+  .input-hint {
+    font-size: 10px; color: var(--fg-dim); letter-spacing: 0.1em; padding: 4px 8px; border: 1px solid var(--border); border-radius: 4px;
+  }
+
+  .suggest-chip {
+    background: var(--card); border: 1px solid var(--border); color: var(--fg-muted); padding: 7px 14px; border-radius: 999px; font-size: 12px; font-family: 'JetBrains Mono', monospace; cursor: pointer; transition: all 0.3s ease;
+  }
+  .suggest-chip:hover {
+    border-color: var(--accent-bright); color: var(--accent-glow); background: rgba(245, 158, 11, 0.06); transform: translateY(-1px);
+  }
+
+  .thinking-dots { display: inline-flex; gap: 4px; align-items: center; }
+  .thinking-dots span {
+    width: 4px; height: 4px; background: var(--accent-glow); border-radius: 50%; animation: thinkingDot 1.4s infinite; display: inline-block;
+  }
+  .thinking-dots span:nth-child(2) { animation-delay: 0.2s; }
+  .thinking-dots span:nth-child(3) { animation-delay: 0.4s; }
+
+  /* Marquee */
+  .marquee { overflow: hidden; white-space: nowrap; padding: 32px 0; }
+  .marquee-content {
+    display: inline-block; animation: marquee 40s linear infinite; font-family: 'Instrument Serif', serif; font-size: 56px; color: var(--fg-dim);
+  }
+  .marquee-content span { margin: 0 32px; }
+  .marquee-content em { color: var(--accent-bright); font-style: italic; }
+  @keyframes marquee { from { transform: translateX(0); } to { transform: translateX(-50%); } }
+
+  .divider { height: 1px; background: linear-gradient(90deg, transparent, var(--border) 20%, var(--border) 80%, transparent); }
+
+  /* Conversation preview */
+  .msg-row { display: flex; gap: 12px; opacity: 0; animation: msgAppear 0.8s cubic-bezier(0.2, 0.7, 0.2, 1) forwards; }
+  .msg-row:nth-child(1) { animation-delay: 0.2s; }
+  .msg-row:nth-child(2) { animation-delay: 0.8s; }
+  .msg-row:nth-child(3) { animation-delay: 1.6s; }
+  .msg-row:nth-child(4) { animation-delay: 2.4s; }
+  @keyframes msgAppear { from { opacity: 0; transform: translateY(20px); } to { opacity: 1; transform: translateY(0); } }
+
+  .msg-bubble {
+    background: rgba(22, 18, 16, 0.6); backdrop-filter: blur(12px); border: 1px solid var(--border); border-radius: 18px; padding: 14px 18px; font-size: 15px; max-width: 420px;
+  }
+  .msg-bubble.aria { background: rgba(40, 28, 10, 0.5); border-color: rgba(245, 158, 11, 0.25); }
+
+  .avatar { width: 32px; height: 32px; border-radius: 50%; flex-shrink: 0; display: flex; align-items: center; justify-content: center; font-size: 11px; font-weight: 500; }
+  .avatar.user { background: var(--card); border: 1px solid var(--border); color: var(--fg-muted); }
+  .avatar.aria { background: linear-gradient(135deg, var(--accent-glow), var(--accent-deep)); color: var(--bg); }
+
+  .logo-dot {
+    width: 28px; height: 28px; border-radius: 50%;
+    background: radial-gradient(circle at 30% 30%, var(--accent-glow), var(--accent-bright) 50%, var(--accent-deep) 100%);
+    box-shadow: 0 0 20px rgba(245, 158, 11, 0.5);
+    position: relative;
+  }
+  .logo-dot::after { content: ''; position: absolute; inset: -4px; border: 1px solid rgba(245, 158, 11, 0.25); border-radius: 50%; animation: pulse 3s infinite; }
+
+  /* Reasoning trace */
+  .trace-line { display: flex; align-items: center; gap: 12px; padding: 8px 0; font-size: 13px; color: var(--fg-muted); opacity: 0; animation: traceAppear 0.6s ease forwards; }
+  .trace-line::before { content: ''; width: 4px; height: 4px; background: var(--accent-bright); border-radius: 50%; flex-shrink: 0; }
+  @keyframes traceAppear { to { opacity: 1; } }
+
+  /* AUTH MODAL */
+  .modal-overlay {
+    position: fixed; inset: 0; z-index: 200;
+    background: rgba(8, 6, 4, 0.75);
+    backdrop-filter: blur(12px);
+    display: flex; align-items: center; justify-content: center;
+    padding: 20px;
+    opacity: 0; pointer-events: none;
+    transition: opacity 0.3s ease;
+  }
+  .modal-overlay.active { opacity: 1; pointer-events: auto; }
+  
+  .modal-card {
+    background: var(--bg-soft);
+    border: 1px solid var(--border);
+    border-radius: 24px;
+    padding: 40px;
+    width: 100%; max-width: 440px;
+    position: relative;
+    box-shadow: 0 25px 80px rgba(0,0,0,0.6), 0 0 60px rgba(245, 158, 11, 0.08), inset 0 1px 0 rgba(252, 211, 77, 0.06);
+    transform: scale(0.95) translateY(20px);
+    transition: transform 0.4s cubic-bezier(0.2, 0.7, 0.2, 1);
+    max-height: 95vh;
+    overflow-y: auto;
+  }
+  .modal-overlay.active .modal-card { transform: scale(1) translateY(0); }
+
+  .modal-close {
+    position: absolute; top: 20px; right: 20px;
+    background: transparent; border: 1px solid transparent; color: var(--fg-muted);
+    width: 32px; height: 32px; border-radius: 8px;
+    display: flex; align-items: center; justify-content: center;
+    cursor: pointer; transition: all 0.2s;
+  }
+  .modal-close:hover { color: var(--fg); background: var(--card); border-color: var(--border); }
+
+  .oauth-btn {
+    width: 100%; padding: 12px; border-radius: 12px;
+    background: var(--card); border: 1px solid var(--border);
+    color: var(--fg); font-family: inherit; font-size: 14px;
+    display: flex; align-items: center; justify-content: center; gap: 10px;
+    cursor: pointer; transition: all 0.3s;
+  }
+  .oauth-btn:hover { border-color: rgba(252, 211, 77, 0.3); background: rgba(252, 211, 77, 0.05); transform: translateY(-1px); }
+
+  .divider-text {
+    display: flex; align-items: center; gap: 12px;
+    color: var(--fg-dim); font-size: 11px; text-transform: uppercase; letter-spacing: 0.15em;
+    margin: 24px 0;
+  }
+  .divider-text::before, .divider-text::after { content: ''; flex: 1; height: 1px; background: var(--border); }
+
+  .auth-input {
+    width: 100%; background: rgba(0,0,0,0.2);
+    border: 1px solid var(--border); border-radius: 12px;
+    padding: 12px 16px; color: var(--fg); font-family: inherit; font-size: 14px;
+    outline: none; transition: border-color 0.3s, box-shadow 0.3s;
+  }
+  .auth-input:focus { border-color: var(--accent-bright); box-shadow: 0 0 0 3px rgba(245, 158, 11, 0.1); }
+  .auth-input::placeholder { color: var(--fg-dim); }
+
+  @media (max-width: 1024px) {
+    .sphere-wrap { width: 300px; height: 300px; }
+    .orbit-1 { width: 380px; height: 380px; }
+    .orbit-2 { width: 480px; height: 480px; }
+    .orbit-3 { width: 580px; height: 580px; }
+    .marquee-content { font-size: 40px; }
+  }
+
+  @media (max-width: 768px) {
+    .sphere-wrap { width: 240px; height: 240px; }
+    .orbit-1 { width: 300px; height: 300px; }
+    .orbit-2 { width: 380px; height: 380px; }
+    .orbit-3 { width: 460px; height: 460px; }
+    .bubble { max-width: 180px; font-size: 12px; padding: 10px 14px; }
+    .marquee-content { font-size: 32px; }
+    .terminal-body { height: 300px; padding: 16px; font-size: 12px; }
+    .terminal-header { padding: 12px 16px; }
+    .terminal-input-row { padding: 14px 16px; }
+    .modal-card { padding: 28px; }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *, *::before, *::after {
+      animation-duration: 0.01ms !important;
+      animation-iteration-count: 1 !important;
+      transition-duration: 0.01ms !important;
+    }
+  }
+</style>
+</head>
+<body>
+
+<!-- Navigation -->
+<nav class="top-nav">
+  <div class="max-w-7xl mx-auto flex items-center justify-between">
+    <div class="flex items-center gap-3">
+      <div class="logo-dot"></div>
+      <span class="serif text-2xl tracking-tight">ARIA</span>
+    </div>
+    <div class="hidden md:flex items-center gap-10">
+      <a href="#features" class="nav-link">Features</a>
+      <a href="#terminal-section" class="nav-link">Preview</a>
+      <a href="#about" class="nav-link">About</a>
+    </div>
+    <div class="flex items-center gap-5">
+      <div class="lang-dropdown">
+        <button class="lang-btn">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><path d="M2 12h20M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z"/></svg>
+          <span id="currentLang">EN</span>
+          <svg width="10" height="10" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><polyline points="6 9 12 15 18 9"/></svg>
+        </button>
+        <div class="lang-menu">
+          <div class="lang-option" onclick="selectLang('EN')">English <span class="text-xs opacity-50">EN</span></div>
+          <div class="lang-option" onclick="selectLang('HI')">हिन्दी <span class="text-xs opacity-50">HI</span></div>
+        </div>
+      </div>
+      <button class="btn-ghost py-2 px-5 text-sm" onclick="openModal()">Sign in</button>
+    </div>
+  </div>
+</nav>
+
+<!-- HERO -->
+<section class="relative min-h-screen flex items-center px-8 pt-32 pb-24 overflow-hidden">
+  <div class="ambient-glow w-[700px] h-[700px] bg-[#f59e0b] -top-40 -right-40 opacity-25"></div>
+  <div class="ambient-glow w-[500px] h-[500px] bg-[#92400e] bottom-0 -left-32 opacity-15"></div>
+
+  <div class="max-w-7xl mx-auto w-full grid lg:grid-cols-[1.1fr_1fr] gap-12 items-center relative z-10">
+    <div class="space-y-8">
+      <div class="status-pill">
+        <span class="status-dot"></span>
+        ONLINE · AUTONOMOUS REASONING ACTIVE
+      </div>
+
+      <h1 class="serif text-6xl md:text-7xl lg:text-[88px] leading-[0.95] tracking-tight">
+        Not a chatbot.<br>
+        <em class="gradient-text">A partner.</em>
+      </h1>
+
+      <p class="text-lg text-[var(--fg-muted)] max-w-md leading-relaxed">
+        ARIA doesn't just respond — she reasons, pushes back, and remembers the shape of your thinking. Built to think alongside you, not for you.
+      </p>
+
+      <div class="flex flex-wrap items-center gap-4">
+        <button class="btn-primary" onclick="openModal()">
+          <span>Start talking to ARIA</span>
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14M13 5l7 7-7 7"/></svg>
+        </button>
+        <button class="btn-ghost" onclick="document.getElementById('terminal-section').scrollIntoView({behavior:'smooth'})">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+          Watch her think
+        </button>
+      </div>
+
+      <div class="flex items-center gap-4 pt-6">
+        <div class="flex items-end h-6 gap-0.5">
+          <span class="wave-bar" style="animation-delay: 0s"></span>
+          <span class="wave-bar" style="animation-delay: 0.1s"></span>
+          <span class="wave-bar" style="animation-delay: 0.2s"></span>
+          <span class="wave-bar" style="animation-delay: 0.3s"></span>
+          <span class="wave-bar" style="animation-delay: 0.4s"></span>
+          <span class="wave-bar" style="animation-delay: 0.5s"></span>
+          <span class="wave-bar" style="animation-delay: 0.6s"></span>
+        </div>
+        <span class="text-xs text-[var(--fg-muted)] tracking-[0.2em] uppercase">Listening · 0:14</span>
+      </div>
+    </div>
+
+    <div class="sphere-stage">
+      <div class="orbit orbit-1"></div>
+      <div class="orbit orbit-2"></div>
+      <div class="orbit orbit-3"></div>
+
+      <div class="sphere-wrap" id="sphereWrap">
+        <div class="sphere"></div>
+        <div class="sphere-highlight"></div>
+      </div>
+
+      <div class="bubble" style="top: 5%; left: -2%; animation-delay: 0s;">
+        <div class="bubble-label">ARIA</div>
+        "I don't buy that, actually..."
+      </div>
+
+      <div class="bubble accent" style="top: 32%; right: -8%; animation-delay: 1.2s;">
+        <div class="bubble-label">ARIA</div>
+        "Tell me why you believe that."
+      </div>
+
+      <div class="bubble" style="bottom: 22%; left: -6%; animation-delay: 2.4s;">
+        <div class="bubble-label">ARIA · THINKING</div>
+        <div class="flex items-center gap-1">
+          Reasoning through this
+          <span class="typing-dot"></span>
+          <span class="typing-dot"></span>
+          <span class="typing-dot"></span>
+        </div>
+      </div>
+
+      <div class="bubble accent" style="bottom: 2%; right: 4%; animation-delay: 1.8s;">
+        <div class="bubble-label">ARIA</div>
+        "That changes things."
+      </div>
+    </div>
+  </div>
+
+  <div class="scroll-indicator">
+    <span>Scroll</span>
+    <div class="scroll-line"></div>
+  </div>
+</section>
+
+<div class="divider"></div>
+
+<!-- SECTION 2: She's already listening -->
+<section id="preview" class="relative px-8 py-32 overflow-hidden">
+  <div class="ambient-glow w-[600px] h-[600px] bg-[#f59e0b] top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 opacity-10"></div>
+
+  <div class="max-w-5xl mx-auto text-center relative z-10">
+    <div class="fade-up">
+      <div class="status-pill mb-8">
+        <span class="status-dot"></span>
+        TWO-MINUTE INTRO
+      </div>
+
+      <h2 class="serif text-5xl md:text-7xl lg:text-8xl leading-[0.95] mb-8">
+        She's already <em class="gradient-text">listening.</em>
+      </h2>
+
+      <p class="text-xl text-[var(--fg-muted)] max-w-2xl mx-auto mb-12 leading-relaxed">
+        Give her two minutes. You'll leave with a different opinion about what an assistant can be.
+      </p>
+
+      <div class="flex flex-wrap items-center justify-center gap-4">
+        <button class="btn-primary" onclick="openModal()">
+          <span>Start talking</span>
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14M13 5l7 7-7 7"/></svg>
+        </button>
+        <button class="btn-ghost" onclick="openModal()">Sign in</button>
+      </div>
+    </div>
+
+    <div class="max-w-3xl mx-auto text-left space-y-5 mt-24">
+      <div class="msg-row">
+        <div class="avatar user">YOU</div>
+        <div class="msg-bubble">I think I should quit my job.</div>
+      </div>
+
+      <div class="msg-row justify-end">
+        <div class="msg-bubble aria">
+          <div class="text-[10px] tracking-[0.15em] text-[var(--accent-glow)] uppercase mb-1.5">ARIA</div>
+          Why now? And why is this the version of you that's deciding?
+        </div>
+        <div class="avatar aria">A</div>
+      </div>
+
+      <div class="msg-row">
+        <div class="avatar user">YOU</div>
+        <div class="msg-bubble">I don't know. I'm just tired.</div>
+      </div>
+
+      <div class="msg-row justify-end">
+        <div class="msg-bubble aria">
+          <div class="text-[10px] tracking-[0.15em] text-[var(--accent-glow)] uppercase mb-1.5">ARIA</div>
+          Tired is a feeling, not a reason. Let's separate them — what's the feeling actually about?
+        </div>
+        <div class="avatar aria">A</div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<div class="divider"></div>
+
+<!-- TERMINAL SECTION -->
+<section id="terminal-section" class="relative px-8 py-32 border-y border-[var(--border)] overflow-hidden">
+  <div class="ambient-glow w-[700px] h-[700px] bg-[#f59e0b] top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 opacity-12"></div>
+
+  <div class="max-w-4xl mx-auto relative z-10">
+    <div class="text-center mb-12 fade-up">
+      <div class="status-pill mb-6 inline-flex">
+        <span class="status-dot"></span>
+        LIVE SESSION · FRONTEND PREVIEW
+      </div>
+      <h2 class="serif text-5xl md:text-6xl lg:text-7xl leading-[0.95] mb-5">
+        Talk to her <em class="gradient-text">right now.</em>
+      </h2>
+      <p class="text-[var(--fg-muted)] max-w-xl mx-auto text-lg">
+        A live preview of how ARIA thinks. Type something honest — she'll meet you there.
+      </p>
+    </div>
+
+    <div class="terminal fade-up">
+      <div class="terminal-header">
+        <div class="terminal-dots">
+          <span></span><span></span><span></span>
+        </div>
+        <div class="terminal-title">aria — interactive session · ~/.aria/live</div>
+        <div class="terminal-status">
+          <span class="status-dot"></span>
+          <span id="sessionTimer">00:00:14</span>
+        </div>
+      </div>
+
+      <div class="terminal-body" id="terminalBody">
+        <div class="term-line system">ARIA v2.4.1 — autonomous reasoning engine</div>
+        <div class="term-line system">Type your message. Press Enter to send.</div>
+        <div class="term-line system">— — — — — — — — — — — — — — — — — — — —</div>
+        <div class="term-line empty"></div>
+
+        <div class="term-line user">
+          <span class="term-prompt">you</span>
+          <span class="term-text">everyone seems to have it figured out except me</span>
+        </div>
+        <div class="term-line aria">
+          <span class="term-prompt">aria</span>
+          <span class="term-text">they're performing the same act you are. the audience just can't see the backstage.</span>
+        </div>
+        <div class="term-line empty"></div>
+      </div>
+
+      <div class="terminal-input-row">
+        <span class="term-prompt">you</span>
+        <input type="text" id="terminalInput" placeholder="type something honest..." autocomplete="off" spellcheck="false">
+        <span class="input-hint">ENTER</span>
+      </div>
+    </div>
+
+    <div class="flex flex-wrap items-center justify-center gap-2 mt-6 fade-up">
+      <span class="text-xs text-[var(--fg-dim)] mr-2 mono">try:</span>
+      <button class="suggest-chip" data-text="i feel like an imposter">i feel like an imposter</button>
+      <button class="suggest-chip" data-text="i don't know who i am anymore">i don't know who i am anymore</button>
+      <button class="suggest-chip" data-text="i'm scared i'll end up alone">i'm scared i'll end up alone</button>
+      <button class="suggest-chip" data-text="i just want to be happy">i just want to be happy</button>
+      <button class="suggest-chip" data-text="why does nothing feel enough">why does nothing feel enough</button>
+    </div>
+  </div>
+</section>
+
+<!-- FEATURES -->
+<section id="features" class="relative px-8 py-32">
+  <div class="max-w-7xl mx-auto">
+    <div class="mb-20 fade-up max-w-3xl">
+      <div class="text-xs text-[var(--accent-glow)] tracking-[0.2em] uppercase mb-5">Capabilities</div>
+      <h2 class="serif text-5xl md:text-7xl leading-[0.95]">
+        Built to think,<br>not just <em class="gradient-text">answer.</em>
+      </h2>
+      <p class="text-lg text-[var(--fg-muted)] mt-8 leading-relaxed">
+        Six things ARIA does that most assistants can't — or won't.
+      </p>
+    </div>
+
+    <div class="grid md:grid-cols-2 lg:grid-cols-3 gap-6">
+      <div class="feature-card fade-up">
+        <div class="feature-icon">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+            <circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>
+          </svg>
+        </div>
+        <h3 class="serif text-2xl mb-3">Reasoning over recall</h3>
+        <p class="text-[var(--fg-muted)] leading-relaxed text-sm">ARIA works through problems in multi-step chains. She doesn't pattern-match — she actually thinks before she speaks.</p>
+      </div>
+
+      <div class="feature-card fade-up">
+        <div class="feature-icon">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+            <ellipse cx="12" cy="6" rx="8" ry="3"/><path d="M4 6v12c0 1.66 3.58 3 8 3s8-1.34 8-3V6"/><path d="M4 12c0 1.66 3.58 3 8 3s8-1.34 8-3"/>
+          </svg>
+        </div>
+        <h3 class="serif text-2xl mb-3">Persistent memory</h3>
+        <p class="text-[var(--fg-muted)] leading-relaxed text-sm">She remembers what you said three weeks ago, and connects it to what you're saying now. Context isn't lost — it compounds.</p>
+      </div>
+
+      <div class="feature-card fade-up">
+        <div class="feature-icon">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+            <path d="M3 12h18"/><circle cx="9" cy="6" r="2.5" fill="currentColor"/><circle cx="15" cy="12" r="2.5" fill="currentColor"/><circle cx="9" cy="18" r="2.5" fill="currentColor"/>
+          </svg>
+        </div>
+        <h3 class="serif text-2xl mb-3">Honest disagreement</h3>
+        <p class="text-[var(--fg-muted)] leading-relaxed text-sm">If your idea has a hole, she'll name it. ARIA isn't built to flatter — she's built to make your thinking sharper.</p>
+      </div>
+
+      <div class="feature-card fade-up">
+        <div class="feature-icon">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+            <circle cx="12" cy="12" r="4"/><path d="M12 2v3M12 19v3M4.93 4.93l2.12 2.12M16.95 16.95l2.12 2.12M2 12h3M19 12h3M4.93 19.07l2.12-2.12M16.95 7.05l2.12-2.12"/>
+          </svg>
+        </div>
+        <h3 class="serif text-2xl mb-3">Adaptive tone</h3>
+        <p class="text-[var(--fg-muted)] leading-relaxed text-sm">She reads the room. Quick and direct when you're in a rush, slow and reflective when the question deserves it.</p>
+      </div>
+
+      <div class="feature-card fade-up">
+        <div class="feature-icon">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+            <path d="M9 11l3 3L22 4"/><path d="M21 12v7a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11"/>
+          </svg>
+        </div>
+        <h3 class="serif text-2xl mb-3">Cross-session continuity</h3>
+        <p class="text-[var(--fg-muted)] leading-relaxed text-sm">Every conversation is a chapter, not an episode. Threads pick up exactly where they left off — no re-explaining.</p>
+      </div>
+
+      <div class="feature-card fade-up">
+        <div class="feature-icon">
+          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.5">
+            <rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/>
+          </svg>
+        </div>
+        <h3 class="serif text-2xl mb-3">Private by design</h3>
+        <p class="text-[var(--fg-muted)] leading-relaxed text-sm">Your conversations aren't training data. They're yours. Local-first encryption, zero retention, no exceptions.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- ABOUT -->
+<section id="about" class="relative px-8 py-32">
+  <div class="max-w-4xl mx-auto">
+    <div class="text-xs text-[var(--accent-glow)] tracking-[0.2em] uppercase mb-6 fade-up">About ARIA</div>
+    <h2 class="serif text-5xl md:text-7xl leading-[0.95] mb-12 fade-up max-w-3xl">
+      An assistant should challenge you, not <em class="gradient-text">applaud you.</em>
+    </h2>
+    <div class="space-y-6 text-lg text-[var(--fg-muted)] leading-relaxed fade-up">
+      <p>ARIA was built on a simple premise: most assistants are designed to be useful. Few are designed to be honest. The result is a generation of tools that agree, summarize, and pacify — and a generation of users who quietly stop thinking in their presence.</p>
+      <p>We wanted something different. An assistant that holds the tension of a hard question long enough to actually answer it. One that remembers the shape of your thinking, not just the words. One that, when you say something weak, has the nerve to say so.</p>
+      <p>ARIA is not a chatbot. She's a partner. She'll push back when you need it, hold context when you forget, and tell you the truth when it would be easier not to.</p>
+    </div>
+
+    <div class="mt-16 fade-up">
+      <div class="text-xs text-[var(--fg-muted)] tracking-[0.2em] uppercase mb-4">Reasoning trace · live</div>
+      <div class="bg-[var(--card)] border border-[var(--border)] rounded-2xl p-6 mono text-sm" id="traceBox">
+        <div class="trace-line" style="animation-delay: 0.2s">Parsing user intent — surface vs. underlying question</div>
+        <div class="trace-line" style="animation-delay: 0.6s">Cross-referencing prior context from session #418</div>
+        <div class="trace-line" style="animation-delay: 1.0s">Detecting emotional undertone — fatigue, not resolve</div>
+        <div class="trace-line" style="animation-delay: 1.4s">Choosing response posture: probe, don't solve</div>
+        <div class="trace-line" style="animation-delay: 1.8s">Drafting reply · 3 candidates · selecting sharpest</div>
+        <div class="trace-line" style="animation-delay: 2.2s"><span class="text-[var(--accent-glow)]">Response ready · 1.4s elapsed</span></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<!-- MARQUEE -->
+<section class="marquee border-y border-[var(--border)]">
+  <div class="marquee-content">
+    <span>Autonomous Reasoning</span><span>·</span>
+    <span>Intelligent Assistant</span><span>·</span>
+    <span><em>Not a chatbot.</em></span><span>·</span>
+    <span><em>A partner.</em></span><span>·</span>
+    <span>Autonomous Reasoning</span><span>·</span>
+    <span>Intelligent Assistant</span><span>·</span>
+    <span><em>Not a chatbot.</em></span><span>·</span>
+    <span><em>A partner.</em></span><span>·</span>
+  </div>
+</section>
+
+<!-- FOOTER -->
+<footer class="relative px-8 py-20">
+  <div class="max-w-7xl mx-auto">
+    <div class="flex flex-col md:flex-row md:items-end justify-between gap-12 mb-16">
+      <div>
+        <div class="flex items-center gap-3 mb-5">
+          <div class="logo-dot"></div>
+          <span class="serif text-3xl">ARIA</span>
+        </div>
+        <p class="text-[var(--fg-muted)] max-w-sm leading-relaxed">Autonomous Reasoning · Intelligent Assistant</p>
+      </div>
+    </div>
+
+    <div class="divider mb-8"></div>
+
+    <div class="flex flex-wrap items-center justify-between gap-4 text-xs text-[var(--fg-muted)]">
+      <div>© 2025 ARIA Systems · Built for clearer thinking</div>
+      <div class="flex items-center gap-6">
+        <a href="#" class="nav-link">Privacy</a>
+        <a href="#" class="nav-link">Terms</a>
+        <a href="#" class="nav-link">Security</a>
+      </div>
+    </div>
+  </div>
+</footer>
+
+<!-- AUTH MODAL -->
+<div id="authModal" class="modal-overlay">
+  <div class="modal-card">
+    <button class="modal-close" onclick="closeModal()">
+      <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 6L6 18M6 6l12 12"/></svg>
+    </button>
+    
+    <div class="flex flex-col items-center text-center mb-8">
+      <div class="logo-dot mb-4"></div>
+      <h2 class="serif text-4xl mb-2">Welcome back.</h2>
+      <p class="text-sm text-[var(--fg-muted)]">Pick up exactly where you left off.</p>
+    </div>
+
+    <div class="space-y-3 mb-6">
+      <button class="oauth-btn">
+        <svg width="18" height="18" viewBox="0 0 24 24"><path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/><path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/><path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l2.85-2.22.81-.62z"/><path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/></svg>
+        Continue with Google
+      </button>
+      <button class="oauth-btn">
+        <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><path d="M12 0C5.37 0 0 5.37 0 12c0 5.31 3.435 9.795 8.205 11.385.6.105.825-.255.825-.57 0-.285-.015-1.23-.015-2.235-3.015.555-3.795-.735-4.035-1.41-.135-.345-.72-1.41-1.23-1.695-.42-.225-1.02-.78-.015-.795.945-.015 1.62.87 1.845 1.23 1.08 1.815 2.805 1.305 3.495.99.105-.78.42-1.305.765-1.605-2.67-.3-5.46-1.335-5.46-5.925 0-1.305.465-2.385 1.23-3.225-.12-.3-.54-1.53.12-3.18 0 0 1.005-.315 3.3 1.23.96-.27 1.98-.405 3-.405s2.04.135 3 .405c2.295-1.56 3.3-1.23 3.3-1.23.66 1.65.24 2.88.12 3.18.765.84 1.23 1.905 1.23 3.225 0 4.605-2.805 5.625-5.475 5.925.435.375.81 1.095.81 2.22 0 1.605-.015 2.895-.015 3.3 0 .315.225.69.825.57A12.02 12.02 0 0024 12c0-6.63-5.37-12-12-12z"/></svg>
+        Continue with GitHub
+      </button>
+    </div>
+
+    <div class="divider-text">or sign in with email</div>
+
+    <form class="space-y-4 mt-6" onsubmit="event.preventDefault(); handleAuthSubmit();">
+      <div>
+        <label class="text-xs uppercase tracking-wider text-[var(--fg-muted)] mb-2 block">Email Address</label>
+        <input type="email" required class="auth-input" placeholder="you@example.com">
+      </div>
+      <div>
+        <div class="flex justify-between items-center mb-2">
+          <label class="text-xs uppercase tracking-wider text-[var(--fg-muted)]">Password</label>
+          <a href="#" class="text-xs text-[var(--accent-glow)] hover:underline">Forgot password?</a>
+        </div>
+        <input type="password" required class="auth-input" placeholder="••••••••••••">
+      </div>
+      <button type="submit" class="btn-primary w-full justify-center mt-2">
+        <span>Sign In</span>
+      </button>
+    </form>
+
+    <p class="text-center text-sm text-[var(--fg-muted)] mt-6">
+      New to ARIA? <a href="#" class="text-[var(--fg)] hover:text-[var(--accent-glow)] transition">Create an account</a>
+    </p>
+  </div>
+</div>
+
+<script>
+  // Scroll-triggered fade-up
+  const observer = new IntersectionObserver((entries) => {
+    entries.forEach(entry => {
+      if (entry.isIntersecting) entry.target.classList.add('visible');
+    });
+  }, { threshold: 0.12, rootMargin: '0px 0px -50px 0px' });
+  document.querySelectorAll('.fade-up').forEach(el => observer.observe(el));
+
+  // Feature card mouse tracking
+  document.querySelectorAll('.feature-card').forEach(card => {
+    card.addEventListener('mousemove', (e) => {
+      const rect = card.getBoundingClientRect();
+      const x = ((e.clientX - rect.left) / rect.width) * 100;
+      const y = ((e.clientY - rect.top) / rect.height) * 100;
+      card.style.setProperty('--mx', `${x}%`);
+      card.style.setProperty('--my', `${y}%`);
+    });
+  });
+
+  // Sphere parallax
+  const sphereWrap = document.getElementById('sphereWrap');
+  const sphereStage = document.querySelector('.sphere-stage');
+  if (sphereWrap && sphereStage) {
+    document.addEventListener('mousemove', (e) => {
+      const x = (e.clientX / window.innerWidth - 0.5) * 16;
+      const y = (e.clientY / window.innerHeight - 0.5) * 16;
+      sphereStage.style.transform = `translate(${x}px, ${y}px)`;
+    });
+  }
+
+  // ============ MODAL LOGIC ============
+  const authModal = document.getElementById('authModal');
+  
+  function openModal() {
+    authModal.classList.add('active');
+    document.body.classList.add('modal-open');
+  }
+  
+  function closeModal() {
+    authModal.classList.remove('active');
+    document.body.classList.remove('modal-open');
+  }
+  
+  authModal.addEventListener('click', (e) => {
+    if (e.target === authModal) closeModal();
+  });
+  
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape' && authModal.classList.contains('active')) {
+      closeModal();
+    }
+  });
+  
+  function handleAuthSubmit() {
+    alert('Connecting to backend...');
+    closeModal();
+  }
+
+  // Language Dropdown Logic
+  function selectLang(lang) {
+    document.getElementById('currentLang').innerText = lang;
+  }
+
+  // ============ TERMINAL LOGIC ============
+  const terminalBody = document.getElementById('terminalBody');
+  const terminalInput = document.getElementById('terminalInput');
+
+  function scrollToBottom() {
+    terminalBody.scrollTop = terminalBody.scrollHeight;
+  }
+
+  // ARIA's response engine
+  function getAriaResponse(input) {
+    const t = input.toLowerCase().trim();
+
+    if (/(figured out|figure it out|everyone else|behind|catch up)/.test(t))
+      return "they're performing the same act you are. the audience just can't see the backstage.";
+
+    if (/(imposter|fraud|fake|don't belong|dont belong)/.test(t))
+      return "an imposter pretends to know. what exactly are you pretending to know right now?";
+
+    if (/(who am i|lost myself|don't know myself|dont know myself|identity)/.test(t))
+      return "identity isn't a rock you find. it's a house you build. what room are we in right now?";
+
+    if (/(alone|lonely|no one|nobody|end up alone)/.test(t))
+      return "alone, or lonely? one is a room, the other is an echo. which one is speaking right now?";
+
+    if (/(happy|want to be happy|joy)/.test(t))
+      return "happy is a weather report. what kind of climate are you actually trying to build?";
+
+    if (/(enough|not enough|nothing is enough|never enough)/.test(t))
+      return "enough for whom? you're the one holding the measuring stick.";
+
+    if (/(tired|exhausted|burn ?out|burnt out|drained|no energy)/.test(t))
+      return "tired is a feeling, not a failure. what is your mind chewing on while you sleep?";
+
+    if (/(sad|depressed|down|empty|hopeless|numb)/.test(t))
+      return "since when — and what were you doing right before the color drained out?";
+
+    if (/(love|in love|relationship|breakup|girlfriend|boyfriend|partner|marriage|married)/.test(t))
+      return "what would change if you stopped performing the role you think they want?";
+
+    if (/(afraid|scared|fear|anxious|anxiety|worried|worry)/.test(t))
+      return "fear points at something specific. what is yours pointing at?";
+
+    if (/(fail|failing|failure|not good enough)/.test(t))
+      return "failing at what, exactly — and whose definition of failure are you using?";
+
+    if (/(lost|stuck|don't know|dont know|confused|clueless|no idea)/.test(t))
+      return "lost is a location, not a verdict. when did you first arrive there?";
+
+    if (/(should i)/.test(t))
+      return "before 'should' — what do you actually want?";
+
+    if (/(why am i|why do i)/.test(t))
+      return "you're asking the right question. but slower — what made you notice the pattern?";
+
+    if (/(hate)/.test(t))
+      return "hate is usually a cover for something more specific. what's underneath it?";
+
+    if (/(hello|hi|hey|sup|yo)\b/.test(t))
+      return "hi. what's on your mind that isn't small talk?";
+
+    if (/(who are you|what are you|are you ai|are you real|are you human)/.test(t))
+      return "someone who'll push back when you need it. now — what's the real question?";
+
+    if (/(help)/.test(t))
+      return "i'm not the kind of help that gives you the answer. i'm the kind that finds the question.";
+
+    if (/(thank)/.test(t))
+      return "don't thank me yet. we're not done.";
+
+    if (/\?$/.test(t))
+      return "i could answer that. or i could ask what made you think to ask.";
+
+    const defaults = [
+      "tell me more. not the conclusion — the part just before it.",
+      "say that again, but slower. what's the weight underneath it?",
+      "i'm not going to nod. why do you believe that?",
+      "what would change if you were wrong about this?",
+      "go deeper. that's the surface.",
+      "and what does that cost you?",
+      "whose voice is that — yours, or one you inherited?",
+      "what are you actually asking me — and what are you hoping i'll say?"
+    ];
+    return defaults[Math.floor(Math.random() * defaults.length)];
+  }
+
+  function escapeHtml(s) {
+    return s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  }
+
+  function addLine(className, prompt, text) {
+    const line = document.createElement('div');
+    line.className = `term-line ${className}`;
+    line.innerHTML = `<span class="term-prompt">${prompt}</span><span class="term-text">${escapeHtml(text)}</span>`;
+    terminalBody.appendChild(line);
+    scrollToBottom();
+  }
+
+  function addEmptyLine() {
+    const line = document.createElement('div');
+    line.className = 'term-line empty';
+    terminalBody.appendChild(line);
+  }
+
+  function handleSubmit() {
+    const text = terminalInput.value.trim();
+    if (!text) return;
+
+    addLine('user', 'you', text);
+    terminalInput.value = '';
+    addEmptyLine();
+
+    const thinkLine = document.createElement('div');
+    thinkLine.className = 'term-line aria thinking';
+    thinkLine.innerHTML = '<span class="term-prompt">aria</span><span class="term-text"><span class="thinking-dots"><span></span><span></span><span></span></span></span>';
+    terminalBody.appendChild(thinkLine);
+    scrollToBottom();
+
+    const response = getAriaResponse(text);
+    const delay = 800 + Math.random() * 900;
+
+    setTimeout(() => {
+      thinkLine.classList.remove('thinking');
+      thinkLine.innerHTML = `<span class="term-prompt">aria</span><span class="term-text">${escapeHtml(response)}</span>`;
+      addEmptyLine();
+      scrollToBottom();
+    }, delay);
+  }
+
+  terminalInput.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') handleSubmit();
+  });
+
+  document.querySelectorAll('.suggest-chip').forEach(chip => {
+    chip.addEventListener('click', () => {
+      terminalInput.value = chip.dataset.text;
+      handleSubmit();
+      terminalInput.focus();
+    });
+  });
+
+  let seconds = 14;
+  const timerEl = document.getElementById('sessionTimer');
+  setInterval(() => {
+    seconds++;
+    const h = String(Math.floor(seconds / 3600)).padStart(2, '0');
+    const m = String(Math.floor((seconds % 3600) / 60)).padStart(2, '0');
+    const s = String(seconds % 60).padStart(2, '0');
+    timerEl.textContent = `${h}:${m}:${s}`;
+  }, 1000);
+
+  document.querySelector('.terminal').addEventListener('click', () => {
+    terminalInput.focus();
+  });
+
+  const terminalSection = document.getElementById('terminal-section');
+  const terminalObserver = new IntersectionObserver((entries) => {
+    entries.forEach(entry => {
+      if (entry.isIntersecting) {
+        setTimeout(() => {
+          terminalInput.style.transition = 'box-shadow 0.6s ease';
+          terminalInput.style.boxShadow = '0 0 0 1px rgba(252, 211, 77, 0.3)';
+          setTimeout(() => { terminalInput.style.boxShadow = ''; }, 800);
+        }, 600);
+      }
+    });
+  }, { threshold: 0.4 });
+  terminalObserver.observe(terminalSection);
+
+  // Ambient particles
+  const particlesContainer = document.createElement('div');
+  particlesContainer.style.cssText = 'position:fixed;inset:0;pointer-events:none;z-index:1;';
+  document.body.appendChild(particlesContainer);
+
+  for (let i = 0; i < 25; i++) {
+    const p = document.createElement('div');
+    const size = Math.random() * 3 + 1;
+    p.style.cssText = `
+      position: absolute;
+      width: ${size}px;
+      height: ${size}px;
+      background: ${Math.random() > 0.5 ? '#fbbf24' : '#fcd34d'};
+      border-radius: 50%;
+      left: ${Math.random() * 100}%;
+      top: ${Math.random() * 100}%;
+      opacity: ${Math.random() * 0.3 + 0.1};
+      box-shadow: 0 0 ${size * 3}px currentColor;
+      animation: floatParticle ${15 + Math.random() * 20}s ease-in-out infinite;
+      animation-delay: -${Math.random() * 20}s;
+    `;
+    particlesContainer.appendChild(p);
+  }
+
+  const styleSheet = document.createElement('style');
+  styleSheet.textContent = `
+    @keyframes floatParticle {
+      0%, 100% { transform: translate(0, 0); }
+      33% { transform: translate(30px, -40px); }
+      66% { transform: translate(-20px, 30px); }
+    }
+  `;
+  document.head.appendChild(styleSheet);
+
+  document.querySelectorAll('.bubble').forEach(bubble => {
+    bubble.addEventListener('mouseenter', () => {
+      bubble.style.transform = 'scale(1.05)';
+      bubble.style.transition = 'transform 0.4s ease';
+    });
+    bubble.addEventListener('mouseleave', () => {
+      bubble.style.transform = '';
+    });
+  });
+</script>
+
+</body>
+</html>

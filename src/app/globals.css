@@ -1,0 +1,343 @@
+@import "tailwindcss";
+@import "tw-animate-css";
+
+@custom-variant dark (&:is(.dark *));
+
+@theme inline {
+  --color-background: var(--background);
+  --color-foreground: var(--foreground);
+  --font-sans: var(--font-grotesk);
+  --font-mono: var(--font-jetbrains);
+  --font-serif: var(--font-instrument);
+  --color-sidebar-ring: var(--sidebar-ring);
+  --color-sidebar-border: var(--sidebar-border);
+  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
+  --color-sidebar-accent: var(--sidebar-accent);
+  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
+  --color-sidebar-primary: var(--sidebar-primary);
+  --color-sidebar-foreground: var(--sidebar-foreground);
+  --color-sidebar: var(--sidebar);
+  --color-chart-5: var(--chart-5);
+  --color-chart-4: var(--chart-4);
+  --color-chart-3: var(--chart-3);
+  --color-chart-2: var(--chart-2);
+  --color-chart-1: var(--chart-1);
+  --color-ring: var(--ring);
+  --color-input: var(--input);
+  --color-border: var(--border);
+  --color-destructive: var(--destructive);
+  --color-accent-foreground: var(--accent-foreground);
+  --color-accent: var(--accent);
+  --color-muted-foreground: var(--muted-foreground);
+  --color-muted: var(--muted);
+  --color-secondary-foreground: var(--secondary-foreground);
+  --color-secondary: var(--secondary);
+  --color-primary-foreground: var(--primary-foreground);
+  --color-primary: var(--primary);
+  --color-popover-foreground: var(--popover-foreground);
+  --color-popover: var(--popover);
+  --color-card-foreground: var(--card-foreground);
+  --color-card: var(--card);
+  --radius-sm: calc(var(--radius) - 4px);
+  --radius-md: calc(var(--radius) - 2px);
+  --radius-lg: var(--radius);
+  --radius-xl: calc(var(--radius) + 4px);
+}
+
+/* ============================================
+   ARIA DESIGN SYSTEM
+   Warm amber on charcoal — "partner, not chatbot"
+   Preserved verbatim from the intern's prototype.
+   ============================================ */
+:root {
+  /* ARIA palette */
+  --aria-bg: #0c0a08;
+  --aria-bg-soft: #161210;
+  --aria-bg-panel: #080605;
+  --aria-fg: #f5f1eb;
+  --aria-fg-muted: #a89888;
+  --aria-fg-dim: #5a4d40;
+  --aria-accent: #f59e0b;
+  --aria-accent-glow: #fcd34d;
+  --aria-accent-deep: #92400e;
+  --aria-accent-bright: #fbbf24;
+  --aria-border: rgba(252, 211, 77, 0.12);
+  --aria-card: rgba(252, 211, 77, 0.03);
+
+  /* shadcn compatibility (mapped to ARIA palette) */
+  --radius: 0.625rem;
+  --background: #0c0a08;
+  --foreground: #f5f1eb;
+  --card: #161210;
+  --card-foreground: #f5f1eb;
+  --popover: #161210;
+  --popover-foreground: #f5f1eb;
+  --primary: #f59e0b;
+  --primary-foreground: #0c0a08;
+  --secondary: #161210;
+  --secondary-foreground: #f5f1eb;
+  --muted: #161210;
+  --muted-foreground: #a89888;
+  --accent: #1a1410;
+  --accent-foreground: #fcd34d;
+  --destructive: #ef4444;
+  --border: rgba(252, 211, 77, 0.12);
+  --input: rgba(252, 211, 77, 0.12);
+  --ring: #f59e0b;
+  --chart-1: #f59e0b;
+  --chart-2: #fcd34d;
+  --chart-3: #fbbf24;
+  --chart-4: #92400e;
+  --chart-5: #d97706;
+  --sidebar: #080605;
+  --sidebar-foreground: #f5f1eb;
+  --sidebar-primary: #f59e0b;
+  --sidebar-primary-foreground: #0c0a08;
+  --sidebar-accent: #161210;
+  --sidebar-accent-foreground: #fcd34d;
+  --sidebar-border: rgba(252, 211, 77, 0.12);
+  --sidebar-ring: #f59e0b;
+}
+
+@layer base {
+  * {
+    border-color: var(--aria-border);
+  }
+  html, body {
+    background: var(--aria-bg);
+    color: var(--aria-fg);
+    font-family: var(--font-grotesk), system-ui, sans-serif;
+    -webkit-font-smoothing: antialiased;
+  }
+  /* Scrollbars — ARIA themed */
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  ::-webkit-scrollbar-thumb { background: rgba(252, 211, 77, 0.15); border-radius: 3px; }
+  ::-webkit-scrollbar-thumb:hover { background: rgba(252, 211, 77, 0.3); }
+}
+
+/* ============================================
+   ARIA utilities & components
+   ============================================ */
+.font-serif-aria { font-family: var(--font-instrument), serif; font-weight: 400; }
+.font-mono-aria { font-family: var(--font-jetbrains), monospace; }
+
+/* Ambient grain overlay — the warm film texture */
+.aria-grain::before {
+  content: '';
+  position: fixed;
+  inset: 0;
+  background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='200' height='200'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='3'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.5'/%3E%3C/svg%3E");
+  opacity: 0.04;
+  pointer-events: none;
+  z-index: 100;
+  mix-blend-mode: overlay;
+}
+
+/* The ARIA logo dot — radial amber glow */
+.aria-logo-dot {
+  width: 24px;
+  height: 24px;
+  border-radius: 50%;
+  background: radial-gradient(circle at 30% 30%, var(--aria-accent-glow), var(--aria-accent-bright) 50%, var(--aria-accent-deep) 100%);
+  box-shadow: 0 0 15px rgba(245, 158, 11, 0.5);
+  flex-shrink: 0;
+}
+
+/* Message avatars */
+.aria-avatar-ai {
+  background: radial-gradient(circle at 30% 30%, var(--aria-accent-glow), var(--aria-accent-bright) 50%, var(--aria-accent-deep) 100%);
+  box-shadow: 0 0 12px rgba(245, 158, 11, 0.3);
+}
+
+/* Thinking dots */
+@keyframes aria-thinking {
+  0%, 60%, 100% { transform: translateY(0); opacity: 0.3; }
+  30% { transform: translateY(-5px); opacity: 1; }
+}
+.aria-thinking-dot {
+  width: 6px;
+  height: 6px;
+  background: var(--aria-accent-glow);
+  border-radius: 50%;
+  animation: aria-thinking 1.4s infinite;
+  display: inline-block;
+}
+
+/* Message appear */
+@keyframes aria-msg-appear {
+  from { opacity: 0; transform: translateY(10px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.aria-msg-enter { animation: aria-msg-appear 0.5s ease forwards; }
+
+/* Greeting gradient text */
+.aria-greeting-grad {
+  background: linear-gradient(135deg, #f59e0b 0%, #fcd34d 50%, #fbbf24 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  color: transparent;
+}
+
+/* Ambient glow blob */
+.aria-ambient-glow {
+  position: absolute;
+  border-radius: 50%;
+  filter: blur(120px);
+  pointer-events: none;
+  z-index: 0;
+}
+
+/* Streaming caret */
+@keyframes aria-caret-blink {
+  0%, 50% { opacity: 1; }
+  51%, 100% { opacity: 0; }
+}
+.aria-caret {
+  display: inline-block;
+  width: 2px;
+  height: 1em;
+  background: var(--aria-accent-glow);
+  margin-left: 2px;
+  vertical-align: text-bottom;
+  animation: aria-caret-blink 1s infinite;
+}
+
+/* Toggle switch (ARIA-styled) */
+.aria-toggle {
+  position: relative;
+  display: inline-block;
+  width: 44px;
+  height: 24px;
+  flex-shrink: 0;
+}
+.aria-toggle input { display: none; }
+.aria-toggle-slider {
+  position: absolute;
+  cursor: pointer;
+  inset: 0;
+  background: var(--aria-bg-panel);
+  border: 1px solid var(--aria-border);
+  border-radius: 24px;
+  transition: 0.3s;
+}
+.aria-toggle-slider::before {
+  position: absolute;
+  content: "";
+  height: 16px;
+  width: 16px;
+  left: 3px;
+  bottom: 3px;
+  background: var(--aria-fg-dim);
+  border-radius: 50%;
+  transition: 0.3s;
+}
+.aria-toggle input:checked + .aria-toggle-slider {
+  background: rgba(245, 158, 11, 0.2);
+  border-color: var(--aria-accent);
+}
+.aria-toggle input:checked + .aria-toggle-slider::before {
+  transform: translateX(20px);
+  background: var(--aria-accent-glow);
+}
+
+/* ============================================
+   Markdown rendering inside ARIA message bubbles
+   ============================================ */
+.aria-prose {
+  font-size: 15px;
+  line-height: 1.65;
+  color: var(--aria-fg);
+  word-break: break-word;
+}
+.aria-prose p { margin: 0 0 12px 0; }
+.aria-prose p:last-child { margin-bottom: 0; }
+.aria-prose h1, .aria-prose h2, .aria-prose h3, .aria-prose h4 {
+  font-family: var(--font-instrument), serif;
+  color: var(--aria-accent-glow);
+  margin: 18px 0 10px 0;
+  line-height: 1.25;
+}
+.aria-prose h1 { font-size: 26px; }
+.aria-prose h2 { font-size: 22px; }
+.aria-prose h3 { font-size: 18px; }
+.aria-prose h4 { font-size: 16px; }
+.aria-prose ul, .aria-prose ol { margin: 0 0 12px 0; padding-left: 22px; }
+.aria-prose li { margin: 4px 0; }
+.aria-prose ul li { list-style: disc; }
+.aria-prose ol li { list-style: decimal; }
+.aria-prose strong { color: var(--aria-accent-glow); font-weight: 600; }
+.aria-prose em { font-style: italic; color: var(--aria-fg); }
+.aria-prose a {
+  color: var(--aria-accent-glow);
+  text-decoration: underline;
+  text-underline-offset: 2px;
+}
+.aria-prose a:hover { color: var(--aria-accent-bright); }
+.aria-prose blockquote {
+  border-left: 2px solid var(--aria-accent);
+  padding: 4px 0 4px 14px;
+  margin: 12px 0;
+  color: var(--aria-fg-muted);
+  font-style: italic;
+}
+.aria-prose code {
+  font-family: var(--font-jetbrains), monospace;
+  background: rgba(245, 158, 11, 0.1);
+  color: var(--aria-accent-glow);
+  padding: 2px 6px;
+  border-radius: 4px;
+  font-size: 13px;
+}
+.aria-prose pre {
+  background: var(--aria-bg-panel);
+  border: 1px solid var(--aria-border);
+  border-radius: 12px;
+  padding: 14px 16px;
+  overflow-x: auto;
+  margin: 12px 0;
+  font-size: 13px;
+}
+.aria-prose pre code {
+  background: transparent;
+  color: var(--aria-fg);
+  padding: 0;
+}
+.aria-prose hr {
+  border: none;
+  border-top: 1px solid var(--aria-border);
+  margin: 16px 0;
+}
+.aria-prose table {
+  border-collapse: collapse;
+  width: 100%;
+  margin: 12px 0;
+  font-size: 13px;
+}
+.aria-prose th, .aria-prose td {
+  border: 1px solid var(--aria-border);
+  padding: 8px 10px;
+  text-align: left;
+}
+.aria-prose th {
+  background: rgba(245, 158, 11, 0.06);
+  color: var(--aria-accent-glow);
+  font-weight: 600;
+}
+
+/* Fade + slide in for panels */
+@keyframes aria-fade-slide {
+  from { opacity: 0; transform: translateY(8px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.aria-fade-slide { animation: aria-fade-slide 0.35s ease forwards; }
+
+/* Mood selector pulse on hover */
+.aria-mood-chip {
+  transition: transform 0.2s ease, background 0.2s ease, border-color 0.2s ease;
+}
+.aria-mood-chip:hover { transform: translateY(-2px) scale(1.05); }
+.aria-mood-chip.active {
+  border-color: var(--aria-accent);
+  background: rgba(245, 158, 11, 0.12);
+}
