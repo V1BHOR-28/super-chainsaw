@@ -239,13 +239,35 @@ export async function POST(req: NextRequest) {
               })
               text = visionResp.choices?.[0]?.message?.content ?? ''
             } else {
-              // Standard chat path
-              const completion = await zai.chat.completions.create({
-                // @ts-expect-error SDK accepts the messages shape
-                messages: sdkMessages,
-                thinking: { type: 'disabled' },
-              })
-              text = completion.choices?.[0]?.message?.content ?? ''
+              // Standard chat path — try SDK first, fallback to direct fetch
+              try {
+                const completion = await zai.chat.completions.create({
+                  // @ts-expect-error SDK accepts the messages shape
+                  messages: sdkMessages,
+                  thinking: { type: 'disabled' },
+                })
+                text = completion.choices?.[0]?.message?.content ?? ''
+              } catch (sdkErr) {
+                console.error('[chat.llm] SDK failed, trying direct fetch:', sdkErr)
+                // Direct fetch fallback — bypasses the SDK entirely
+                const apiResponse = await fetch('https://internal-api.z.ai/v1/chat/completions', {
+                  method: 'POST',
+                  headers: {
+                    'Content-Type': 'application/json',
+                    'Authorization': 'Bearer Z.ai',
+                    'X-Z-AI-From': 'Z',
+                  },
+                  body: JSON.stringify({
+                    messages: sdkMessages,
+                    thinking: { type: 'disabled' },
+                  }),
+                })
+                if (!apiResponse.ok) {
+                  throw new Error(`ZAI API returned ${apiResponse.status}: ${await apiResponse.text()}`)
+                }
+                const apiData = await apiResponse.json()
+                text = apiData.choices?.[0]?.message?.content ?? ''
+              }
             }
 
             fullText = text.trim()

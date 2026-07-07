@@ -5,9 +5,7 @@ import ZAI from 'z-ai-web-dev-sdk'
  * The z-ai-web-dev-sdk MUST be used server-side only.
  *
  * The SDK reads config from a .z-ai-config file (not env vars). On Vercel,
- * that file doesn't exist, so we inline the config here. This is safe because
- * the config is not a secret — it's the Z.ai public API endpoint + a session
- * token that gets refreshed automatically.
+ * that file doesn't exist, so we inline the config and construct ZAI directly.
  */
 
 // Inline config — works on Vercel (no file system needed)
@@ -24,11 +22,11 @@ let zaiInstance: any | null = null
 export async function getZAI() {
   if (!zaiInstance) {
     try {
-      // Try the file-based config first (works locally)
+      // Try file-based config first (works locally)
       zaiInstance = await ZAI.create()
     } catch {
       // Fallback: construct directly with inline config (works on Vercel)
-      zaiInstance = new (ZAI as any)(ZAI_CONFIG)
+      zaiInstance = new ZAI(ZAI_CONFIG)
     }
   }
   return zaiInstance
