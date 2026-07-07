@@ -29,7 +29,7 @@ export const metadata: Metadata = {
     "ARIA (Autonomous Reasoning Intelligent Assistant) is not a chatbot — she's a partner. She remembers the shape of your thinking, pushes back when ideas have holes, and stays with you across every conversation.",
   keywords: ["ARIA", "AI partner", "AI companion", "thinking partner", "LLM", "personal AI"],
   authors: [{ name: "ARIA" }],
-  icons: { icon: "/logo.svg" },
+  icons: { icon: "/aria-logo.png" },
   openGraph: {
     title: "ARIA — Your thinking partner",
     description: "Not a chatbot. A partner that remembers the shape of your thinking.",
