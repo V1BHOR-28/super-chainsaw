@@ -20,13 +20,19 @@ export function getResend(): Resend {
 /**
  * Send a 6-digit verification code to the user's email.
  * Uses Resend's default sender address (onboarding@resend.dev) on the free tier.
+ *
+ * Returns { success: boolean, error?: string } so the caller can show
+ * the actual error message to the user (instead of swallowing it).
  */
-export async function sendVerificationEmail(email: string, code: string): Promise<boolean> {
+export async function sendVerificationEmail(
+  email: string,
+  code: string
+): Promise<{ success: boolean; error?: string }> {
   try {
     const resend = getResend()
     const from = EMAIL_FROM
 
-    await resend.emails.send({
+    const { error } = await resend.emails.send({
       from,
       to: email,
       subject: 'Your ARIA verification code',
@@ -46,9 +52,22 @@ export async function sendVerificationEmail(email: string, code: string): Promis
       text: `Your ARIA verification code is: ${code}\n\nThis code expires in 15 minutes. If you didn't request this, you can safely ignore this email.`,
     })
 
-    return true
+    if (error) {
+      console.error('[email.send] Resend API error:', error)
+      // Resend returns a specific error when the recipient isn't allowed on free tier
+      if (error.message?.includes('restricted') || error.message?.includes('not verified')) {
+        return {
+          success: false,
+          error: 'Email delivery is restricted on the free plan. Only the account owner email can receive codes until a custom domain is verified in Resend.',
+        }
+      }
+      return { success: false, error: error.message || 'Email delivery failed' }
+    }
+
+    return { success: true }
   } catch (err) {
     console.error('[email.send]', err)
-    return false
+    const message = err instanceof Error ? err.message : 'Email delivery failed'
+    return { success: false, error: message }
   }
 }
