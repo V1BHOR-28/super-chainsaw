@@ -183,141 +183,130 @@ export async function POST(req: NextRequest) {
         const results: string[] = []
         const lowerContent = content.toLowerCase()
 
-        // === SPORTS DETECTION ===
-        // Check if the question is about sports/matches/scores
-        const sportsKeywords = ['match', 'matches', 'score', 'scores', 'game', 'games', 'fixture', 'fixtures',
-          'world cup', 'fifa', 'premier league', 'la liga', 'serie a', 'bundesliga', 'champions league',
-          'nba', 'nfl', 'nhl', 'mlb', 'cricket', 'ipl', 'tennis', 'atp', 'wta', 'ufc', 'boxing',
-          'football', 'soccer', 'basketball', 'baseball', 'hockey', 'today', 'tonight', 'result', 'results',
-          'kickoff', 'kick off', 'lineup', 'standings', 'table', 'tournament', 'playoff', 'playoffs']
-
+        // === ESPN for live sports scores (runs in parallel with Tavily) ===
+        const sportsKeywords = ['match', 'matches', 'score', 'scores', 'game', 'games', 'fixture',
+          'world cup', 'fifa', 'premier league', 'la liga', 'serie a', 'bundesliga',
+          'champions league', 'nba', 'nfl', 'nhl', 'cricket', 'ipl', 'tennis',
+          'football', 'soccer', 'basketball', 'happening today', 'playing today',
+          'result today', 'kickoff', 'standings', 'tournament']
         const isSportsQuery = sportsKeywords.some(kw => lowerContent.includes(kw))
 
-        if (isSportsQuery) {
-          // === ESPN API — live sports data ===
-          // Map common sports to ESPN league codes
-          const espnLeagues: Array<{ name: string; url: string }> = []
+        // === TAVILY SEARCH (primary — returns clean LLM-ready content) ===
+        try {
+          const tavilyResponse = await fetch('https://api.tavily.com/search', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              api_key: process.env.TAVILY_API_KEY,
+              query: content,
+              max_results: 5,
+              include_answer: true,
+            }),
+            signal: AbortSignal.timeout(10000),
+          })
 
+          if (tavilyResponse.ok) {
+            const tavilyData = await tavilyResponse.json()
+
+            // Tavily returns a direct answer (like a featured snippet)
+            if (tavilyData.answer) {
+              results.push(`Direct Answer: ${tavilyData.answer}`)
+            }
+
+            // Tavily returns clean results with content
+            if (tavilyData.results && Array.isArray(tavilyData.results)) {
+              for (const r of tavilyData.results.slice(0, 5)) {
+                if (r.title && r.content) {
+                  results.push(`${r.title}\n   ${r.content.slice(0, 300)}\n   URL: ${r.url || ''}`)
+                }
+              }
+            }
+          }
+        } catch (e) {
+          console.error('[chat.web_search] Tavily failed, trying Serper:', e)
+
+          // === SERPER FALLBACK (Google search results) ===
+          try {
+            const serperResponse = await fetch('https://google.serper.dev/search', {
+              method: 'POST',
+              headers: {
+                'X-API-KEY': process.env.SERPER_API_KEY || '',
+                'Content-Type': 'application/json',
+              },
+              body: JSON.stringify({ q: content, num: 6 }),
+              signal: AbortSignal.timeout(8000),
+            })
+
+            if (serperResponse.ok) {
+              const serperData = await serperResponse.json()
+
+              // Knowledge graph (if available)
+              if (serperData.knowledgeGraph?.description) {
+                results.push(`${serperData.knowledgeGraph.title || 'Knowledge Graph'}: ${serperData.knowledgeGraph.description.slice(0, 300)}`)
+              }
+
+              // Organic results
+              if (serperData.organic && Array.isArray(serperData.organic)) {
+                for (const r of serperData.organic.slice(0, 5)) {
+                  if (r.title) {
+                    results.push(`${r.title}\n   ${r.snippet || ''}\n   URL: ${r.link || ''}`)
+                  }
+                }
+              }
+            }
+          } catch (e2) {
+            console.error('[chat.web_search] Serper also failed:', e2)
+          }
+        }
+
+        // === ESPN live scores (parallel, for sports queries) ===
+        if (isSportsQuery) {
+          const espnLeagues: Array<{ name: string; url: string }> = []
           if (lowerContent.includes('fifa') || lowerContent.includes('world cup')) {
             espnLeagues.push({ name: 'FIFA World Cup', url: 'https://site.api.espn.com/apis/site/v2/sports/soccer/fifa.world/scoreboard' })
-          }
-          if (lowerContent.includes('premier league') || lowerContent.includes('epl')) {
-            espnLeagues.push({ name: 'Premier League', url: 'https://site.api.espn.com/apis/site/v2/sports/soccer/eng.1/scoreboard' })
-          }
-          if (lowerContent.includes('la liga')) {
-            espnLeagues.push({ name: 'La Liga', url: 'https://site.api.espn.com/apis/site/v2/sports/soccer/esp.1/scoreboard' })
-          }
-          if (lowerContent.includes('serie a')) {
-            espnLeagues.push({ name: 'Serie A', url: 'https://site.api.espn.com/apis/site/v2/sports/soccer/ita.1/scoreboard' })
-          }
-          if (lowerContent.includes('bundesliga')) {
-            espnLeagues.push({ name: 'Bundesliga', url: 'https://site.api.espn.com/apis/site/v2/sports/soccer/ger.1/scoreboard' })
-          }
-          if (lowerContent.includes('champions league') || lowerContent.includes('ucl')) {
-            espnLeagues.push({ name: 'Champions League', url: 'https://site.api.espn.com/apis/site/v2/sports/soccer/uefa.champions/scoreboard' })
           }
           if (lowerContent.includes('nba') || lowerContent.includes('basketball')) {
             espnLeagues.push({ name: 'NBA', url: 'https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard' })
           }
-          if (lowerContent.includes('nfl') || lowerContent.includes('american football')) {
+          if (lowerContent.includes('nfl')) {
             espnLeagues.push({ name: 'NFL', url: 'https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard' })
           }
-          if (lowerContent.includes('cricket') || lowerContent.includes('ipl')) {
-            espnLeagues.push({ name: 'Cricket', url: 'https://site.api.espn.com/apis/site/v2/sports/cricket/icc.scoreboard' })
+          if (lowerContent.includes('premier league') || lowerContent.includes('epl')) {
+            espnLeagues.push({ name: 'Premier League', url: 'https://site.api.espn.com/apis/site/v2/sports/soccer/eng.1/scoreboard' })
           }
-          if (lowerContent.includes('tennis') || lowerContent.includes('atp') || lowerContent.includes('wta')) {
-            espnLeagues.push({ name: 'Tennis', url: 'https://site.api.espn.com/apis/site/v2/sports/tennis/atp/scoreboard' })
-          }
-
-          // If no specific league detected, try FIFA + general soccer
-          if (espnLeagues.length === 0) {
-            espnLeagues.push(
-              { name: 'FIFA World Cup', url: 'https://site.api.espn.com/apis/site/v2/sports/soccer/fifa.world/scoreboard' },
-              { name: 'Soccer (General)', url: 'https://site.api.espn.com/apis/site/v2/sports/soccer/eng.1/scoreboard' }
-            )
+          if (espnLeagues.length === 0 && (lowerContent.includes('soccer') || lowerContent.includes('football') || lowerContent.includes('match'))) {
+            espnLeagues.push({ name: 'FIFA World Cup', url: 'https://site.api.espn.com/apis/site/v2/sports/soccer/fifa.world/scoreboard' })
           }
 
-          // Fetch all detected leagues in parallel
           const espnPromises = espnLeagues.map(async (league) => {
             try {
-              const response = await fetch(league.url, {
-                signal: AbortSignal.timeout(5000),
-              })
+              const response = await fetch(league.url, { signal: AbortSignal.timeout(5000) })
               if (!response.ok) return null
               const data = await response.json()
               const events = data.events || []
-
-              if (events.length === 0) {
-                return `${league.name}: No matches scheduled.`
-              }
-
+              if (events.length === 0) return `${league.name}: No matches scheduled today.`
               const matchLines = events.slice(0, 5).map((e: { name: string; status?: { type?: { description?: string } }; competitions?: Array<{ competitors?: Array<{ team?: { displayName?: string }; score?: string }> }> }) => {
-                const status = e.status?.type?.description || 'Unknown'
+                const status = e.status?.type?.description || 'Scheduled'
                 const home = e.competitions?.[0]?.competitors?.[0]?.team?.displayName || ''
                 const away = e.competitions?.[0]?.competitors?.[1]?.team?.displayName || ''
                 const homeScore = e.competitions?.[0]?.competitors?.[0]?.score || '0'
                 const awayScore = e.competitions?.[0]?.competitors?.[1]?.score || '0'
                 return `  ${home} ${homeScore} - ${awayScore} ${away} (${status})`
               })
-
-              return `${league.name}:\n${matchLines.join('\n')}`
-            } catch {
-              return null
-            }
+              return `${league.name} (ESPN Live):\n${matchLines.join('\n')}`
+            } catch { return null }
           })
 
           const espnResults = await Promise.all(espnPromises)
           for (const result of espnResults) {
-            if (result) {
-              results.push(`${results.length + 1}. ${result}`)
-            }
-          }
-        }
-
-        // === WIKIPEDIA (for non-sports or supplementary info) ===
-        // Always fetch Wikipedia in parallel — it adds context
-        const wikiSearchUrl = `https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(content)}&format=json&srlimit=3`
-        const wikiSearchResponse = await fetch(wikiSearchUrl, {
-          headers: { 'User-Agent': 'ARIA/1.0 (https://ariav2-seven.vercel.app)' },
-          signal: AbortSignal.timeout(8000),
-        })
-
-        if (wikiSearchResponse.ok) {
-          const wikiData = await wikiSearchResponse.json()
-          const wikiResults = wikiData?.query?.search || []
-
-          const summaryPromises = wikiResults.slice(0, 3).map(async (result: { title: string }) => {
-            const title = result.title
-            const summaryUrl = `https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(title.replace(/ /g, '_'))}`
-            try {
-              const summaryResponse = await fetch(summaryUrl, {
-                headers: { 'User-Agent': 'ARIA/1.0 (https://ariav2-seven.vercel.app)' },
-                signal: AbortSignal.timeout(5000),
-              })
-              if (summaryResponse.ok) {
-                const summaryData = await summaryResponse.json()
-                if (summaryData.extract) {
-                  return `${title} (Wikipedia)\n   ${summaryData.extract.slice(0, 400)}\n   URL: ${summaryData.content_urls?.desktop?.page || ''}`
-                }
-              }
-            } catch {
-              // skip
-            }
-            return null
-          })
-
-          const summaries = await Promise.all(summaryPromises)
-          for (const summary of summaries) {
-            if (summary) {
-              results.push(`${results.length + 1}. ${summary}`)
-            }
+            if (result) results.push(result)
           }
         }
 
         if (results.length > 0) {
           toolContext = `Web search results for "${content}":\n${results.join('\n\n')}`
         } else {
-          toolContext = `Web search returned no results for "${content}". Answer from your own knowledge and be honest about uncertainty.`
+          toolContext = `Web search returned no results for "${content}". Answer from your own knowledge.`
         }
       } catch (e) {
         console.error('[chat.web_search]', e)

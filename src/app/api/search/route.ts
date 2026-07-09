@@ -4,7 +4,7 @@ import { getAuthenticatedUserId } from '@/lib/user'
 
 /**
  * GET /api/search?q=<query>
- * Uses Wikipedia API — free, no key, works on Vercel.
+ * Uses Tavily (primary) → Serper (fallback) for real web search.
  */
 export async function GET(req: NextRequest) {
   try {
@@ -15,46 +15,56 @@ export async function GET(req: NextRequest) {
     const q = searchParams.get('q')?.trim()
     if (!q) return NextResponse.json({ error: 'q required' }, { status: 400 })
 
-    // Wikipedia search
-    const wikiSearchUrl = `https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(q)}&format=json&srlimit=5`
-    const wikiResponse = await fetch(wikiSearchUrl, {
-      headers: { 'User-Agent': 'ARIA/1.0 (https://ariav2-seven.vercel.app)' },
+    // Try Tavily first
+    try {
+      const tavilyResponse = await fetch('https://api.tavily.com/search', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          api_key: process.env.TAVILY_API_KEY,
+          query: q,
+          max_results: 5,
+          include_answer: true,
+        }),
+        signal: AbortSignal.timeout(10000),
+      })
+
+      if (tavilyResponse.ok) {
+        const data = await tavilyResponse.json()
+        const results = (data.results || []).map((r: { title: string; content: string; url: string }) => ({
+          name: r.title,
+          snippet: r.content?.slice(0, 200) || '',
+          url: r.url,
+          host_name: (() => { try { return new URL(r.url).hostname } catch { return '' } })(),
+        }))
+        return NextResponse.json({ query: q, results })
+      }
+    } catch {
+      // Fall through to Serper
+    }
+
+    // Fallback: Serper
+    const serperResponse = await fetch('https://google.serper.dev/search', {
+      method: 'POST',
+      headers: {
+        'X-API-KEY': process.env.SERPER_API_KEY || '',
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify({ q, num: 5 }),
       signal: AbortSignal.timeout(8000),
     })
 
-    if (!wikiResponse.ok) {
+    if (!serperResponse.ok) {
       return NextResponse.json({ error: 'Web search failed' }, { status: 502 })
     }
 
-    const wikiData = await wikiResponse.json()
-    const wikiResults = wikiData?.query?.search || []
-
-    // Fetch summaries in parallel
-    const summaryPromises = wikiResults.slice(0, 5).map(async (result: { title: string }) => {
-      const title = result.title
-      const summaryUrl = `https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(title.replace(/ /g, '_'))}`
-      try {
-        const summaryResponse = await fetch(summaryUrl, {
-          headers: { 'User-Agent': 'ARIA/1.0 (https://ariav2-seven.vercel.app)' },
-          signal: AbortSignal.timeout(5000),
-        })
-        if (summaryResponse.ok) {
-          const summaryData = await summaryResponse.json()
-          return {
-            url: summaryData.content_urls?.desktop?.page || `https://en.wikipedia.org/wiki/${encodeURIComponent(title)}`,
-            name: title,
-            snippet: summaryData.extract || '',
-            host_name: 'en.wikipedia.org',
-          }
-        }
-      } catch {
-        // skip
-      }
-      return null
-    })
-
-    const summaries = await Promise.all(summaryPromises)
-    const results = summaries.filter((s): s is { url: string; name: string; snippet: string; host_name: string } => s !== null)
+    const serperData = await serperResponse.json()
+    const results = (serperData.organic || []).map((r: { title: string; snippet: string; link: string }) => ({
+      name: r.title,
+      snippet: r.snippet || '',
+      url: r.link,
+      host_name: (() => { try { return new URL(r.link).hostname } catch { return '' } })(),
+    }))
 
     return NextResponse.json({ query: q, results })
   } catch (err) {
