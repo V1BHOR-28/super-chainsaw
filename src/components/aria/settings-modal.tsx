@@ -649,14 +649,14 @@ export function SettingsModal() {
 /* ---------- Model Selector ---------- */
 
 const AI_MODELS = [
-  { id: 'anthropic/claude-3.5-sonnet', name: 'Claude 3.5 Sonnet', desc: 'Most natural, best for conversation', badge: 'Recommended' },
-  { id: 'anthropic/claude-3.5-haiku', name: 'Claude 3.5 Haiku', desc: 'Fast, natural, great value', badge: 'Fast' },
-  { id: 'openai/gpt-4o-mini', name: 'GPT-4o Mini', desc: 'Reliable, great reasoning', badge: 'Popular' },
-  { id: 'deepseek/deepseek-chat', name: 'DeepSeek V3', desc: 'Fast, capable, great value', badge: 'Default' },
-  { id: 'deepseek/deepseek-r1', name: 'DeepSeek R1', desc: 'Reasoning model, opinionated', badge: 'Smart' },
-  { id: 'qwen/qwen-2.5-72b-instruct', name: 'Qwen 2.5 72B', desc: 'Excellent reasoning, multilingual', badge: 'Capable' },
-  { id: 'amazon/nova-lite-v1', name: 'Amazon Nova Lite', desc: 'Fast, cost-effective', badge: 'Budget' },
-  { id: 'meta-llama/llama-3.3-70b-instruct', name: 'Llama 3.3 70B', desc: 'Open-source, privacy-focused', badge: 'Open Source' },
+  { id: 'deepseek/deepseek-chat', name: 'DeepSeek V3', desc: 'Fast, capable, free', badge: 'Default' },
+  { id: 'openai/gpt-4o-mini', name: 'GPT-4o Mini', desc: 'Reliable, free tier', badge: 'Popular' },
+  { id: 'qwen/qwen-2.5-72b-instruct', name: 'Qwen 2.5 72B', desc: 'Excellent reasoning, free', badge: 'Capable' },
+  { id: 'amazon/nova-lite-v1', name: 'Amazon Nova Lite', desc: 'Fast, free tier', badge: 'Fast' },
+  { id: 'meta-llama/llama-3.3-70b-instruct', name: 'Llama 3.3 70B', desc: 'Open-source, free', badge: 'Open Source' },
+  { id: 'anthropic/claude-3.5-sonnet', name: 'Claude 3.5 Sonnet', desc: 'Most natural (needs OpenRouter credits)', badge: 'Premium' },
+  { id: 'anthropic/claude-3.5-haiku', name: 'Claude 3.5 Haiku', desc: 'Fast + natural (needs credits)', badge: 'Premium' },
+  { id: 'deepseek/deepseek-r1', name: 'DeepSeek R1', desc: 'Reasoning model (needs credits)', badge: 'Premium' },
 ] as const
 
 function ModelSelector({ value, onChange }: { value: string; onChange: (v: string) => void }) {
