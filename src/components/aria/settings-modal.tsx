@@ -649,11 +649,14 @@ export function SettingsModal() {
 /* ---------- Model Selector ---------- */
 
 const AI_MODELS = [
+  { id: 'anthropic/claude-3.5-sonnet', name: 'Claude 3.5 Sonnet', desc: 'Most natural, best for conversation', badge: 'Recommended' },
+  { id: 'anthropic/claude-3.5-haiku', name: 'Claude 3.5 Haiku', desc: 'Fast, natural, great value', badge: 'Fast' },
+  { id: 'openai/gpt-4o-mini', name: 'GPT-4o Mini', desc: 'Reliable, great reasoning', badge: 'Popular' },
   { id: 'deepseek/deepseek-chat', name: 'DeepSeek V3', desc: 'Fast, capable, great value', badge: 'Default' },
-  { id: 'deepseek/deepseek-r1', name: 'DeepSeek R1', desc: 'Reasoning model, more natural and opinionated', badge: 'Recommended' },
+  { id: 'deepseek/deepseek-r1', name: 'DeepSeek R1', desc: 'Reasoning model, opinionated', badge: 'Smart' },
   { id: 'qwen/qwen-2.5-72b-instruct', name: 'Qwen 2.5 72B', desc: 'Excellent reasoning, multilingual', badge: 'Capable' },
-  { id: 'amazon/nova-lite-v1', name: 'Amazon Nova Lite', desc: 'Fast, cost-effective, reliable', badge: 'Fast' },
-  { id: 'meta-llama/llama-3.3-70b-instruct', name: 'Llama 3.3 70B', desc: 'Open-source, community-driven', badge: 'Open Source' },
+  { id: 'amazon/nova-lite-v1', name: 'Amazon Nova Lite', desc: 'Fast, cost-effective', badge: 'Budget' },
+  { id: 'meta-llama/llama-3.3-70b-instruct', name: 'Llama 3.3 70B', desc: 'Open-source, privacy-focused', badge: 'Open Source' },
 ] as const
 
 function ModelSelector({ value, onChange }: { value: string; onChange: (v: string) => void }) {

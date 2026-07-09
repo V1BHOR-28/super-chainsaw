@@ -60,16 +60,34 @@ export function embeddingToPgVector(embedding: number[]): string {
  */
 export const AVAILABLE_MODELS = [
   {
+    id: 'anthropic/claude-3.5-sonnet',
+    name: 'Claude 3.5 Sonnet',
+    description: 'Most natural, best for conversation.',
+    badge: 'Recommended',
+  },
+  {
+    id: 'anthropic/claude-3.5-haiku',
+    name: 'Claude 3.5 Haiku',
+    description: 'Fast, natural, great value.',
+    badge: 'Fast',
+  },
+  {
+    id: 'openai/gpt-4o-mini',
+    name: 'GPT-4o Mini',
+    description: 'Reliable, great reasoning.',
+    badge: 'Popular',
+  },
+  {
     id: 'deepseek/deepseek-chat',
     name: 'DeepSeek V3',
-    description: 'Fast, capable, great value. ARIA\'s default.',
+    description: 'Fast, capable, great value.',
     badge: 'Default',
   },
   {
     id: 'deepseek/deepseek-r1',
     name: 'DeepSeek R1',
-    description: 'Reasoning model, more natural and opinionated.',
-    badge: 'Recommended',
+    description: 'Reasoning model, opinionated.',
+    badge: 'Smart',
   },
   {
     id: 'qwen/qwen-2.5-72b-instruct',
@@ -80,13 +98,13 @@ export const AVAILABLE_MODELS = [
   {
     id: 'amazon/nova-lite-v1',
     name: 'Amazon Nova Lite',
-    description: 'Fast, cost-effective, reliable.',
-    badge: 'Fast',
+    description: 'Fast, cost-effective.',
+    badge: 'Budget',
   },
   {
     id: 'meta-llama/llama-3.3-70b-instruct',
     name: 'Llama 3.3 70B',
-    description: 'Open-source, community-driven.',
+    description: 'Open-source, privacy-focused.',
     badge: 'Open Source',
   },
 ] as const
