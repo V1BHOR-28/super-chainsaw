@@ -1,6 +1,6 @@
 'use client'
 
-import { useState, useRef } from 'react'
+import { useState } from 'react'
 import { Volume2, Square, Globe, Image as ImageIcon, Eye, Copy, Check, Brain, Heart } from 'lucide-react'
 import { Markdown } from './markdown'
 import type { ChatMessage } from '@/lib/types'
@@ -21,36 +21,42 @@ export function MessageBubble({ message }: { message: ChatMessage }) {
   const settings = useAriaStore((s) => s.settings)
   const [playing, setPlaying] = useState(false)
   const [copied, setCopied] = useState(false)
-  const audioRef = useRef<HTMLAudioElement | null>(null)
 
-  const speak = async () => {
+  const speak = () => {
     if (playing) {
-      audioRef.current?.pause()
+      window.speechSynthesis.cancel()
       setPlaying(false)
       return
     }
-    try {
-      const res = await fetch('/api/tts', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ text: message.content }),
-      })
-      if (!res.ok) throw new Error('TTS failed')
-      const blob = await res.blob()
-      const url = URL.createObjectURL(blob)
-      if (audioRef.current) {
-        audioRef.current.pause()
-      }
-      audioRef.current = new Audio(url)
-      audioRef.current.onended = () => {
-        setPlaying(false)
-        URL.revokeObjectURL(url)
-      }
-      await audioRef.current.play()
-      setPlaying(true)
-    } catch (err) {
-      console.error('[tts]', err)
+
+    // Strip markdown for cleaner speech
+    const cleanText = message.content
+      .replace(/```[\s\S]*?```/g, ' (code block) ')
+      .replace(/`([^`]+)`/g, '$1')
+      .replace(/!\[[^\]]*\]\([^)]*\)/g, '')
+      .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
+      .replace(/[#*_>~]/g, '')
+      .replace(/\n+/g, '. ')
+      .slice(0, 1000)
+
+    const utterance = new SpeechSynthesisUtterance(cleanText)
+    utterance.rate = 1.0
+    utterance.pitch = 1.0
+
+    // Try to use a female-sounding voice if available
+    const voices = window.speechSynthesis.getVoices()
+    const preferredVoice = voices.find(v =>
+      v.name.includes('Female') || v.name.includes('Samantha') || v.name.includes('Google US English')
+    )
+    if (preferredVoice) {
+      utterance.voice = preferredVoice
     }
+
+    utterance.onend = () => setPlaying(false)
+    utterance.onerror = () => setPlaying(false)
+
+    window.speechSynthesis.speak(utterance)
+    setPlaying(true)
   }
 
   const copyMessage = async () => {

@@ -2,7 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 export const runtime = "nodejs"
 import { db } from '@/lib/db'
 import { getAuthenticatedUserId } from '@/lib/user'
-import { getZAI, buildAriaSystemPrompt } from '@/lib/aria'
+import { buildAriaSystemPrompt } from '@/lib/aria'
 import { recordUsage, estimateTokens, hasHitDailyLimit } from '@/lib/usage'
 
 /** Hard cap on user message length — protects against abuse / accidental huge pastes. */
@@ -114,71 +114,60 @@ export async function POST(req: NextRequest) {
     // === TOOL EXECUTION (pre-LLM) ===
     let toolContext: string | undefined
     let generatedImage: { url: string; prompt: string } | undefined
-    const zai = await getZAI()
 
     if (tool === 'web_search') {
       try {
-        // Use Z.ai functions API directly — endpoint is /functions/invoke
-        const searchResponse = await fetch('https://internal-api.z.ai/v1/functions/invoke', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': 'Bearer Z.ai',
-            'X-Z-AI-From': 'Z',
-            'X-Chat-Id': 'chat-7244346a-87ee-4777-8cde-264c66a8197f',
-            'X-User-Id': '4965a45e-1056-486a-be27-3a5cb0b94c86',
-            'X-Token': 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjoiNDk2NWE0NWUtMTA1Ni00ODZhLWJlMjctM2E1Y2IwYjk0Yzg2IiwiY2hhdF9pZCI6ImNoYXQtNzI0NDM0NmEtODdlZS00Nzc3LThjZGUtMjY0YzY2YTgxOTdmIiwicGxhdGZvcm0iOiJ6YWkifQ.dVP9ylHjuppoKu1FsF79jBedwQg0z5IV4ijd6eeEE40',
-          },
-          body: JSON.stringify({ function_name: 'web_search', arguments: { query: content, num: 6 } }),
-        })
-
+        // DuckDuckGo Instant Answer API — free, no key, works on Vercel
+        const searchUrl = `https://api.duckduckgo.com/?q=${encodeURIComponent(content)}&format=json&no_html=1&skip_disambig=1`
+        const searchResponse = await fetch(searchUrl)
         if (searchResponse.ok) {
           const searchData = await searchResponse.json()
-          // API returns { result: [...] } format
-          const results = searchData.result || searchData.results || searchData.data || (Array.isArray(searchData) ? searchData : [])
-          if (Array.isArray(results) && results.length > 0) {
-            toolContext =
-              `Web search results for "${content}":\n` +
-              results
-                .map((r: { name?: string; title?: string; snippet?: string; url?: string; host_name?: string; date?: string }, i: number) =>
-                  `${i + 1}. ${r.name || r.title || 'Untitled'}\n   ${r.snippet || ''}\n   URL: ${r.url || ''}\n   Source: ${r.host_name || ''}${r.date ? ` · ${r.date}` : ''}`)
-                .join('\n\n')
+          const results: string[] = []
+
+          // DuckDuckGo returns an AbstractText (main answer) + RelatedTopics
+          if (searchData.AbstractText) {
+            results.push(`1. ${searchData.Heading || 'Answer'}: ${searchData.AbstractText}\n   Source: ${searchData.AbstractSource || 'DuckDuckGo'}\n   URL: ${searchData.AbstractURL || ''}`)
+          }
+
+          // Parse related topics (can be nested)
+          if (searchData.RelatedTopics && Array.isArray(searchData.RelatedTopics)) {
+            let topicNum = results.length + 1
+            for (const topic of searchData.RelatedTopics.slice(0, 5)) {
+              if (topic.Text && topic.FirstURL) {
+                results.push(`${topicNum}. ${topic.Text}\n   URL: ${topic.FirstURL}`)
+                topicNum++
+              } else if (topic.Topics && Array.isArray(topic.Topics)) {
+                for (const subTopic of topic.Topics.slice(0, 2)) {
+                  if (subTopic.Text && subTopic.FirstURL) {
+                    results.push(`${topicNum}. ${subTopic.Text}\n   URL: ${subTopic.FirstURL}`)
+                    topicNum++
+                  }
+                }
+              }
+            }
+          }
+
+          if (results.length > 0) {
+            toolContext = `Web search results for "${content}":\n${results.join('\n\n')}`
           } else {
-            toolContext = 'Web search returned no results. Answer from your own knowledge.'
+            toolContext = `Web search returned no instant answers for "${content}". Answer from your own knowledge.`
           }
         } else {
-          console.error('[chat.web_search] API returned:', searchResponse.status)
-          toolContext = 'Web search was attempted but failed. Answer from your own knowledge and be honest about uncertainty.'
+          toolContext = 'Web search was attempted but failed. Answer from your own knowledge.'
         }
       } catch (e) {
         console.error('[chat.web_search]', e)
-        toolContext = 'Web search was attempted but failed. Answer from your own knowledge and be honest about uncertainty.'
+        toolContext = 'Web search was attempted but failed. Answer from your own knowledge.'
       }
     }
 
     if (tool === 'image_generation') {
       try {
-        // Use Z.ai image generation API directly
-        const imgResponse = await fetch('https://internal-api.z.ai/v1/images/generations', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'Authorization': 'Bearer Z.ai',
-            'X-Z-AI-From': 'Z',
-            'X-Chat-Id': 'chat-7244346a-87ee-4777-8cde-264c66a8197f',
-            'X-User-Id': '4965a45e-1056-486a-be27-3a5cb0b94c86',
-            'X-Token': 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjoiNDk2NWE0NWUtMTA1Ni00ODZhLWJlMjctM2E1Y2IwYjk0Yzg2IiwiY2hhdF9pZCI6ImNoYXQtNzI0NDM0NmEtODdlZS00Nzc3LThjZGUtMjY0YzY2YTgxOTdmIiwicGxhdGZvcm0iOiJ6YWkifQ.dVP9ylHjuppoKu1FsF79jBedwQg0z5IV4ijd6eeEE40',
-          },
-          body: JSON.stringify({ prompt: content, size: '1024x1024' }),
-        })
-
-        if (imgResponse.ok) {
-          const imgData = await imgResponse.json()
-          const base64 = imgData.data?.[0]?.base64
-          if (base64) {
-            generatedImage = { url: `data:image/png;base64,${base64}`, prompt: content }
-          }
-        }
+        // Pollinations.ai — free, no API key, works on Vercel
+        // Returns a direct image URL (not base64) — we pass it to the frontend
+        const encodedPrompt = encodeURIComponent(content.slice(0, 500))
+        const imageUrl = `https://image.pollinations.ai/prompt/${encodedPrompt}?width=1024&height=1024&nologo=true`
+        generatedImage = { url: imageUrl, prompt: content }
       } catch (e) {
         console.error('[chat.image_gen]', e)
       }
@@ -260,10 +249,8 @@ export async function POST(req: NextRequest) {
             send({ type: 'image', url: generatedImage.url, prompt: generatedImage.prompt })
           }
 
-          // The z-ai-web-dev-sdk does not return an async iterator for `stream: true`
-          // (its `create` resolves to Promise<any> with the full payload). So we call
-          // it non-streaming and stream the result to the client word-by-word ourselves.
-          // This gives the same typewriter UX regardless of model / vision path.
+          // Call OpenRouter API non-streaming, then stream the result word-by-word
+          // to the client for the typewriter effect.
           let fullText = ''
 
           try {

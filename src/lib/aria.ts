@@ -1,48 +1,9 @@
-import ZAI from 'z-ai-web-dev-sdk'
-
 /**
- * ARIA's central AI client.
- * The z-ai-web-dev-sdk MUST be used server-side only.
+ * ARIA's identity prompt builder.
  *
- * The SDK reads config from a .z-ai-config file (not env vars). On Vercel,
- * that file doesn't exist, so we inline the config and construct ZAI directly.
+ * The ZAI SDK has been fully removed. ARIA's chat is powered by OpenRouter.
+ * This file now ONLY contains the system prompt builder — no Z.ai dependencies.
  */
-
-// Inline config — works on Vercel (no file system needed)
-const ZAI_CONFIG = {
-  baseUrl: 'https://internal-api.z.ai/v1',
-  apiKey: 'Z.ai',
-  chatId: 'chat-7244346a-87ee-4777-8cde-264c66a8197f',
-  token: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjoiNDk2NWE0NWUtMTA1Ni00ODZhLWJlMjctM2E1Y2IwYjk0Yzg2IiwiY2hhdF9pZCI6ImNoYXQtNzI0NDM0NmEtODdlZS00Nzc3LThjZGUtMjY0YzY2YTgxOTdmIiwicGxhdGZvcm0iOiJ6YWkifQ.dVP9ylHjuppoKu1FsF79jBedwQg0z5IV4ijd6eeEE40',
-  userId: '4965a45e-1056-486a-be27-3a5cb0b94c86',
-}
-
-let zaiInstance: any | null = null
-
-export async function getZAI() {
-  if (!zaiInstance) {
-    try {
-      // Try file-based config first (works locally)
-      zaiInstance = await ZAI.create()
-    } catch {
-      // Fallback: construct directly with inline config (works on Vercel)
-      try {
-        zaiInstance = new ZAI(ZAI_CONFIG)
-      } catch {
-        // If even the constructor fails, return a mock object so the
-        // chat route can still work via direct fetch (the primary path).
-        // web_search and image_gen won't work, but chat will.
-        zaiInstance = {
-          chat: { completions: { create: async () => ({ choices: [] }) } },
-          functions: { invoke: async () => [] },
-          images: { generations: { create: async () => ({ data: [] }) } },
-          audio: { tts: { create: async () => new Response() } },
-        }
-      }
-    }
-  }
-  return zaiInstance
-}
 
 /**
  * ARIA's identity prompt — preserved and tightened from the intern's prototype.
@@ -90,10 +51,6 @@ export function buildAriaSystemPrompt(opts: {
 
   const moodBlock = recentMood
     ? (() => {
-        // Per-mood voice profile. The mood informs ARIA's TONE for every message,
-        // but the mood-based OPENER only applies to short casual greetings.
-        // For substantive messages, ARIA responds to the CONTENT first — the mood
-        // colors her tone, it doesn't override what the user actually said.
         const voices: Record<string, { tone: string; opener: string; rules: string }> = {
           great: {
             tone: 'warm, curious, a little bright — match their good energy',
