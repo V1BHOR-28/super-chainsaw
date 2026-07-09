@@ -4,8 +4,7 @@ import { getAuthenticatedUserId } from '@/lib/user'
 
 /**
  * GET /api/search?q=<query>
- * Uses DuckDuckGo HTML scraping — returns real search results.
- * Free, no key, works on Vercel.
+ * Uses Wikipedia API — free, no key, works on Vercel.
  */
 export async function GET(req: NextRequest) {
   try {
@@ -16,44 +15,46 @@ export async function GET(req: NextRequest) {
     const q = searchParams.get('q')?.trim()
     if (!q) return NextResponse.json({ error: 'q required' }, { status: 400 })
 
-    const searchUrl = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(q)}`
-    const response = await fetch(searchUrl, {
-      headers: {
-        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-        'Accept': 'text/html',
-      },
+    // Wikipedia search
+    const wikiSearchUrl = `https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(q)}&format=json&srlimit=5`
+    const wikiResponse = await fetch(wikiSearchUrl, {
+      headers: { 'User-Agent': 'ARIA/1.0 (https://ariav2-seven.vercel.app)' },
+      signal: AbortSignal.timeout(8000),
     })
 
-    if (!response.ok) {
+    if (!wikiResponse.ok) {
       return NextResponse.json({ error: 'Web search failed' }, { status: 502 })
     }
 
-    const html = await response.text()
+    const wikiData = await wikiResponse.json()
+    const wikiResults = wikiData?.query?.search || []
 
-    // Parse results from DuckDuckGo HTML
-    const titleMatches = [...html.matchAll(/class="result__a"[^>]*>([^<]*)/g)]
-    const urlMatches = [...html.matchAll(/class="result__url"[^>]*href="\/\/duckduckgo\.com\/l\/\?uddg=([^&"]*)/g)]
-    const snippetMatches = [...html.matchAll(/class="result__snippet">([^<]*)/g)]
-
-    const results: Array<{ url: string; name: string; snippet: string; host_name: string }> = []
-    const count = Math.min(titleMatches.length, 8)
-
-    for (let i = 0; i < count; i++) {
-      const title = titleMatches[i]?.[1]?.replace(/&#x27;/g, "'").replace(/&amp;/g, '&').trim() || ''
-      const urlEncoded = urlMatches[i]?.[1] || ''
-      const url = decodeURIComponent(urlEncoded)
-      const snippet = snippetMatches[i]?.[1]?.replace(/&#x27;/g, "'").replace(/&amp;/g, '&').trim() || ''
-
-      if (title && url) {
-        let hostName = ''
-        try {
-          hostName = new URL(url).hostname
-        } catch {
-          hostName = ''
+    // Fetch summaries in parallel
+    const summaryPromises = wikiResults.slice(0, 5).map(async (result: { title: string }) => {
+      const title = result.title
+      const summaryUrl = `https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(title.replace(/ /g, '_'))}`
+      try {
+        const summaryResponse = await fetch(summaryUrl, {
+          headers: { 'User-Agent': 'ARIA/1.0 (https://ariav2-seven.vercel.app)' },
+          signal: AbortSignal.timeout(5000),
+        })
+        if (summaryResponse.ok) {
+          const summaryData = await summaryResponse.json()
+          return {
+            url: summaryData.content_urls?.desktop?.page || `https://en.wikipedia.org/wiki/${encodeURIComponent(title)}`,
+            name: title,
+            snippet: summaryData.extract || '',
+            host_name: 'en.wikipedia.org',
+          }
         }
-        results.push({ url, name: title, snippet, host_name: hostName })
+      } catch {
+        // skip
       }
-    }
+      return null
+    })
+
+    const summaries = await Promise.all(summaryPromises)
+    const results = summaries.filter((s): s is { url: string; name: string; snippet: string; host_name: string } => s !== null)
 
     return NextResponse.json({ query: q, results })
   } catch (err) {

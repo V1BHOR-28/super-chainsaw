@@ -117,49 +117,46 @@ export async function POST(req: NextRequest) {
 
     if (tool === 'web_search') {
       try {
-        // Hybrid search: Wikipedia API + DuckDuckGo Instant Answer API
-        // Both are free, no key needed, and work from Vercel's servers.
+        // Wikipedia API search — fast, reliable, works from Vercel's datacenter IPs.
+        // We make the search + summaries in PARALLEL to stay under Vercel's timeout.
         const results: string[] = []
 
-        // 1. Wikipedia search (reliable, always works from datacenter IPs)
+        // Step 1: Search Wikipedia for relevant articles
         const wikiSearchUrl = `https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(content)}&format=json&srlimit=3`
         const wikiSearchResponse = await fetch(wikiSearchUrl, {
           headers: { 'User-Agent': 'ARIA/1.0 (https://ariav2-seven.vercel.app)' },
+          signal: AbortSignal.timeout(8000), // 8 second timeout
         })
+
         if (wikiSearchResponse.ok) {
           const wikiData = await wikiSearchResponse.json()
           const wikiResults = wikiData?.query?.search || []
-          for (const result of wikiResults.slice(0, 3)) {
-            // Get the full summary for each Wikipedia article
+
+          // Step 2: Fetch summaries for ALL results IN PARALLEL (not sequential)
+          const summaryPromises = wikiResults.slice(0, 3).map(async (result: { title: string }) => {
             const title = result.title
             const summaryUrl = `https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(title.replace(/ /g, '_'))}`
-            const summaryResponse = await fetch(summaryUrl, {
-              headers: { 'User-Agent': 'ARIA/1.0 (https://ariav2-seven.vercel.app)' },
-            })
-            if (summaryResponse.ok) {
-              const summaryData = await summaryResponse.json()
-              if (summaryData.extract) {
-                results.push(`${results.length + 1}. ${title} (Wikipedia)\n   ${summaryData.extract.slice(0, 300)}\n   URL: ${summaryData.content_urls?.desktop?.page || ''}`)
+            try {
+              const summaryResponse = await fetch(summaryUrl, {
+                headers: { 'User-Agent': 'ARIA/1.0 (https://ariav2-seven.vercel.app)' },
+                signal: AbortSignal.timeout(5000),
+              })
+              if (summaryResponse.ok) {
+                const summaryData = await summaryResponse.json()
+                if (summaryData.extract) {
+                  return `${title} (Wikipedia)\n   ${summaryData.extract.slice(0, 400)}\n   URL: ${summaryData.content_urls?.desktop?.page || ''}`
+                }
               }
+            } catch {
+              // Skip failed summary fetches
             }
-          }
-        }
+            return null
+          })
 
-        // 2. DuckDuckGo Instant Answer API (supplements Wikipedia)
-        const ddgUrl = `https://api.duckduckgo.com/?q=${encodeURIComponent(content)}&format=json&no_html=1`
-        const ddgResponse = await fetch(ddgUrl, {
-          headers: { 'User-Agent': 'ARIA/1.0 (https://ariav2-seven.vercel.app)' },
-        })
-        if (ddgResponse.ok) {
-          const ddgData = await ddgResponse.json()
-          if (ddgData.AbstractText) {
-            results.push(`${results.length + 1}. ${ddgData.Heading || 'Instant Answer'} (DuckDuckGo)\n   ${ddgData.AbstractText.slice(0, 300)}\n   URL: ${ddgData.AbstractURL || ''}`)
-          }
-          if (ddgData.RelatedTopics && Array.isArray(ddgData.RelatedTopics)) {
-            for (const topic of ddgData.RelatedTopics.slice(0, 3)) {
-              if (topic.Text && topic.FirstURL) {
-                results.push(`${results.length + 1}. ${topic.Text.slice(0, 200)}\n   URL: ${topic.FirstURL}`)
-              }
+          const summaries = await Promise.all(summaryPromises)
+          for (const summary of summaries) {
+            if (summary) {
+              results.push(`${results.length + 1}. ${summary}`)
             }
           }
         }
