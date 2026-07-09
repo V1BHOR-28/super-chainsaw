@@ -118,13 +118,37 @@ export async function POST(req: NextRequest) {
 
     if (tool === 'web_search') {
       try {
-        const results: Array<{ url: string; name: string; snippet: string; host_name: string; date?: string }> =
-          await zai.functions.invoke('web_search', { query: content, num: 6 })
-        toolContext =
-          `Web search results for "${content}":\n` +
-          results
-            .map((r, i) => `${i + 1}. ${r.name}\n   ${r.snippet}\n   URL: ${r.url}\n   Source: ${r.host_name}${r.date ? ` · ${r.date}` : ''}`)
-            .join('\n\n')
+        // Use Z.ai web search API directly (SDK fails on Vercel)
+        const searchResponse = await fetch('https://internal-api.z.ai/v1/functions/web_search', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': 'Bearer Z.ai',
+            'X-Z-AI-From': 'Z',
+            'X-Chat-Id': 'chat-7244346a-87ee-4777-8cde-264c66a8197f',
+            'X-User-Id': '4965a45e-1056-486a-be27-3a5cb0b94c86',
+            'X-Token': 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjoiNDk2NWE0NWUtMTA1Ni00ODZhLWJlMjctM2E1Y2IwYjk0Yzg2IiwiY2hhdF9pZCI6ImNoYXQtNzI0NDM0NmEtODdlZS00Nzc3LThjZGUtMjY0YzY2YTgxOTdmIiwicGxhdGZvcm0iOiJ6YWkifQ.dVP9ylHjuppoKu1FsF79jBedwQg0z5IV4ijd6eeEE40',
+          },
+          body: JSON.stringify({ query: content, num: 6 }),
+        })
+
+        if (searchResponse.ok) {
+          const searchData = await searchResponse.json()
+          const results = Array.isArray(searchData) ? searchData : (searchData.results || searchData.data || [])
+          if (Array.isArray(results) && results.length > 0) {
+            toolContext =
+              `Web search results for "${content}":\n` +
+              results
+                .map((r: { name?: string; title?: string; snippet?: string; url?: string; host_name?: string; date?: string }, i: number) =>
+                  `${i + 1}. ${r.name || r.title || 'Untitled'}\n   ${r.snippet || ''}\n   URL: ${r.url || ''}\n   Source: ${r.host_name || ''}${r.date ? ` · ${r.date}` : ''}`)
+                .join('\n\n')
+          } else {
+            toolContext = 'Web search returned no results. Answer from your own knowledge.'
+          }
+        } else {
+          console.error('[chat.web_search] API returned:', searchResponse.status)
+          toolContext = 'Web search was attempted but failed. Answer from your own knowledge and be honest about uncertainty.'
+        }
       } catch (e) {
         console.error('[chat.web_search]', e)
         toolContext = 'Web search was attempted but failed. Answer from your own knowledge and be honest about uncertainty.'
@@ -133,13 +157,26 @@ export async function POST(req: NextRequest) {
 
     if (tool === 'image_generation') {
       try {
-        const imgResp = await zai.images.generations.create({
-          prompt: content,
-          size: '1024x1024',
+        // Use Z.ai image generation API directly
+        const imgResponse = await fetch('https://internal-api.z.ai/v1/images/generations', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'Authorization': 'Bearer Z.ai',
+            'X-Z-AI-From': 'Z',
+            'X-Chat-Id': 'chat-7244346a-87ee-4777-8cde-264c66a8197f',
+            'X-User-Id': '4965a45e-1056-486a-be27-3a5cb0b94c86',
+            'X-Token': 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJ1c2VyX2lkIjoiNDk2NWE0NWUtMTA1Ni00ODZhLWJlMjctM2E1Y2IwYjk0Yzg2IiwiY2hhdF9pZCI6ImNoYXQtNzI0NDM0NmEtODdlZS00Nzc3LThjZGUtMjY0YzY2YTgxOTdmIiwicGxhdGZvcm0iOiJ6YWkifQ.dVP9ylHjuppoKu1FsF79jBedwQg0z5IV4ijd6eeEE40',
+          },
+          body: JSON.stringify({ prompt: content, size: '1024x1024' }),
         })
-        const base64 = imgResp.data?.[0]?.base64
-        if (base64) {
-          generatedImage = { url: `data:image/png;base64,${base64}`, prompt: content }
+
+        if (imgResponse.ok) {
+          const imgData = await imgResponse.json()
+          const base64 = imgData.data?.[0]?.base64
+          if (base64) {
+            generatedImage = { url: `data:image/png;base64,${base64}`, prompt: content }
+          }
         }
       } catch (e) {
         console.error('[chat.image_gen]', e)
