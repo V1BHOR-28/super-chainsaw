@@ -66,6 +66,12 @@ export const AVAILABLE_MODELS = [
     badge: 'Default',
   },
   {
+    id: 'deepseek/deepseek-r1',
+    name: 'DeepSeek R1',
+    description: 'Reasoning model, more natural and opinionated.',
+    badge: 'Recommended',
+  },
+  {
     id: 'qwen/qwen-2.5-72b-instruct',
     name: 'Qwen 2.5 72B',
     description: 'Excellent reasoning, multilingual.',

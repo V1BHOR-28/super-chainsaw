@@ -650,6 +650,7 @@ export function SettingsModal() {
 
 const AI_MODELS = [
   { id: 'deepseek/deepseek-chat', name: 'DeepSeek V3', desc: 'Fast, capable, great value', badge: 'Default' },
+  { id: 'deepseek/deepseek-r1', name: 'DeepSeek R1', desc: 'Reasoning model, more natural and opinionated', badge: 'Recommended' },
   { id: 'qwen/qwen-2.5-72b-instruct', name: 'Qwen 2.5 72B', desc: 'Excellent reasoning, multilingual', badge: 'Capable' },
   { id: 'amazon/nova-lite-v1', name: 'Amazon Nova Lite', desc: 'Fast, cost-effective, reliable', badge: 'Fast' },
   { id: 'meta-llama/llama-3.3-70b-instruct', name: 'Llama 3.3 70B', desc: 'Open-source, community-driven', badge: 'Open Source' },

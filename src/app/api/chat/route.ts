@@ -31,7 +31,7 @@ export async function POST(req: NextRequest) {
     const userId = await getAuthenticatedUserId()
     if (!userId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
     const body = await req.json().catch(() => ({}))
-    const { conversationId, content, attachments, tool } = body as {
+    const { conversationId, content, attachments, tool: userTool } = body as {
       conversationId: string
       content: string
       attachments?: { type: 'image'; dataUrl: string; name: string }[]
@@ -43,6 +43,43 @@ export async function POST(req: NextRequest) {
         status: 400,
         headers: { 'Content-Type': 'application/json' },
       })
+    }
+
+    // === AUTO-DETECT WEB SEARCH ===
+    // If the user didn't explicitly toggle a tool, auto-detect if they need web search.
+    // This prevents the user from having to manually toggle search for every query.
+    let tool = userTool
+    if (!tool) {
+      const lower = content.toLowerCase()
+      // Sports/live data queries
+      const sportsKeywords = ['match', 'matches', 'score', 'scores', 'game today', 'fixture',
+        'world cup', 'fifa', 'premier league', 'la liga', 'serie a', 'bundesliga',
+        'champions league', 'nba', 'nfl', 'nhl', 'cricket', 'ipl', 'tennis',
+        'football today', 'soccer today', 'happening today', 'playing today',
+        'result today', 'results today', 'kickoff', 'kick off', 'lineup',
+        'standings', 'tournament today', 'playoff']
+      // News/current events queries
+      const newsKeywords = ['news today', 'latest news', 'current events', 'what happened today',
+        'today news', 'breaking', 'just happened', 'recent update']
+      // Real-time queries
+      const realtimeKeywords = ['live score', 'live match', 'right now', 'currently playing',
+        'who is winning', 'whats the score', "what's the score"]
+
+      const needsSearch = sportsKeywords.some(kw => lower.includes(kw)) ||
+                         newsKeywords.some(kw => lower.includes(kw)) ||
+                         realtimeKeywords.some(kw => lower.includes(kw))
+
+      // Don't auto-search for very short messages (follow-ups like "yes", "ok", "which one")
+      // or questions that reference previous context ("which world cup are you talking about")
+      const isFollowUp = content.length < 50 && (
+        lower.includes('which') || lower.includes('what about') || lower.includes('you mean') ||
+        lower.includes('talking about') || lower.includes('are you sure') || lower.includes('really') ||
+        lower.includes('but ') || lower.includes('wait') || lower.includes('how can')
+      )
+
+      if (needsSearch && !isFollowUp) {
+        tool = 'web_search'
+      }
     }
 
     // Message length cap — prevents abuse / accidental huge pastes from blowing token budget
