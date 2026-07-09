@@ -146,6 +146,32 @@ export async function POST(req: NextRequest) {
     const { semanticMemorySearch } = await import('@/app/api/memory/route')
     const memories = await semanticMemorySearch(userId, content, 15)
 
+    // === KNOWLEDGE BASE SEARCH ===
+    // Search the user's fed knowledge (articles, player lists, docs) for context
+    let knowledgeContext: string | undefined
+    try {
+      const { generateEmbedding, embeddingToPgVector } = await import('@/lib/embeddings')
+      const queryEmbedding = await generateEmbedding(content)
+      if (queryEmbedding) {
+        const vectorStr = embeddingToPgVector(queryEmbedding)
+        const knowledgeResults = await db.$queryRaw<Array<{ title: string; content: string }>>`
+          SELECT title, content
+          FROM "Knowledge"
+          WHERE "userId" = ${userId}
+            AND embedding IS NOT NULL
+          ORDER BY embedding <=> ${vectorStr}::vector
+          LIMIT 3
+        `
+        if (knowledgeResults && knowledgeResults.length > 0) {
+          knowledgeContext = knowledgeResults
+            .map((k, i) => `--- KNOWLEDGE ${i + 1}: ${k.title} ---\n${k.content.slice(0, 2000)}`)
+            .join('\n\n')
+        }
+      }
+    } catch {
+      // Knowledge search is best-effort — don't fail the chat if it errors
+    }
+
     const user = await db.user.findUnique({ where: { id: userId } })
 
     // === TOOL EXECUTION (pre-LLM) ===
@@ -312,6 +338,8 @@ export async function POST(req: NextRequest) {
     }
 
     // === BUILD MESSAGE PAYLOAD ===
+    const fullToolContext = [toolContext, knowledgeContext].filter(Boolean).join('\n\n')
+
     const systemPrompt = buildAriaSystemPrompt({
       tone: settings?.tone ?? 'Warm & Honest',
       responseLength: settings?.responseLength ?? 'Balanced',
@@ -323,7 +351,7 @@ export async function POST(req: NextRequest) {
       recentMood: recentMood
         ? { mood: recentMood.mood, note: recentMood.note, createdAt: recentMood.createdAt }
         : null,
-      toolContext,
+      toolContext: fullToolContext || undefined,
     })
 
     // Map DB messages to SDK format; include vision content for the latest user message if images attached

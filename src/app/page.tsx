@@ -5,6 +5,7 @@ import { useSession } from 'next-auth/react'
 import { Sidebar, SidebarToggle } from '@/components/aria/sidebar'
 import { ChatArea } from '@/components/aria/chat-area'
 import { SettingsModal } from '@/components/aria/settings-modal'
+import { FeedAriaModal } from '@/components/aria/feed-aria-modal'
 import { LandingPage } from '@/components/aria/landing-page'
 import { AuthModal } from '@/components/aria/auth-modal'
 import { OnboardingScreen } from '@/components/aria/onboarding-screen'
@@ -156,6 +157,7 @@ export default function HomePage() {
         <Sidebar />
         <ChatArea />
         <SettingsModal />
+        <FeedAriaModal />
       </div>
       <AuthModal />
     </>

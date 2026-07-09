@@ -74,6 +74,10 @@ type AriaState = {
   settingsOpen: boolean
   setSettingsOpen: (v: boolean) => void
 
+  // Feed ARIA modal
+  feedAriaOpen: boolean
+  setFeedAriaOpen: (v: boolean) => void
+
   // Sending state
   isStreaming: boolean
   setStreaming: (v: boolean) => void
@@ -201,6 +205,9 @@ export const useAriaStore = create<AriaState>((set) => ({
 
   settingsOpen: false,
   setSettingsOpen: (v) => set({ settingsOpen: v }),
+
+  feedAriaOpen: false,
+  setFeedAriaOpen: (v) => set({ feedAriaOpen: v }),
 
   isStreaming: false,
   setStreaming: (v) => set({ isStreaming: v }),

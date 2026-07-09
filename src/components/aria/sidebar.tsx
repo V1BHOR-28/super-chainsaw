@@ -19,6 +19,7 @@ import {
   Download,
   FileJson,
   FileText,
+  BookOpen,
 } from 'lucide-react'
 import { useAriaStore } from '@/lib/store'
 import { SidePanels } from '@/components/aria/side-panels'
@@ -43,6 +44,7 @@ export function Sidebar() {
     sidebarCollapsed,
     setSidebarCollapsed,
     setSettingsOpen,
+    setFeedAriaOpen,
     setMessages,
     removeConversation,
     upsertConversation,
@@ -166,27 +168,52 @@ export function Sidebar() {
           <span className="font-serif-aria text-2xl tracking-tight">ARIA</span>
         </div>
 
-        {/* New conversation */}
-        <button
-          onClick={handleNewConversation}
-          className="w-full py-3 px-4 rounded-xl flex items-center justify-center gap-2 mb-6 transition-all text-sm"
-          style={{
-            background: 'var(--aria-card)',
-            border: '1px solid var(--aria-border)',
-            color: 'var(--aria-fg)',
-          }}
-          onMouseEnter={(e) => {
-            e.currentTarget.style.background = 'rgba(245,158,11,0.08)'
-            e.currentTarget.style.borderColor = 'rgba(245,158,11,0.3)'
-          }}
-          onMouseLeave={(e) => {
-            e.currentTarget.style.background = 'var(--aria-card)'
-            e.currentTarget.style.borderColor = 'var(--aria-border)'
-          }}
-        >
-          <Plus size={14} />
-          New Conversation
-        </button>
+        {/* New conversation + Feed ARIA */}
+        <div className="flex gap-2 mb-6">
+          <button
+            onClick={handleNewConversation}
+            className="flex-1 py-3 px-4 rounded-xl flex items-center justify-center gap-2 transition-all text-sm"
+            style={{
+              background: 'var(--aria-card)',
+              border: '1px solid var(--aria-border)',
+              color: 'var(--aria-fg)',
+            }}
+            onMouseEnter={(e) => {
+              e.currentTarget.style.background = 'rgba(245,158,11,0.08)'
+              e.currentTarget.style.borderColor = 'rgba(245,158,11,0.3)'
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.background = 'var(--aria-card)'
+              e.currentTarget.style.borderColor = 'var(--aria-border)'
+            }}
+          >
+            <Plus size={14} />
+            New
+          </button>
+          <button
+            onClick={() => setFeedAriaOpen(true)}
+            className="py-3 px-4 rounded-xl flex items-center justify-center gap-2 transition-all text-sm"
+            style={{
+              background: 'var(--aria-card)',
+              border: '1px solid var(--aria-border)',
+              color: 'var(--aria-fg-muted)',
+            }}
+            onMouseEnter={(e) => {
+              e.currentTarget.style.background = 'rgba(245,158,11,0.08)'
+              e.currentTarget.style.borderColor = 'rgba(245,158,11,0.3)'
+              e.currentTarget.style.color = 'var(--aria-accent-glow)'
+            }}
+            onMouseLeave={(e) => {
+              e.currentTarget.style.background = 'var(--aria-card)'
+              e.currentTarget.style.borderColor = 'var(--aria-border)'
+              e.currentTarget.style.color = 'var(--aria-fg-muted)'
+            }}
+            title="Feed ARIA — teach her something"
+          >
+            <BookOpen size={14} />
+            Feed
+          </button>
+        </div>
 
         {/* Nav tabs */}
         <nav className="flex flex-col gap-1 shrink-0">
