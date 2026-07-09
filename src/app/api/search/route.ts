@@ -3,8 +3,9 @@ export const runtime = "nodejs"
 import { getAuthenticatedUserId } from '@/lib/user'
 
 /**
- * GET /api/search?q=<query>&num=<n>
- * Uses DuckDuckGo Instant Answer API — free, no key, works on Vercel.
+ * GET /api/search?q=<query>
+ * Uses DuckDuckGo HTML scraping — returns real search results.
+ * Free, no key, works on Vercel.
  */
 export async function GET(req: NextRequest) {
   try {
@@ -15,51 +16,42 @@ export async function GET(req: NextRequest) {
     const q = searchParams.get('q')?.trim()
     if (!q) return NextResponse.json({ error: 'q required' }, { status: 400 })
 
-    // DuckDuckGo Instant Answer API
-    const searchUrl = `https://api.duckduckgo.com/?q=${encodeURIComponent(q)}&format=json&no_html=1&skip_disambig=1`
-    const response = await fetch(searchUrl)
+    const searchUrl = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(q)}`
+    const response = await fetch(searchUrl, {
+      headers: {
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+        'Accept': 'text/html',
+      },
+    })
 
     if (!response.ok) {
       return NextResponse.json({ error: 'Web search failed' }, { status: 502 })
     }
 
-    const data = await response.json()
-    const results: Array<{ url: string; name: string; snippet: string; host_name: string; date?: string }> = []
+    const html = await response.text()
 
-    // Main answer
-    if (data.AbstractText) {
-      results.push({
-        url: data.AbstractURL || '',
-        name: data.Heading || 'Instant Answer',
-        snippet: data.AbstractText,
-        host_name: data.AbstractSource || 'DuckDuckGo',
-      })
-    }
+    // Parse results from DuckDuckGo HTML
+    const titleMatches = [...html.matchAll(/class="result__a"[^>]*>([^<]*)/g)]
+    const urlMatches = [...html.matchAll(/class="result__url"[^>]*href="\/\/duckduckgo\.com\/l\/\?uddg=([^&"]*)/g)]
+    const snippetMatches = [...html.matchAll(/class="result__snippet">([^<]*)/g)]
 
-    // Related topics
-    if (data.RelatedTopics && Array.isArray(data.RelatedTopics)) {
-      for (const topic of data.RelatedTopics.slice(0, 8)) {
-        if (topic.Text && topic.FirstURL) {
-          const url = new URL(topic.FirstURL)
-          results.push({
-            url: topic.FirstURL,
-            name: topic.Text.split(' - ')[0] || topic.Text.slice(0, 80),
-            snippet: topic.Text,
-            host_name: url.hostname,
-          })
-        } else if (topic.Topics && Array.isArray(topic.Topics)) {
-          for (const subTopic of topic.Topics.slice(0, 3)) {
-            if (subTopic.Text && subTopic.FirstURL) {
-              const url = new URL(subTopic.FirstURL)
-              results.push({
-                url: subTopic.FirstURL,
-                name: subTopic.Text.split(' - ')[0] || subTopic.Text.slice(0, 80),
-                snippet: subTopic.Text,
-                host_name: url.hostname,
-              })
-            }
-          }
+    const results: Array<{ url: string; name: string; snippet: string; host_name: string }> = []
+    const count = Math.min(titleMatches.length, 8)
+
+    for (let i = 0; i < count; i++) {
+      const title = titleMatches[i]?.[1]?.replace(/&#x27;/g, "'").replace(/&amp;/g, '&').trim() || ''
+      const urlEncoded = urlMatches[i]?.[1] || ''
+      const url = decodeURIComponent(urlEncoded)
+      const snippet = snippetMatches[i]?.[1]?.replace(/&#x27;/g, "'").replace(/&amp;/g, '&').trim() || ''
+
+      if (title && url) {
+        let hostName = ''
+        try {
+          hostName = new URL(url).hostname
+        } catch {
+          hostName = ''
         }
+        results.push({ url, name: title, snippet, host_name: hostName })
       }
     }
 

@@ -117,40 +117,42 @@ export async function POST(req: NextRequest) {
 
     if (tool === 'web_search') {
       try {
-        // DuckDuckGo Instant Answer API — free, no key, works on Vercel
-        const searchUrl = `https://api.duckduckgo.com/?q=${encodeURIComponent(content)}&format=json&no_html=1&skip_disambig=1`
-        const searchResponse = await fetch(searchUrl)
+        // DuckDuckGo HTML scraping — returns real search results (unlike the Instant Answer API
+        // which only returns Wikipedia abstracts). Free, no key, works on Vercel.
+        const searchUrl = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(content)}`
+        const searchResponse = await fetch(searchUrl, {
+          headers: {
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+            'Accept': 'text/html',
+          },
+        })
+
         if (searchResponse.ok) {
-          const searchData = await searchResponse.json()
+          const html = await searchResponse.text()
+
+          // Parse result titles + URLs from the HTML
+          const titleMatches = [...html.matchAll(/class="result__a"[^>]*>([^<]*)/g)]
+          const urlMatches = [...html.matchAll(/class="result__url"[^>]*href="\/\/duckduckgo\.com\/l\/\?uddg=([^&"]*)/g)]
+          const snippetMatches = [...html.matchAll(/class="result__snippet">([^<]*)/g)]
+
           const results: string[] = []
+          const count = Math.min(titleMatches.length, 6)
 
-          // DuckDuckGo returns an AbstractText (main answer) + RelatedTopics
-          if (searchData.AbstractText) {
-            results.push(`1. ${searchData.Heading || 'Answer'}: ${searchData.AbstractText}\n   Source: ${searchData.AbstractSource || 'DuckDuckGo'}\n   URL: ${searchData.AbstractURL || ''}`)
-          }
+          for (let i = 0; i < count; i++) {
+            const title = titleMatches[i]?.[1]?.replace(/&#x27;/g, "'").replace(/&amp;/g, '&').trim() || ''
+            const urlEncoded = urlMatches[i]?.[1] || ''
+            const url = decodeURIComponent(urlEncoded)
+            const snippet = snippetMatches[i]?.[1]?.replace(/&#x27;/g, "'").replace(/&amp;/g, '&').trim() || ''
 
-          // Parse related topics (can be nested)
-          if (searchData.RelatedTopics && Array.isArray(searchData.RelatedTopics)) {
-            let topicNum = results.length + 1
-            for (const topic of searchData.RelatedTopics.slice(0, 5)) {
-              if (topic.Text && topic.FirstURL) {
-                results.push(`${topicNum}. ${topic.Text}\n   URL: ${topic.FirstURL}`)
-                topicNum++
-              } else if (topic.Topics && Array.isArray(topic.Topics)) {
-                for (const subTopic of topic.Topics.slice(0, 2)) {
-                  if (subTopic.Text && subTopic.FirstURL) {
-                    results.push(`${topicNum}. ${subTopic.Text}\n   URL: ${subTopic.FirstURL}`)
-                    topicNum++
-                  }
-                }
-              }
+            if (title) {
+              results.push(`${i + 1}. ${title}\n   ${snippet}\n   URL: ${url}`)
             }
           }
 
           if (results.length > 0) {
             toolContext = `Web search results for "${content}":\n${results.join('\n\n')}`
           } else {
-            toolContext = `Web search returned no instant answers for "${content}". Answer from your own knowledge.`
+            toolContext = `Web search returned no results for "${content}". Answer from your own knowledge.`
           }
         } else {
           toolContext = 'Web search was attempted but failed. Answer from your own knowledge.'
