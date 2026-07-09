@@ -1,5 +1,5 @@
 // ARIA — Autonomous Reasoning Intelligent Assistant
-// Prisma schema — now on PostgreSQL (Neon) for multi-user production
+// Prisma schema — PostgreSQL (Neon) with pgvector for semantic search
 
 generator client {
   provider = "prisma-client-js"
@@ -8,6 +8,7 @@ generator client {
 datasource db {
   provider = "postgresql"
   url      = env("DATABASE_URL")
+  directUrl = env("DATABASE_URL")
 }
 
 model User {
@@ -67,12 +68,14 @@ model Message {
 }
 
 // Persistent memories — ARIA remembers facts about the user across all conversations
+// Uses pgvector for semantic search (find relevant memories, not just recent ones)
 model Memory {
   id        String   @id @default(cuid())
   userId    String
   content   String
   category  String   @default("general")
   pinned    Boolean  @default(false)
+  embedding Unsupported("vector(1536)")? // OpenAI text-embedding-3-small dimension
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -128,6 +131,7 @@ model UserSettings {
   userId           String   @id
   tone             String   @default("Warm & Honest")
   responseLength   String   @default("Balanced")
+  modelPreference  String   @default("deepseek/deepseek-chat")
   soundEffects     Boolean  @default(true)
   localEncryption  Boolean  @default(true)
   trainingOptIn    Boolean  @default(false)

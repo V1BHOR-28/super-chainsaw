@@ -444,6 +444,15 @@ export function SettingsModal() {
                     onChange={(v) => updateField('voiceEnabled', v)}
                   />
                 </SettingRow>
+                <SettingRow
+                  title="AI Model"
+                  desc="Choose the AI model that powers ARIA. Different models have different strengths."
+                >
+                  <ModelSelector
+                    value={settings?.modelPreference ?? 'deepseek/deepseek-chat'}
+                    onChange={(v) => updateField('modelPreference', v)}
+                  />
+                </SettingRow>
               </section>
             )}
 
@@ -634,6 +643,43 @@ export function SettingsModal() {
         </main>
       </div>
     </div>
+  )
+}
+
+/* ---------- Model Selector ---------- */
+
+const AI_MODELS = [
+  { id: 'deepseek/deepseek-chat', name: 'DeepSeek V3', desc: 'Fast, capable, great value', badge: 'Default' },
+  { id: 'openai/gpt-4o-mini', name: 'GPT-4o Mini', desc: 'Reliable, great reasoning', badge: 'Popular' },
+  { id: 'anthropic/claude-3.5-haiku', name: 'Claude 3.5 Haiku', desc: 'Excellent at conversation', badge: 'Conversational' },
+  { id: 'anthropic/claude-3.5-sonnet', name: 'Claude 3.5 Sonnet', desc: 'Best reasoning, slower', badge: 'Smartest' },
+  { id: 'google/gemini-flash-1.5', name: 'Gemini Flash 1.5', desc: 'Fast, multi-modal', badge: 'Fast' },
+  { id: 'meta-llama/llama-3.3-70b-instruct', name: 'Llama 3.3 70B', desc: 'Open-source, privacy-focused', badge: 'Open Source' },
+] as const
+
+function ModelSelector({ value, onChange }: { value: string; onChange: (v: string) => void }) {
+  return (
+    <select
+      value={value}
+      onChange={(e) => onChange(e.target.value)}
+      className="rounded-lg outline-none transition-colors focus:border-[rgba(245,158,11,0.45)]"
+      style={{
+        width: '200px',
+        background: 'var(--aria-bg-panel)',
+        border: '1px solid var(--aria-border)',
+        padding: '8px 12px',
+        color: 'var(--aria-fg)',
+        fontSize: '13px',
+        fontFamily: 'inherit',
+        cursor: 'pointer',
+      }}
+    >
+      {AI_MODELS.map((m) => (
+        <option key={m.id} value={m.id} style={{ background: 'var(--aria-bg-panel)' }}>
+          {m.name} ({m.badge})
+        </option>
+      ))}
+    </select>
   )
 }
 

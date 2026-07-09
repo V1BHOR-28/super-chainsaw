@@ -93,14 +93,9 @@ export async function POST(req: NextRequest) {
     // Touch conversation for sort order
     await db.conversation.update({ where: { id: conversationId }, data: { updatedAt: new Date() } })
 
-    // Load settings, memories (capped at 20, pinned first), recent mood for context
-    const [settings, memories, recentMood, recentMessages] = await Promise.all([
+    // Load settings, recent mood, recent messages — use semantic memory search
+    const [settings, recentMood, recentMessages] = await Promise.all([
       db.userSettings.findUnique({ where: { userId } }),
-      db.memory.findMany({
-        where: { userId },
-        orderBy: [{ pinned: 'desc' }, { updatedAt: 'desc' }],
-        take: 20,
-      }),
       db.mood.findFirst({ where: { userId }, orderBy: { createdAt: 'desc' } }),
       db.message.findMany({
         where: { conversationId },
@@ -108,6 +103,11 @@ export async function POST(req: NextRequest) {
         take: 20,
       }),
     ])
+
+    // Semantic memory search: find memories most relevant to what the user just said
+    // Falls back to most-recent if embeddings aren't available
+    const { semanticMemorySearch } = await import('@/app/api/memory/route')
+    const memories = await semanticMemorySearch(userId, content, 15)
 
     const user = await db.user.findUnique({ where: { id: userId } })
 
@@ -231,9 +231,11 @@ export async function POST(req: NextRequest) {
           try {
             let text = ''
 
-            // PRIMARY PATH: OpenRouter API (works on Vercel + locally)
-            // The Z.ai internal API only works inside the sandbox. OpenRouter
-            // is a public API that works from any server, including Vercel.
+            // Get user's model preference (default: DeepSeek)
+            const { getModelFromSettings } = await import('@/lib/embeddings')
+            const selectedModel = getModelFromSettings(settings?.modelPreference)
+
+            // PRIMARY PATH: OpenRouter API with user's selected model
             const apiResponse = await fetch('https://openrouter.ai/api/v1/chat/completions', {
               method: 'POST',
               headers: {
@@ -243,7 +245,7 @@ export async function POST(req: NextRequest) {
                 'X-Title': 'ARIA',
               },
               body: JSON.stringify({
-                model: 'deepseek/deepseek-chat',
+                model: selectedModel,
                 messages: sdkMessages,
               }),
             })

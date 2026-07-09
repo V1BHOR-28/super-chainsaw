@@ -35,6 +35,7 @@ export async function PATCH(req: NextRequest) {
     const allowed: Record<string, string | boolean> = {
       tone: body.tone,
       responseLength: body.responseLength,
+      modelPreference: body.modelPreference,
       soundEffects: body.soundEffects,
       localEncryption: body.localEncryption,
       trainingOptIn: body.trainingOptIn,
