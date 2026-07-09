@@ -117,22 +117,112 @@ export async function POST(req: NextRequest) {
 
     if (tool === 'web_search') {
       try {
-        // Wikipedia API search — fast, reliable, works from Vercel's datacenter IPs.
-        // We make the search + summaries in PARALLEL to stay under Vercel's timeout.
         const results: string[] = []
+        const lowerContent = content.toLowerCase()
 
-        // Step 1: Search Wikipedia for relevant articles
+        // === SPORTS DETECTION ===
+        // Check if the question is about sports/matches/scores
+        const sportsKeywords = ['match', 'matches', 'score', 'scores', 'game', 'games', 'fixture', 'fixtures',
+          'world cup', 'fifa', 'premier league', 'la liga', 'serie a', 'bundesliga', 'champions league',
+          'nba', 'nfl', 'nhl', 'mlb', 'cricket', 'ipl', 'tennis', 'atp', 'wta', 'ufc', 'boxing',
+          'football', 'soccer', 'basketball', 'baseball', 'hockey', 'today', 'tonight', 'result', 'results',
+          'kickoff', 'kick off', 'lineup', 'standings', 'table', 'tournament', 'playoff', 'playoffs']
+
+        const isSportsQuery = sportsKeywords.some(kw => lowerContent.includes(kw))
+
+        if (isSportsQuery) {
+          // === ESPN API — live sports data ===
+          // Map common sports to ESPN league codes
+          const espnLeagues: Array<{ name: string; url: string }> = []
+
+          if (lowerContent.includes('fifa') || lowerContent.includes('world cup')) {
+            espnLeagues.push({ name: 'FIFA World Cup', url: 'https://site.api.espn.com/apis/site/v2/sports/soccer/fifa.world/scoreboard' })
+          }
+          if (lowerContent.includes('premier league') || lowerContent.includes('epl')) {
+            espnLeagues.push({ name: 'Premier League', url: 'https://site.api.espn.com/apis/site/v2/sports/soccer/eng.1/scoreboard' })
+          }
+          if (lowerContent.includes('la liga')) {
+            espnLeagues.push({ name: 'La Liga', url: 'https://site.api.espn.com/apis/site/v2/sports/soccer/esp.1/scoreboard' })
+          }
+          if (lowerContent.includes('serie a')) {
+            espnLeagues.push({ name: 'Serie A', url: 'https://site.api.espn.com/apis/site/v2/sports/soccer/ita.1/scoreboard' })
+          }
+          if (lowerContent.includes('bundesliga')) {
+            espnLeagues.push({ name: 'Bundesliga', url: 'https://site.api.espn.com/apis/site/v2/sports/soccer/ger.1/scoreboard' })
+          }
+          if (lowerContent.includes('champions league') || lowerContent.includes('ucl')) {
+            espnLeagues.push({ name: 'Champions League', url: 'https://site.api.espn.com/apis/site/v2/sports/soccer/uefa.champions/scoreboard' })
+          }
+          if (lowerContent.includes('nba') || lowerContent.includes('basketball')) {
+            espnLeagues.push({ name: 'NBA', url: 'https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard' })
+          }
+          if (lowerContent.includes('nfl') || lowerContent.includes('american football')) {
+            espnLeagues.push({ name: 'NFL', url: 'https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard' })
+          }
+          if (lowerContent.includes('cricket') || lowerContent.includes('ipl')) {
+            espnLeagues.push({ name: 'Cricket', url: 'https://site.api.espn.com/apis/site/v2/sports/cricket/icc.scoreboard' })
+          }
+          if (lowerContent.includes('tennis') || lowerContent.includes('atp') || lowerContent.includes('wta')) {
+            espnLeagues.push({ name: 'Tennis', url: 'https://site.api.espn.com/apis/site/v2/sports/tennis/atp/scoreboard' })
+          }
+
+          // If no specific league detected, try FIFA + general soccer
+          if (espnLeagues.length === 0) {
+            espnLeagues.push(
+              { name: 'FIFA World Cup', url: 'https://site.api.espn.com/apis/site/v2/sports/soccer/fifa.world/scoreboard' },
+              { name: 'Soccer (General)', url: 'https://site.api.espn.com/apis/site/v2/sports/soccer/eng.1/scoreboard' }
+            )
+          }
+
+          // Fetch all detected leagues in parallel
+          const espnPromises = espnLeagues.map(async (league) => {
+            try {
+              const response = await fetch(league.url, {
+                signal: AbortSignal.timeout(5000),
+              })
+              if (!response.ok) return null
+              const data = await response.json()
+              const events = data.events || []
+
+              if (events.length === 0) {
+                return `${league.name}: No matches scheduled.`
+              }
+
+              const matchLines = events.slice(0, 5).map((e: { name: string; status?: { type?: { description?: string } }; competitions?: Array<{ competitors?: Array<{ team?: { displayName?: string }; score?: string }> }> }) => {
+                const status = e.status?.type?.description || 'Unknown'
+                const home = e.competitions?.[0]?.competitors?.[0]?.team?.displayName || ''
+                const away = e.competitions?.[0]?.competitors?.[1]?.team?.displayName || ''
+                const homeScore = e.competitions?.[0]?.competitors?.[0]?.score || '0'
+                const awayScore = e.competitions?.[0]?.competitors?.[1]?.score || '0'
+                return `  ${home} ${homeScore} - ${awayScore} ${away} (${status})`
+              })
+
+              return `${league.name}:\n${matchLines.join('\n')}`
+            } catch {
+              return null
+            }
+          })
+
+          const espnResults = await Promise.all(espnPromises)
+          for (const result of espnResults) {
+            if (result) {
+              results.push(`${results.length + 1}. ${result}`)
+            }
+          }
+        }
+
+        // === WIKIPEDIA (for non-sports or supplementary info) ===
+        // Always fetch Wikipedia in parallel — it adds context
         const wikiSearchUrl = `https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(content)}&format=json&srlimit=3`
         const wikiSearchResponse = await fetch(wikiSearchUrl, {
           headers: { 'User-Agent': 'ARIA/1.0 (https://ariav2-seven.vercel.app)' },
-          signal: AbortSignal.timeout(8000), // 8 second timeout
+          signal: AbortSignal.timeout(8000),
         })
 
         if (wikiSearchResponse.ok) {
           const wikiData = await wikiSearchResponse.json()
           const wikiResults = wikiData?.query?.search || []
 
-          // Step 2: Fetch summaries for ALL results IN PARALLEL (not sequential)
           const summaryPromises = wikiResults.slice(0, 3).map(async (result: { title: string }) => {
             const title = result.title
             const summaryUrl = `https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(title.replace(/ /g, '_'))}`
@@ -148,7 +238,7 @@ export async function POST(req: NextRequest) {
                 }
               }
             } catch {
-              // Skip failed summary fetches
+              // skip
             }
             return null
           })
