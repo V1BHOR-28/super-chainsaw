@@ -117,45 +117,57 @@ export async function POST(req: NextRequest) {
 
     if (tool === 'web_search') {
       try {
-        // DuckDuckGo HTML scraping — returns real search results (unlike the Instant Answer API
-        // which only returns Wikipedia abstracts). Free, no key, works on Vercel.
-        const searchUrl = `https://html.duckduckgo.com/html/?q=${encodeURIComponent(content)}`
-        const searchResponse = await fetch(searchUrl, {
-          headers: {
-            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-            'Accept': 'text/html',
-          },
+        // Hybrid search: Wikipedia API + DuckDuckGo Instant Answer API
+        // Both are free, no key needed, and work from Vercel's servers.
+        const results: string[] = []
+
+        // 1. Wikipedia search (reliable, always works from datacenter IPs)
+        const wikiSearchUrl = `https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(content)}&format=json&srlimit=3`
+        const wikiSearchResponse = await fetch(wikiSearchUrl, {
+          headers: { 'User-Agent': 'ARIA/1.0 (https://ariav2-seven.vercel.app)' },
         })
-
-        if (searchResponse.ok) {
-          const html = await searchResponse.text()
-
-          // Parse result titles + URLs from the HTML
-          const titleMatches = [...html.matchAll(/class="result__a"[^>]*>([^<]*)/g)]
-          const urlMatches = [...html.matchAll(/class="result__url"[^>]*href="\/\/duckduckgo\.com\/l\/\?uddg=([^&"]*)/g)]
-          const snippetMatches = [...html.matchAll(/class="result__snippet">([^<]*)/g)]
-
-          const results: string[] = []
-          const count = Math.min(titleMatches.length, 6)
-
-          for (let i = 0; i < count; i++) {
-            const title = titleMatches[i]?.[1]?.replace(/&#x27;/g, "'").replace(/&amp;/g, '&').trim() || ''
-            const urlEncoded = urlMatches[i]?.[1] || ''
-            const url = decodeURIComponent(urlEncoded)
-            const snippet = snippetMatches[i]?.[1]?.replace(/&#x27;/g, "'").replace(/&amp;/g, '&').trim() || ''
-
-            if (title) {
-              results.push(`${i + 1}. ${title}\n   ${snippet}\n   URL: ${url}`)
+        if (wikiSearchResponse.ok) {
+          const wikiData = await wikiSearchResponse.json()
+          const wikiResults = wikiData?.query?.search || []
+          for (const result of wikiResults.slice(0, 3)) {
+            // Get the full summary for each Wikipedia article
+            const title = result.title
+            const summaryUrl = `https://en.wikipedia.org/api/rest_v1/page/summary/${encodeURIComponent(title.replace(/ /g, '_'))}`
+            const summaryResponse = await fetch(summaryUrl, {
+              headers: { 'User-Agent': 'ARIA/1.0 (https://ariav2-seven.vercel.app)' },
+            })
+            if (summaryResponse.ok) {
+              const summaryData = await summaryResponse.json()
+              if (summaryData.extract) {
+                results.push(`${results.length + 1}. ${title} (Wikipedia)\n   ${summaryData.extract.slice(0, 300)}\n   URL: ${summaryData.content_urls?.desktop?.page || ''}`)
+              }
             }
           }
+        }
 
-          if (results.length > 0) {
-            toolContext = `Web search results for "${content}":\n${results.join('\n\n')}`
-          } else {
-            toolContext = `Web search returned no results for "${content}". Answer from your own knowledge.`
+        // 2. DuckDuckGo Instant Answer API (supplements Wikipedia)
+        const ddgUrl = `https://api.duckduckgo.com/?q=${encodeURIComponent(content)}&format=json&no_html=1`
+        const ddgResponse = await fetch(ddgUrl, {
+          headers: { 'User-Agent': 'ARIA/1.0 (https://ariav2-seven.vercel.app)' },
+        })
+        if (ddgResponse.ok) {
+          const ddgData = await ddgResponse.json()
+          if (ddgData.AbstractText) {
+            results.push(`${results.length + 1}. ${ddgData.Heading || 'Instant Answer'} (DuckDuckGo)\n   ${ddgData.AbstractText.slice(0, 300)}\n   URL: ${ddgData.AbstractURL || ''}`)
           }
+          if (ddgData.RelatedTopics && Array.isArray(ddgData.RelatedTopics)) {
+            for (const topic of ddgData.RelatedTopics.slice(0, 3)) {
+              if (topic.Text && topic.FirstURL) {
+                results.push(`${results.length + 1}. ${topic.Text.slice(0, 200)}\n   URL: ${topic.FirstURL}`)
+              }
+            }
+          }
+        }
+
+        if (results.length > 0) {
+          toolContext = `Web search results for "${content}":\n${results.join('\n\n')}`
         } else {
-          toolContext = 'Web search was attempted but failed. Answer from your own knowledge.'
+          toolContext = `Web search returned no results for "${content}". Answer from your own knowledge and be honest about uncertainty.`
         }
       } catch (e) {
         console.error('[chat.web_search]', e)
