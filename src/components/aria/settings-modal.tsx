@@ -650,11 +650,9 @@ export function SettingsModal() {
 
 const AI_MODELS = [
   { id: 'deepseek/deepseek-chat', name: 'DeepSeek V3', desc: 'Fast, capable, great value', badge: 'Default' },
-  { id: 'openai/gpt-4o-mini', name: 'GPT-4o Mini', desc: 'Reliable, great reasoning', badge: 'Popular' },
-  { id: 'anthropic/claude-3.5-haiku', name: 'Claude 3.5 Haiku', desc: 'Excellent at conversation', badge: 'Conversational' },
-  { id: 'anthropic/claude-3.5-sonnet', name: 'Claude 3.5 Sonnet', desc: 'Best reasoning, slower', badge: 'Smartest' },
-  { id: 'google/gemini-flash-1.5', name: 'Gemini Flash 1.5', desc: 'Fast, multi-modal', badge: 'Fast' },
-  { id: 'meta-llama/llama-3.3-70b-instruct', name: 'Llama 3.3 70B', desc: 'Open-source, privacy-focused', badge: 'Open Source' },
+  { id: 'qwen/qwen-2.5-72b-instruct', name: 'Qwen 2.5 72B', desc: 'Excellent reasoning, multilingual', badge: 'Capable' },
+  { id: 'amazon/nova-lite-v1', name: 'Amazon Nova Lite', desc: 'Fast, cost-effective, reliable', badge: 'Fast' },
+  { id: 'meta-llama/llama-3.3-70b-instruct', name: 'Llama 3.3 70B', desc: 'Open-source, community-driven', badge: 'Open Source' },
 ] as const
 
 function ModelSelector({ value, onChange }: { value: string; onChange: (v: string) => void }) {
