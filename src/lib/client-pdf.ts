@@ -42,11 +42,25 @@ export async function parsePdfInBrowser(
   // This prevents SSR issues and keeps the bundle small.
   const pdfjsLib = await import('pdfjs-dist')
 
-  // Set the worker source to CDN. This is the most reliable approach for
-  // Next.js — no bundler configuration needed, works in all browsers.
-  // The version matches the installed pdfjs-dist version.
+  // Set the worker source. The worker lets pdfjs parse PDFs off the main
+  // thread (better performance). We try multiple approaches in order of
+  // reliability:
+  //   1. Local bundled worker via ?url import (Turbopack serves it as a static asset)
+  //   2. unpkg CDN with the CORRECT filename (pdf.worker.min.mjs)
+  //   3. Disable worker entirely (runs on main thread — slower but always works)
   if (!pdfjsLib.GlobalWorkerOptions.workerSrc) {
-    pdfjsLib.GlobalWorkerOptions.workerSrc = `https://cdnjs.cloudflare.com/ajax/libs/pdf.js/${pdfjsLib.version}/pdf.worker.min.min.js`
+    try {
+      const workerModule = await import('pdfjs-dist/build/pdf.worker.min.mjs?url')
+      pdfjsLib.GlobalWorkerOptions.workerSrc = workerModule.default
+    } catch {
+      try {
+        // Fallback: unpkg CDN with correct filename
+        pdfjsLib.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjsLib.version}/build/pdf.worker.min.mjs`
+      } catch {
+        // Last resort: no worker (main thread parsing)
+        pdfjsLib.GlobalWorkerOptions.workerSrc = ''
+      }
+    }
   }
 
   const arrayBuffer = await file.arrayBuffer()
