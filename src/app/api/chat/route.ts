@@ -72,17 +72,41 @@ export async function POST(req: NextRequest) {
       const realtimeKeywords = ['live score', 'live match', 'right now', 'currently playing',
         'who is winning', 'whats the score', "what's the score"]
 
+      // === MATCHUP DETECTION ===
+      // Catch "X vs Y" / "X v Y" / "X versus Y" phrasings even without explicit
+      // keywords like "match"/"score". This is what was missing — a user saying
+      // "i think 11th july will be spain vs england" never triggered search before.
+      const matchupPattern = /\b\w+\s+(?:vs?\.?|versus)\s+\w+/i
+      const hasMatchup = matchupPattern.test(content)
+
+      // === CLAIM DETECTION ===
+      // When a user makes a factual CLAIM about an event ("i think...", "is it...",
+      // "did...", "who won..."), we should verify via web search instead of
+      // agreeing from training data (which causes sycophancy on stale facts).
+      const claimPattern = /\b(?:i think|i thought|i heard|is it|isn't it|aren't they|did they|didn't they|who won|who won|when is|what time is|what's the|whats the|are they|will it be|was it)\b/i
+      const hasClaim = claimPattern.test(content)
+
+      // === DATE + EVENT DETECTION ===
+      // A message mentioning a specific date + a proper noun (team/country/event)
+      // is almost always a factual question that needs verification.
+      const hasDate = /\b(?:today|tonight|tomorrow|yesterday|\d{1,2}(?:st|nd|rd|th)?\s+(?:january|february|march|april|may|june|july|august|september|october|november|december)|(?:january|february|march|april|may|june|july|august|september|october|november|december)\s+\d{1,2})\b/i.test(content)
+
       const needsSearch = sportsKeywords.some(kw => lower.includes(kw)) ||
                          newsKeywords.some(kw => lower.includes(kw)) ||
-                         realtimeKeywords.some(kw => lower.includes(kw))
+                         realtimeKeywords.some(kw => lower.includes(kw)) ||
+                         hasMatchup ||
+                         (hasClaim && (hasDate || hasMatchup || sportsKeywords.some(kw => lower.includes(kw))))
 
-      const isFollowUp = content.length < 50 && (
+      // Follow-up short queries that are conversational (not factual claims) —
+      // don't search for "which one?", "what about that?", etc.
+      // BUT still search if it contains a matchup or claim, because those need verification.
+      const isConversationalFollowUp = content.length < 50 && (
         lower.includes('which') || lower.includes('what about') || lower.includes('you mean') ||
         lower.includes('talking about') || lower.includes('are you sure') || lower.includes('really') ||
         lower.includes('but ') || lower.includes('wait') || lower.includes('how can')
-      )
+      ) && !hasMatchup && !hasClaim
 
-      if (needsSearch && !isFollowUp) {
+      if (needsSearch && !isConversationalFollowUp) {
         tool = 'web_search'
       }
     }
