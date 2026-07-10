@@ -5,7 +5,6 @@ import {
   Send,
   Plus,
   Globe,
-  Image as ImageIcon,
   X,
   Clock,
   Lightbulb,
@@ -164,14 +163,8 @@ export function ChatArea() {
   }
 
   const toggleTool = (tool: 'web_search' | 'image_generation') => {
-    // Web search is ON by default but can be TOGGLED OFF.
-    // - Tapping web_search when it's on: turn it OFF (pendingTool = null)
-    // - Tapping web_search when it's off: turn it ON
-    // - Tapping image_generation: switch to image gen (or back to search)
-    if (tool === 'image_generation') {
-      setPendingTool(pendingTool === 'image_generation' ? 'web_search' : 'image_generation')
-    } else {
-      // Toggle: if currently on (web_search), turn off (null). If off or on image_gen, turn on.
+    // Only web search toggle remains (image generation removed).
+    if (tool === 'web_search') {
       setPendingTool(pendingTool === 'web_search' ? null : 'web_search')
     }
   }
@@ -273,27 +266,6 @@ export function ChatArea() {
             </div>
           )}
 
-          {/* Pending tool indicator — only show for image_generation.
-              Web search shows its state via the globe button highlight. */}
-          {pendingTool === 'image_generation' && (
-            <div className="flex justify-center mb-2">
-              <div
-                className="inline-flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-full"
-                style={{
-                  background: 'rgba(245,158,11,0.1)',
-                  border: '1px solid rgba(245,158,11,0.3)',
-                  color: 'var(--aria-accent-glow)',
-                }}
-              >
-                <ImageIcon size={11} />
-                Image generation on next send
-                <button onClick={() => setPendingTool('web_search')} className="ml-1">
-                  <X size={11} />
-                </button>
-              </div>
-            </div>
-          )}
-
           {/* Input container */}
           <div
             className="rounded-3xl p-3 transition-all"
@@ -345,19 +317,6 @@ export function ChatArea() {
                 title={pendingTool === 'web_search' ? 'Web search ON — click to turn off' : 'Web search OFF — click to turn on'}
               >
                 <Globe size={15} />
-              </button>
-              <button
-                onClick={toggleTool.bind(null, 'image_generation')}
-                className="w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0 transition-colors"
-                style={{
-                  background: pendingTool === 'image_generation' ? 'rgba(245,158,11,0.15)' : 'var(--aria-card)',
-                  border: '1px solid',
-                  borderColor: pendingTool === 'image_generation' ? 'var(--aria-accent)' : 'var(--aria-border)',
-                  color: pendingTool === 'image_generation' ? 'var(--aria-accent-glow)' : 'var(--aria-fg-muted)',
-                }}
-                title="Generate an image"
-              >
-                <ImageIcon size={15} />
               </button>
               <button
                 onClick={handleSend}

@@ -281,7 +281,6 @@ export async function POST(req: NextRequest) {
 
     // === TOOL EXECUTION (pre-LLM) ===
     let toolContext: string | undefined
-    let generatedImage: { url: string; prompt: string } | undefined
     let webSources: Array<{ title: string; url: string; host: string }> = []
 
     if (tool === 'web_search') {
@@ -556,18 +555,6 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    if (tool === 'image_generation') {
-      try {
-        // Pollinations.ai — free, no API key, works on Vercel
-        // Returns a direct image URL (not base64) — we pass it to the frontend
-        const encodedPrompt = encodeURIComponent(content.slice(0, 500))
-        const imageUrl = `https://image.pollinations.ai/prompt/${encodedPrompt}?width=1024&height=1024&nologo=true`
-        generatedImage = { url: imageUrl, prompt: content }
-      } catch (e) {
-        console.error('[chat.image_gen]', e)
-      }
-    }
-
     // === BUILD MESSAGE PAYLOAD ===
     const fullToolContext = [toolContext, knowledgeContext].filter(Boolean).join('\n\n')
 
@@ -650,11 +637,6 @@ No hedging, no disclaimers. Give your raw, unvarnished interpretation. Engage wi
           controller.enqueue(encoder.encode(`data: ${JSON.stringify(obj)}\n\n`))
 
         try {
-          // If an image was generated, surface it first
-          if (generatedImage) {
-            send({ type: 'image', url: generatedImage.url, prompt: generatedImage.prompt })
-          }
-
           // Send web search sources to the frontend BEFORE the response streams.
           // The UI renders a "Found N web pages" bar with favicon logos (like
           // DeepSeek/ChatGPT) so the user sees where ARIA pulled data from.
@@ -913,9 +895,7 @@ No hedging, no disclaimers. Give your raw, unvarnished interpretation. Engage wi
               role: 'assistant',
               content: fullText,
               toolUsed: tool ?? (attachments?.length ? 'vision' : null),
-              attachmentsJson: generatedImage
-                ? JSON.stringify([{ type: 'image', dataUrl: generatedImage.url }])
-                : null,
+              attachmentsJson: null,
             },
           })
 
