@@ -75,12 +75,46 @@ async function fetchUrlContent(url: string): Promise<{ title: string; content: s
   return { title: title.slice(0, 200), content }
 }
 
+/**
+ * Parse a PDF Blob into text using pdfjs-dist (legacy build for Node.js).
+ *
+ * NOTE: We use pdfjs-dist/legacy/build/pdf.mjs directly — NOT the
+ * `pdf-parse` wrapper package. pdf-parse v2 changed its API (class instead
+ * of function) and its underlying pdfjs tries to use DOMMatrix (a browser-
+ * only API) which throws "DOMMatrix is not defined" in serverless/Node.js.
+ * The legacy build of pdfjs-dist works correctly in Node.js.
+ */
 async function parsePdf(file: Blob): Promise<string> {
   const arrayBuffer = await file.arrayBuffer()
-  const buffer = Buffer.from(arrayBuffer)
-  const pdfParse = (await import('pdf-parse')).default
-  const data = await pdfParse(buffer)
-  return refineText(data.text)
+  const uint8 = new Uint8Array(arrayBuffer)
+  // Dynamic import of the legacy build — avoids bundler issues + ensures
+  // we get the Node.js-compatible version, not the browser version.
+  const pdfjs = await import('pdfjs-dist/legacy/build/pdf.mjs')
+  const loadingTask = pdfjs.getDocument({
+    data: uint8,
+    // Suppress the standardFontDataUrl warning — we don't need font metrics
+    // for text extraction, and Vercel's serverless can't serve the font files.
+    disableFontFace: true,
+    useSystemFonts: true,
+  })
+  const doc = await loadingTask.promise
+  let fullText = ''
+  // Cap at 200 pages to prevent runaway parsing on huge PDFs
+  const maxPages = Math.min(doc.numPages, 200)
+  for (let i = 1; i <= maxPages; i++) {
+    try {
+      const page = await doc.getPage(i)
+      const content = await page.getTextContent()
+      const pageText = content.items
+        .map((item: { str?: string }) => item.str || '')
+        .join(' ')
+      fullText += pageText + '\n'
+    } catch {
+      // Skip pages that fail to parse — partial extraction is better than none
+    }
+  }
+  await doc.destroy()
+  return refineText(fullText)
 }
 
 /**
