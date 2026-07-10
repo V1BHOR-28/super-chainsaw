@@ -703,18 +703,27 @@ Get straight to it. No intro. Just the raw analysis.`
             }
 
             // === PARALLEL LLM EXECUTION ===
-            // Fire OpenRouter + Pollinations SIMULTANEOUSLY. First success wins.
-            // This eliminates the sequential timeout problem where waiting for
-            // OpenRouter's 429 (which can take 10-12s to return) stole time
-            // from Pollinations. Now both run at the same time — if OpenRouter
-            // is rate-limited, Pollinations is already responding.
+            // Fire ALL providers SIMULTANEOUSLY. First success wins via Promise.any().
             //
-            // Promise.any() resolves with the first fulfilled promise and only
-            // rejects (with AggregateError) if ALL promises reject.
-            const providers: Array<{ name: string; fn: () => Promise<string> }> = [
-              { name: selectedModel, fn: () => callOpenRouter(selectedModel) },
-              { name: 'pollinations', fn: () => callPollinations() },
-            ]
+            // We always include a FREE OpenRouter model (Llama) alongside the user's
+            // selected model — because the user's saved preference might be DeepSeek
+            // (paid, 402 out of credits) or another model that fails. The free model
+            // ensures there's always a viable OpenRouter path.
+            //
+            // Pollinations runs too as the keyless backstop.
+            const providers: Array<{ name: string; fn: () => Promise<string> }> = []
+
+            // User's selected model (might be DeepSeek-paid, might be Llama-free)
+            providers.push({ name: selectedModel, fn: () => callOpenRouter(selectedModel) })
+
+            // ALWAYS add a free OpenRouter model (different from selectedModel if possible)
+            const freeFallback = selectedModel.includes(':free')
+              ? 'openai/gpt-oss-120b:free'  // user already picked a free model, use a different one
+              : 'meta-llama/llama-3.3-70b-instruct:free'  // user picked paid, add free Llama
+            providers.push({ name: freeFallback, fn: () => callOpenRouter(freeFallback) })
+
+            // Pollinations keyless backstop
+            providers.push({ name: 'pollinations', fn: () => callPollinations() })
 
             try {
               const result = await Promise.any(
@@ -727,24 +736,15 @@ Get straight to it. No intro. Just the raw analysis.`
               providerUsed = result.name
               if (result.name !== selectedModel) {
                 fallbackHappened = true
-                console.log(`[chat.llm] OpenRouter failed, using: ${result.name}`)
+                console.log(`[chat.llm] Fallback — using: ${result.name} (selected was ${selectedModel})`)
               }
             } catch (aggErr) {
               // AggregateError — ALL parallel providers failed.
-              // Last resort: try a different OpenRouter free model.
               const errors = aggErr instanceof AggregateError
                 ? aggErr.errors.map((e, i) => `${providers[i]?.name}: ${e?.message?.slice(0, 60)}`).join(' | ')
                 : 'unknown error'
-              console.warn(`[chat.llm] Parallel providers failed: ${errors}. Trying secondary OpenRouter model...`)
-
-              try {
-                text = await callOpenRouter('openai/gpt-oss-120b:free')
-                providerUsed = 'openai/gpt-oss-120b:free'
-                fallbackHappened = true
-              } catch (e3) {
-                console.error('[chat.llm] ALL PROVIDERS FAILED:', errors, '| secondary:', (e3 as Error).message?.slice(0, 80))
-                throw new Error(`All providers failed. ${errors}`)
-              }
+              console.error('[chat.llm] ALL PROVIDERS FAILED:', errors)
+              throw new Error(`All providers failed. ${errors}`)
             }
 
             fullText = text
