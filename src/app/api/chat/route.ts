@@ -623,7 +623,6 @@ Get straight to it. No intro. Just the raw analysis.`
               return content.trim()
             }
 
-            let text = ''
             let providerUsed = ''
             let fallbackHappened = false
 
