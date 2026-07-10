@@ -9,6 +9,12 @@
     "src/app/api/search/route.ts": {
       "maxDuration": 30
     },
+    "src/app/api/knowledge/route.ts": {
+      "maxDuration": 60
+    },
+    "src/app/api/knowledge/batch/route.ts": {
+      "maxDuration": 30
+    },
     "src/app/api/memory/detect/route.ts": {
       "maxDuration": 30
     }

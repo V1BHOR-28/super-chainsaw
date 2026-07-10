@@ -5,15 +5,19 @@ import { motion, AnimatePresence } from 'framer-motion'
 import { BookOpen, Link2, FileText, X, Loader2, Trash2, BookMarked, Upload, FileUp } from 'lucide-react'
 import { toast } from 'sonner'
 import { useAriaStore } from '@/lib/store'
+import { parsePdfInBrowser, type PdfParseProgress } from '@/lib/client-pdf'
+import { chunkText } from '@/lib/chunk-text'
 
 type FeedTab = 'text' | 'url' | 'file' | 'library'
-type FeedState = 'idle' | 'reading' | 'refining' | 'embedding' | 'done'
+type FeedState = 'idle' | 'reading' | 'refining' | 'embedding' | 'parsing' | 'indexing' | 'done'
 
 const STATE_LABELS: Record<FeedState, string> = {
   idle: '',
   reading: 'ARIA is reading the document...',
   refining: 'ARIA is analyzing what she learned...',
   embedding: 'ARIA is storing it in her library...',
+  parsing: 'Reading the PDF in your browser...',
+  indexing: 'Indexing chunks into ARIA\'s library...',
   done: 'Done! ARIA now knows this.',
 }
 
@@ -25,6 +29,9 @@ export function FeedAriaModal() {
   const [file, setFile] = useState<File | null>(null)
   const [state, setState] = useState<FeedState>('idle')
   const [knowledge, setKnowledge] = useState<Array<{ id: string; title: string; source: string; contentLength: number }>>([])
+  // Large-file pipeline progress
+  const [parseProgress, setParseProgress] = useState<PdfParseProgress | null>(null)
+  const [indexProgress, setIndexProgress] = useState<{ current: number; total: number } | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   const handleSubmit = async () => {
@@ -41,8 +48,18 @@ export function FeedAriaModal() {
       return
     }
 
+    // === LARGE PDF PIPELINE ===
+    // PDFs are parsed in the browser (client-side) to avoid Vercel's 60s
+    // timeout. The extracted text is chunked and sent to the backend in
+    // batches for embedding + storage. This supports books of ANY size
+    // (3000+ pages) because the browser has no timeout or memory limit.
+    if (tab === 'file' && file && (file.name.toLowerCase().endsWith('.pdf') || file.type === 'application/pdf')) {
+      return handlePdfUpload(file)
+    }
+
+    // === EXISTING PATH (text, URL, TXT files) ===
     setState('reading')
-    if (tab === 'url' || tab === 'file') {
+    if (tab === 'url') {
       setTimeout(() => setState('refining'), 2000)
       setTimeout(() => setState('embedding'), 4000)
     } else {
@@ -98,6 +115,102 @@ export function FeedAriaModal() {
       }, 1500)
     } catch (err) {
       setState('idle')
+      toast.error((err as Error).message)
+    }
+  }
+
+  /**
+   * Client-side PDF pipeline:
+   * 1. Parse the PDF in the browser (no server timeout)
+   * 2. Chunk the extracted text into ~3000-char sections
+   * 3. Send batches of 10 chunks to /api/knowledge/batch for embedding + storage
+   * 4. Show live progress: "Reading page X of Y" → "Indexing chunk X of Y"
+   *
+   * This supports books of ANY size (3000+ pages) because:
+   * - Browser parsing has no timeout (unlike Vercel's 60s limit)
+   * - Browser memory is the user's device RAM (typically 4-16GB, plenty)
+   * - Batches are sent sequentially, each taking ~2-3s
+   */
+  const handlePdfUpload = async (pdfFile: File) => {
+    setParseProgress(null)
+    setIndexProgress(null)
+    setState('parsing')
+
+    try {
+      // Step 1: Parse the PDF in the browser
+      const fullText = await parsePdfInBrowser(pdfFile, (progress) => {
+        setParseProgress(progress)
+      })
+
+      if (!fullText || fullText.trim().length < 10) {
+        throw new Error('Could not extract any text from this PDF. It might be scanned images (no text layer).')
+      }
+
+      // Step 2: Chunk the text
+      const chunks = chunkText(fullText)
+      const totalChunks = chunks.length
+      const documentId = `doc-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+      const title = pdfFile.name.replace(/\.pdf$/i, '')
+
+      // Step 3: Send chunks to backend in batches of 10
+      setState('indexing')
+      const BATCH_SIZE = 10
+      let storedTotal = 0
+      let embeddedTotal = 0
+
+      for (let i = 0; i < chunks.length; i += BATCH_SIZE) {
+        const batchChunks = chunks.slice(i, i + BATCH_SIZE)
+        const batchIndex = Math.floor(i / BATCH_SIZE)
+
+        setIndexProgress({ current: i + batchChunks.length, total: totalChunks })
+
+        const res = await fetch('/api/knowledge/batch', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            documentId,
+            title,
+            source: 'pdf',
+            chunks: batchChunks,
+            batchIndex,
+            totalBatches: Math.ceil(totalChunks / BATCH_SIZE),
+            totalChunks,
+            chunkOffset: i,
+          }),
+        })
+
+        const data = await res.json()
+        if (!res.ok) throw new Error(data.error || 'Batch upload failed')
+        storedTotal += data.stored || 0
+        embeddedTotal += data.embedded || 0
+      }
+
+      // Step 4: Done
+      setState('done')
+      const chunkInfo = storedTotal > 1 ? ` (${storedTotal} sections indexed)` : ''
+      const pageInfo = parseProgress ? ` · ${parseProgress.totalPages} pages` : ''
+      toast.success(`ARIA has learned this book.${chunkInfo}${pageInfo} She'll use it in your conversations.`)
+
+      setKnowledge(prev => [{
+        id: documentId,
+        title: title,
+        source: 'pdf',
+        contentLength: fullText.length,
+      }, ...prev])
+
+      setFile(null)
+      setParseProgress(null)
+      setIndexProgress(null)
+      if (fileInputRef.current) fileInputRef.current.value = ''
+
+      setTimeout(() => {
+        setState('idle')
+        setTab('library')
+      }, 2000)
+    } catch (err) {
+      setState('idle')
+      setParseProgress(null)
+      setIndexProgress(null)
       toast.error((err as Error).message)
     }
   }
@@ -302,8 +415,8 @@ export function FeedAriaModal() {
                   onChange={(e) => {
                     const f = e.target.files?.[0]
                     if (f) {
-                      if (f.size > 10 * 1024 * 1024) {
-                        toast.error('File too large (max 10MB)')
+                      if (f.size > 50 * 1024 * 1024) {
+                        toast.error('File too large (max 50MB)')
                         return
                       }
                       setFile(f)
@@ -343,23 +456,66 @@ export function FeedAriaModal() {
                         Drop a PDF or text file here
                       </div>
                       <div className="text-[11px] mt-1" style={{ color: 'var(--aria-fg-dim)' }}>
-                        PDF, TXT, or Markdown · Max 10MB
+                        PDF, TXT, or Markdown · Max 50MB
                       </div>
                     </div>
                   )}
                 </button>
                 <p className="text-[11px]" style={{ color: 'var(--aria-fg-dim)' }}>
-                  ARIA will read the entire document, learn its contents, and use it as context when you ask related questions. Perfect for books, manuals, study notes, research papers.
+                  ARIA will read the entire document in your browser (no size limit), learn its contents, and use it as context when you ask related questions. Perfect for books, manuals, study notes, research papers.
                 </p>
+
+                {/* Progress bar for large PDF pipeline */}
+                {state === 'parsing' && parseProgress && (
+                  <div className="rounded-xl p-4" style={{ background: 'var(--aria-bg-panel)', border: '1px solid var(--aria-border)' }}>
+                    <div className="flex items-center justify-between mb-2">
+                      <span className="text-[12px] font-medium" style={{ color: 'var(--aria-fg)' }}>
+                        Reading page {parseProgress.currentPage} of {parseProgress.totalPages}
+                      </span>
+                      <span className="text-[12px] font-mono-aria" style={{ color: 'var(--aria-accent-glow)' }}>
+                        {parseProgress.percent}%
+                      </span>
+                    </div>
+                    <div className="h-2 rounded-full overflow-hidden" style={{ background: 'rgba(252,211,77,0.08)' }}>
+                      <div
+                        className="h-full rounded-full transition-all duration-300"
+                        style={{ width: `${parseProgress.percent}%`, background: 'var(--aria-accent)' }}
+                      />
+                    </div>
+                  </div>
+                )}
+
+                {state === 'indexing' && indexProgress && (
+                  <div className="rounded-xl p-4" style={{ background: 'var(--aria-bg-panel)', border: '1px solid var(--aria-border)' }}>
+                    <div className="flex items-center justify-between mb-2">
+                      <span className="text-[12px] font-medium" style={{ color: 'var(--aria-fg)' }}>
+                        Indexing chunk {indexProgress.current} of {indexProgress.total}
+                      </span>
+                      <span className="text-[12px] font-mono-aria" style={{ color: 'var(--aria-accent-glow)' }}>
+                        {Math.round((indexProgress.current / indexProgress.total) * 100)}%
+                      </span>
+                    </div>
+                    <div className="h-2 rounded-full overflow-hidden" style={{ background: 'rgba(252,211,77,0.08)' }}>
+                      <div
+                        className="h-full rounded-full transition-all duration-300"
+                        style={{ width: `${(indexProgress.current / indexProgress.total) * 100}%`, background: 'var(--aria-accent)' }}
+                      />
+                    </div>
+                    <p className="text-[10px] mt-2" style={{ color: 'var(--aria-fg-dim)' }}>
+                      ARIA is storing what she learned. This won't take long.
+                    </p>
+                  </div>
+                )}
+
                 <button
                   onClick={handleSubmit}
-                  disabled={!file || state !== 'idle'}
+                  disabled={!file || (state !== 'idle' && state !== 'done')}
                   className="w-full py-3 rounded-xl flex items-center justify-center gap-2 text-[14px] font-medium transition-all disabled:opacity-50"
                   style={{
                     background: file ? 'var(--aria-accent)' : 'var(--aria-fg-dim)',
                     color: 'var(--aria-bg)',
                     border: 'none',
-                    cursor: file ? 'pointer' : 'not-allowed',
+                    cursor: file && state === 'idle' ? 'pointer' : 'not-allowed',
                   }}
                 >
                   {state !== 'idle' && state !== 'done' ? (

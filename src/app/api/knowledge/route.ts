@@ -4,6 +4,7 @@ export const maxDuration = 60
 import { db } from '@/lib/db'
 import { getAuthenticatedUserId } from '@/lib/user'
 import { generateEmbedding, embeddingToPgVector } from '@/lib/embeddings'
+import { chunkText } from '@/lib/chunk-text'
 
 /**
  * GET /api/knowledge — list all knowledge entries
@@ -48,54 +49,7 @@ function refineText(raw: string): string {
     .slice(0, MAX_CONTENT_LENGTH)
 }
 
-/**
- * Split text into chunks at paragraph boundaries.
- * Target ~3000 chars per chunk (roughly 750 tokens — good for embedding + retrieval).
- * Chunks overlap by 200 chars to preserve context at boundaries.
- * This is what lets ARIA read WHOLE BOOKS — each chunk is stored + embedded
- * separately, so semantic search finds the right section from anywhere in the book.
- */
-function chunkText(text: string, targetSize = 3000, overlap = 200): string[] {
-  // Split on double newlines (paragraph boundaries)
-  const paragraphs = text.split(/\n\n+/).filter(p => p.trim().length > 0)
-  const chunks: string[] = []
-  let current = ''
-
-  for (const para of paragraphs) {
-    // If adding this paragraph exceeds target and we already have content, flush
-    if (current.length + para.length > targetSize && current.length > 0) {
-      chunks.push(current.trim())
-      // Start next chunk with overlap (last N chars of previous)
-      current = current.slice(-overlap) + '\n\n' + para
-    } else {
-      current = current ? current + '\n\n' + para : para
-    }
-  }
-  if (current.trim()) chunks.push(current.trim())
-
-  // If a single paragraph is huge (no \n\n breaks), split by sentence
-  const finalChunks: string[] = []
-  for (const chunk of chunks) {
-    if (chunk.length <= targetSize * 1.5) {
-      finalChunks.push(chunk)
-    } else {
-      // Hard split very long chunks at sentence boundaries
-      const sentences = chunk.match(/[^.!?]+[.!?]+/g) || [chunk]
-      let s = ''
-      for (const sent of sentences) {
-        if (s.length + sent.length > targetSize && s.length > 0) {
-          finalChunks.push(s.trim())
-          s = sent
-        } else {
-          s += sent
-        }
-      }
-      if (s.trim()) finalChunks.push(s.trim())
-    }
-  }
-
-  return finalChunks.length > 0 ? finalChunks : [text.slice(0, targetSize)]
-}
+// chunkText is imported from '@/lib/chunk-text' — shared between client and server
 
 function titleFromUrl(url: string): string {
   try {
