@@ -157,6 +157,9 @@ export async function POST(req: NextRequest) {
           knowledgeContext = knowledgeResults
             .map((k, i) => `--- KNOWLEDGE ${i + 1}: ${k.title} ---\n${k.content.slice(0, 2000)}`)
             .join('\n\n')
+          // Add explicit framing so ARIA treats fed knowledge as authoritative
+          // for questions it covers — this is the user's personal library.
+          knowledgeContext = `USER'S FED KNOWLEDGE (from ARIA's digital library — these are documents the user explicitly taught you. Treat them as authoritative for questions they answer. If a question relates to this knowledge, cite the document and answer from it. If the knowledge doesn't cover the question, ignore it and use web search or your training.)\n\n${knowledgeContext}`
         }
       }
     } catch {

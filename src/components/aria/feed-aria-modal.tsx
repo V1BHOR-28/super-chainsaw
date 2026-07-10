@@ -1,19 +1,19 @@
 'use client'
 
-import { useState } from 'react'
+import { useState, useRef } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { BookOpen, Link2, FileText, X, Loader2, Trash2, BookMarked } from 'lucide-react'
+import { BookOpen, Link2, FileText, X, Loader2, Trash2, BookMarked, Upload, FileUp } from 'lucide-react'
 import { toast } from 'sonner'
 import { useAriaStore } from '@/lib/store'
 
-type FeedTab = 'text' | 'url' | 'library'
+type FeedTab = 'text' | 'url' | 'file' | 'library'
 type FeedState = 'idle' | 'reading' | 'refining' | 'embedding' | 'done'
 
 const STATE_LABELS: Record<FeedState, string> = {
   idle: '',
-  reading: 'ARIA is reading the page...',
-  refining: 'ARIA is refining your text...',
-  embedding: 'ARIA is storing what she learned...',
+  reading: 'ARIA is reading the document...',
+  refining: 'ARIA is analyzing what she learned...',
+  embedding: 'ARIA is storing it in her library...',
   done: 'Done! ARIA now knows this.',
 }
 
@@ -22,8 +22,10 @@ export function FeedAriaModal() {
   const [tab, setTab] = useState<FeedTab>('text')
   const [textContent, setTextContent] = useState('')
   const [url, setUrl] = useState('')
+  const [file, setFile] = useState<File | null>(null)
   const [state, setState] = useState<FeedState>('idle')
   const [knowledge, setKnowledge] = useState<Array<{ id: string; title: string; source: string; contentLength: number }>>([])
+  const fileInputRef = useRef<HTMLInputElement>(null)
 
   const handleSubmit = async () => {
     if (tab === 'text' && !textContent.trim()) {
@@ -34,10 +36,13 @@ export function FeedAriaModal() {
       toast.error('Paste a URL first')
       return
     }
+    if (tab === 'file' && !file) {
+      toast.error('Choose a file first')
+      return
+    }
 
     setState('reading')
-    if (tab === 'url') {
-      // Simulate reading states for UX
+    if (tab === 'url' || tab === 'file') {
       setTimeout(() => setState('refining'), 2000)
       setTimeout(() => setState('embedding'), 4000)
     } else {
@@ -46,15 +51,25 @@ export function FeedAriaModal() {
     }
 
     try {
-      const res = await fetch('/api/knowledge/upload', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          type: tab,
-          content: textContent,
-          url: url,
-        }),
-      })
+      let res: Response
+      if (tab === 'file' && file) {
+        const formData = new FormData()
+        formData.append('file', file)
+        res = await fetch('/api/knowledge/upload', {
+          method: 'POST',
+          body: formData,
+        })
+      } else {
+        res = await fetch('/api/knowledge/upload', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            type: tab,
+            content: textContent,
+            url: url,
+          }),
+        })
+      }
 
       const data = await res.json()
       if (!res.ok) {
@@ -62,9 +77,8 @@ export function FeedAriaModal() {
       }
 
       setState('done')
-      toast.success('ARIA has learned this. She\'ll use it in your conversations.')
+      toast.success("ARIA has learned this. She'll use it in your conversations.")
 
-      // Add to library list
       setKnowledge(prev => [{
         id: data.knowledge.id,
         title: data.knowledge.title,
@@ -72,11 +86,11 @@ export function FeedAriaModal() {
         contentLength: data.knowledge.contentLength,
       }, ...prev])
 
-      // Reset inputs
       setTextContent('')
       setUrl('')
+      setFile(null)
+      if (fileInputRef.current) fileInputRef.current.value = ''
 
-      // Switch to library tab after 1.5s
       setTimeout(() => {
         setState('idle')
         setTab('library')
@@ -164,10 +178,11 @@ export function FeedAriaModal() {
           </div>
 
           {/* Tabs */}
-          <div className="flex gap-1 px-8 mt-4">
+          <div className="flex gap-1 px-8 mt-4 flex-wrap">
             {([
               { id: 'text' as const, label: 'Paste Text', icon: FileText },
               { id: 'url' as const, label: 'From URL', icon: Link2 },
+              { id: 'file' as const, label: 'Upload PDF', icon: FileUp },
               { id: 'library' as const, label: 'Library', icon: BookMarked },
             ]).map(t => {
               const Icon = t.icon
@@ -275,6 +290,88 @@ export function FeedAriaModal() {
               </div>
             )}
 
+            {/* FILE TAB (PDF / TXT upload) */}
+            {tab === 'file' && (
+              <div className="space-y-4">
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept=".pdf,.txt,.md,text/plain,application/pdf"
+                  className="hidden"
+                  onChange={(e) => {
+                    const f = e.target.files?.[0]
+                    if (f) {
+                      if (f.size > 10 * 1024 * 1024) {
+                        toast.error('File too large (max 10MB)')
+                        return
+                      }
+                      setFile(f)
+                    }
+                  }}
+                />
+                <button
+                  onClick={() => fileInputRef.current?.click()}
+                  className="w-full rounded-xl p-8 flex flex-col items-center justify-center gap-3 transition-all"
+                  style={{
+                    background: 'var(--aria-bg-panel)',
+                    border: `1.5px dashed ${file ? 'var(--aria-accent)' : 'var(--aria-border)'}`,
+                    cursor: 'pointer',
+                  }}
+                >
+                  <div
+                    className="w-12 h-12 rounded-full flex items-center justify-center"
+                    style={{
+                      background: file ? 'rgba(245,158,11,0.15)' : 'var(--aria-card)',
+                      color: file ? 'var(--aria-accent-glow)' : 'var(--aria-fg-muted)',
+                    }}
+                  >
+                    {file ? <FileText size={22} /> : <Upload size={22} />}
+                  </div>
+                  {file ? (
+                    <div className="text-center">
+                      <div className="text-[14px] font-medium" style={{ color: 'var(--aria-fg)' }}>
+                        {file.name}
+                      </div>
+                      <div className="text-[11px] mt-1" style={{ color: 'var(--aria-fg-dim)' }}>
+                        {(file.size / 1024).toFixed(1)} KB · Click to change
+                      </div>
+                    </div>
+                  ) : (
+                    <div className="text-center">
+                      <div className="text-[14px] font-medium" style={{ color: 'var(--aria-fg)' }}>
+                        Drop a PDF or text file here
+                      </div>
+                      <div className="text-[11px] mt-1" style={{ color: 'var(--aria-fg-dim)' }}>
+                        PDF, TXT, or Markdown · Max 10MB
+                      </div>
+                    </div>
+                  )}
+                </button>
+                <p className="text-[11px]" style={{ color: 'var(--aria-fg-dim)' }}>
+                  ARIA will read the entire document, learn its contents, and use it as context when you ask related questions. Perfect for books, manuals, study notes, research papers.
+                </p>
+                <button
+                  onClick={handleSubmit}
+                  disabled={!file || state !== 'idle'}
+                  className="w-full py-3 rounded-xl flex items-center justify-center gap-2 text-[14px] font-medium transition-all disabled:opacity-50"
+                  style={{
+                    background: file ? 'var(--aria-accent)' : 'var(--aria-fg-dim)',
+                    color: 'var(--aria-bg)',
+                    border: 'none',
+                    cursor: file ? 'pointer' : 'not-allowed',
+                  }}
+                >
+                  {state !== 'idle' && state !== 'done' ? (
+                    <span className="flex items-center gap-2"><Loader2 size={16} className="animate-spin" /> {STATE_LABELS[state]}</span>
+                  ) : state === 'done' ? (
+                    <span>✓ {STATE_LABELS.done}</span>
+                  ) : (
+                    <span>Feed ARIA</span>
+                  )}
+                </button>
+              </div>
+            )}
+
             {/* LIBRARY TAB */}
             {tab === 'library' && (
               <div className="space-y-2 max-h-[350px] overflow-y-auto">
@@ -296,7 +393,7 @@ export function FeedAriaModal() {
                           {k.title}
                         </div>
                         <div className="text-[11px] mt-1" style={{ color: 'var(--aria-fg-dim)' }}>
-                          {k.source === 'url' ? '🌐 URL' : '📝 Text'} · {k.contentLength.toLocaleString()} chars
+                          {k.source === 'url' ? '🌐 URL' : k.source === 'pdf' ? '📄 PDF' : k.source === 'file' ? '📎 File' : '📝 Text'} · {k.contentLength.toLocaleString()} chars
                         </div>
                       </div>
                       <button
