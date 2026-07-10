@@ -718,7 +718,6 @@ Get straight to it. No intro. Just the raw analysis.`
               'openai/gpt-oss-20b:free',
             ].filter((m, i, arr) => arr.indexOf(m) === i).slice(0, 3) // max 3 OpenRouter attempts so we always have time for Pollinations
 
-            let text = ''
             let layer1Err = ''
             let layer2Err = ''
 
