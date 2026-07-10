@@ -570,6 +570,9 @@ Get straight to it. No intro. Just the raw analysis.`
               body: JSON.stringify({
                 model: selectedModel,
                 messages: sdkMessages,
+                max_tokens: 4096, // cap output tokens — keeps each call affordable
+                // and prevents OpenRouter 402 "requires more credits" errors
+                // when the account is low on free-tier credits.
               }),
             })
 
@@ -604,9 +607,8 @@ Get straight to it. No intro. Just the raw analysis.`
               stack: e instanceof Error ? e.stack : undefined,
               name: e instanceof Error ? e.name : undefined,
             })
-            // TEMP DEBUG: include the actual error so we can diagnose remotely
             fullText =
-              `[DEBUG LLM ERROR] ${errMsg}\n\nI lost my train of thought there for a moment. The connection to my reasoning layer dropped. Try sending that again — I'm here.`
+              "I lost my train of thought there for a moment. The connection to my reasoning layer dropped. Try sending that again — I'm here."
             send({ type: 'token', value: fullText })
           }
 
