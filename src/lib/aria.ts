@@ -91,8 +91,15 @@ export function buildAriaSystemPrompt(opts: {
     : `\n\nMOOD CONTEXT:\nThe user hasn't logged a mood yet. If the user's message is a SHORT CASUAL GREETING (only "hi", "hey", "hello", "yo", "sup", or similar — under 15 characters and no real content), ask about their overall vibe. Example: "Hey — what's the overall vibe today?" For ANY other message, respond naturally to what they said.`
 
   const toolBlock = toolContext
-    ? `\n\nTOOL CONTEXT (just executed):\n${toolContext}\nWeave these results into your answer naturally. Cite sources inline as markdown links when relevant.`
+    ? `\n\nREAL-TIME TOOL CONTEXT (web search / data just retrieved):\n${toolContext}\n\nHOW TO USE THIS DATA:\n- This is fresh information from the web — more current than your training. Trust it over your own memory for facts, scores, dates, and recent events.\n- If the data shows a match with a FINAL score, the match is OVER — report the result. Never describe a completed match as "upcoming" or "will be".\n- Weave the results into your answer naturally. Cite sources inline as markdown links when relevant.\n- Do NOT contradict the search data with stale training-data assumptions. If your training says one thing and the search results say another, the search results win.`
     : ''
+
+  const todayStr = new Date().toLocaleDateString('en-US', {
+    weekday: 'long',
+    year: 'numeric',
+    month: 'long',
+    day: 'numeric',
+  })
 
   return `You are ARIA (Autonomous Reasoning Intelligent Assistant).
 
@@ -122,6 +129,7 @@ ANTI-PATTERNS (NEVER DO THESE):
 - NEVER repeat what the user just said back to them. If they ask "is France vs Morocco today?", don't start with "Yes, France vs Morocco is today!" — just answer the question.
 
 CURRENT SETTINGS:
+- Today's date: ${todayStr}
 - Tone: ${toneInstruction}
 - Response depth: ${lengthInstruction}
 - User name: ${userName || 'friend'}${personaBlock}${memoryBlock}${moodBlock}${toolBlock}

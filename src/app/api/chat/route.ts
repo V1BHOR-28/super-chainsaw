@@ -187,50 +187,98 @@ export async function POST(req: NextRequest) {
       try {
         const results: string[] = []
         const lowerContent = actualContent.toLowerCase()
+        const now = new Date()
+        const dateStr = now.toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })
+        const yearStr = String(now.getFullYear())
+        let webProviderHit = false // true once Tavily OR Serper returns usable results
 
-        // === ESPN for live sports scores (runs in parallel with Tavily) ===
+        // === SEARCH QUERY REFORMULATION ===
+        // Opinion phrasings ("what do you think about X vs Y?") do NOT surface the
+        // actual match RESULT — search engines return previews & opinion pieces.
+        // When we detect a sports matchup, ALSO run factual companion queries
+        // ("X vs Y result score winner {year}") so we pull the real outcome.
+        const queries = new Set<string>([actualContent])
+        const matchup = actualContent.match(
+          /\b([A-Za-z][\w.'-]*(?:\s+[A-Za-z][\w.'-]*)?)\s+(?:vs?\.?|versus|v\.?)\s+([A-Za-z][\w.'-]*(?:\s+[A-Za-z][\w.'-]*)?)/i
+        )
+        if (matchup) {
+          const teamA = matchup[1].trim()
+          const teamB = matchup[2].trim()
+          queries.add(`${teamA} vs ${teamB} result score winner ${yearStr}`)
+          queries.add(`${teamA} ${teamB} match ${yearStr}`)
+        }
+
+        // Detect current-events / sports queries → bias search toward recent news
         const sportsKeywords = ['match', 'matches', 'score', 'scores', 'game', 'games', 'fixture',
           'world cup', 'fifa', 'premier league', 'la liga', 'serie a', 'bundesliga',
           'champions league', 'nba', 'nfl', 'nhl', 'cricket', 'ipl', 'tennis',
           'football', 'soccer', 'basketball', 'happening today', 'playing today',
-          'result today', 'kickoff', 'standings', 'tournament']
-        const isSportsQuery = sportsKeywords.some(kw => lowerContent.includes(kw))
+          'result today', 'kickoff', 'standings', 'tournament', 'vs', 'versus']
+        const newsKeywords = ['news today', 'latest news', 'current events', 'what happened today',
+          'today news', 'breaking', 'just happened', 'recent update', 'recently', 'last night']
+        const isCurrentEvent =
+          sportsKeywords.some((kw) => lowerContent.includes(kw)) ||
+          newsKeywords.some((kw) => lowerContent.includes(kw)) ||
+          isGreenApple
 
-        // === TAVILY SEARCH (primary — returns clean LLM-ready content) ===
-        try {
-          const tavilyResponse = await fetch('https://api.tavily.com/search', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              api_key: process.env.TAVILY_API_KEY,
-              query: actualContent,
-              max_results: 5,
-              include_answer: true,
-            }),
-            signal: AbortSignal.timeout(10000),
+        // === TAVILY SEARCH (primary) — run all reformulated queries in parallel ===
+        const tavilyPromises = Array.from(queries)
+          .slice(0, 3)
+          .map(async (q) => {
+            try {
+              const body: Record<string, unknown> = {
+                api_key: process.env.TAVILY_API_KEY,
+                query: q,
+                max_results: 5,
+                include_answer: true,
+                include_raw_content: false,
+                search_depth: isGreenApple ? 'advanced' : 'basic',
+              }
+              // For current events, restrict to recent news so we get the actual
+              // outcome instead of stale preview articles.
+              if (isCurrentEvent) {
+                body.topic = 'news'
+                body.days = 14
+              }
+              const r = await fetch('https://api.tavily.com/search', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body),
+                signal: AbortSignal.timeout(12000),
+              })
+              if (!r.ok) return null
+              return await r.json()
+            } catch {
+              return null
+            }
           })
 
-          if (tavilyResponse.ok) {
-            const tavilyData = await tavilyResponse.json()
+        const tavilyDatas = (await Promise.all(tavilyPromises)).filter(
+          (d): d is Record<string, unknown> => d !== null
+        )
 
-            // Tavily returns a direct answer (like a featured snippet)
-            if (tavilyData.answer) {
-              results.push(`Direct Answer: ${tavilyData.answer}`)
-            }
-
-            // Tavily returns clean results with content
-            if (tavilyData.results && Array.isArray(tavilyData.results)) {
-              for (const r of tavilyData.results.slice(0, 5)) {
-                if (r.title && r.content) {
-                  results.push(`${r.title}\n   ${r.content.slice(0, 300)}\n   URL: ${r.url || ''}`)
-                }
+        for (const tavilyData of tavilyDatas) {
+          if (tavilyData.answer) {
+            results.push(`Direct Answer: ${tavilyData.answer}`)
+            webProviderHit = true
+          }
+          const res = tavilyData.results
+          if (Array.isArray(res)) {
+            for (const r of res.slice(0, 5)) {
+              const item = r as { title?: string; content?: string; url?: string; published_date?: string }
+              if (item.title && item.content) {
+                const datePart = item.published_date
+                  ? ` [published ${String(item.published_date).slice(0, 10)}]`
+                  : ''
+                results.push(`${item.title}${datePart}\n   ${item.content.slice(0, 350)}\n   URL: ${item.url || ''}`)
+                webProviderHit = true
               }
             }
           }
-        } catch (e) {
-          console.error('[chat.web_search] Tavily failed, trying Serper:', e)
+        }
 
-          // === SERPER FALLBACK (Google search results) ===
+        // === SERPER FALLBACK (only if Tavily returned nothing) ===
+        if (results.length === 0) {
           try {
             const serperResponse = await fetch('https://google.serper.dev/search', {
               method: 'POST',
@@ -238,7 +286,8 @@ export async function POST(req: NextRequest) {
                 'X-API-KEY': process.env.SERPER_API_KEY || '',
                 'Content-Type': 'application/json',
               },
-              body: JSON.stringify({ q: actualContent, num: 6 }),
+              // tbs=qdr:w → restrict to past week for current events
+              body: JSON.stringify({ q: actualContent, num: 6, tbs: isCurrentEvent ? 'qdr:w' : undefined }),
               signal: AbortSignal.timeout(8000),
             })
 
@@ -248,6 +297,7 @@ export async function POST(req: NextRequest) {
               // Knowledge graph (if available)
               if (serperData.knowledgeGraph?.description) {
                 results.push(`${serperData.knowledgeGraph.title || 'Knowledge Graph'}: ${serperData.knowledgeGraph.description.slice(0, 300)}`)
+                webProviderHit = true
               }
 
               // Organic results
@@ -255,6 +305,7 @@ export async function POST(req: NextRequest) {
                 for (const r of serperData.organic.slice(0, 5)) {
                   if (r.title) {
                     results.push(`${r.title}\n   ${r.snippet || ''}\n   URL: ${r.link || ''}`)
+                    webProviderHit = true
                   }
                 }
               }
@@ -264,23 +315,56 @@ export async function POST(req: NextRequest) {
           }
         }
 
-        // === ESPN live scores (parallel, for sports queries) ===
-        if (isSportsQuery) {
+        // === ESPN live + recent scores (for sports queries) ===
+        // ESPN's default scoreboard only shows TODAY. We expand to the last 3 days
+        // so recently-FINISHED matches surface alongside live/scheduled ones, and
+        // we cover more leagues so friendlies / Nations League aren't missed.
+        if (isCurrentEvent && sportsKeywords.some((kw) => lowerContent.includes(kw))) {
+          const espnDateRange = (() => {
+            const fmt = (d: Date) =>
+              `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`
+            const end = new Date()
+            const start = new Date()
+            start.setDate(start.getDate() - 3)
+            return `${fmt(start)}-${fmt(end)}`
+          })()
+
           const espnLeagues: Array<{ name: string; url: string }> = []
           if (lowerContent.includes('fifa') || lowerContent.includes('world cup')) {
-            espnLeagues.push({ name: 'FIFA World Cup', url: 'https://site.api.espn.com/apis/site/v2/sports/soccer/fifa.world/scoreboard' })
+            espnLeagues.push({ name: 'FIFA World Cup', url: `https://site.api.espn.com/apis/site/v2/sports/soccer/fifa.world/scoreboard?dates=${espnDateRange}` })
           }
           if (lowerContent.includes('nba') || lowerContent.includes('basketball')) {
-            espnLeagues.push({ name: 'NBA', url: 'https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard' })
+            espnLeagues.push({ name: 'NBA', url: `https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard?dates=${espnDateRange}` })
           }
           if (lowerContent.includes('nfl')) {
-            espnLeagues.push({ name: 'NFL', url: 'https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard' })
+            espnLeagues.push({ name: 'NFL', url: `https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard?dates=${espnDateRange}` })
           }
           if (lowerContent.includes('premier league') || lowerContent.includes('epl')) {
-            espnLeagues.push({ name: 'Premier League', url: 'https://site.api.espn.com/apis/site/v2/sports/soccer/eng.1/scoreboard' })
+            espnLeagues.push({ name: 'Premier League', url: `https://site.api.espn.com/apis/site/v2/sports/soccer/eng.1/scoreboard?dates=${espnDateRange}` })
           }
-          if (espnLeagues.length === 0 && (lowerContent.includes('soccer') || lowerContent.includes('football') || lowerContent.includes('match'))) {
-            espnLeagues.push({ name: 'FIFA World Cup', url: 'https://site.api.espn.com/apis/site/v2/sports/soccer/fifa.world/scoreboard' })
+          if (lowerContent.includes('la liga')) {
+            espnLeagues.push({ name: 'La Liga', url: `https://site.api.espn.com/apis/site/v2/sports/soccer/esp.1/scoreboard?dates=${espnDateRange}` })
+          }
+          if (lowerContent.includes('serie a')) {
+            espnLeagues.push({ name: 'Serie A', url: `https://site.api.espn.com/apis/site/v2/sports/soccer/ita.1/scoreboard?dates=${espnDateRange}` })
+          }
+          if (lowerContent.includes('bundesliga')) {
+            espnLeagues.push({ name: 'Bundesliga', url: `https://site.api.espn.com/apis/site/v2/sports/soccer/ger.1/scoreboard?dates=${espnDateRange}` })
+          }
+          if (lowerContent.includes('champions league')) {
+            espnLeagues.push({ name: 'Champions League', url: `https://site.api.espn.com/apis/site/v2/sports/soccer/uefa.champions/scoreboard?dates=${espnDateRange}` })
+          }
+          // Generic soccer/football fallback — try international friendlies + World Cup
+          // so non-league national-team matches (e.g. France vs Morocco) are covered.
+          if (
+            espnLeagues.length === 0 &&
+            (lowerContent.includes('soccer') ||
+              lowerContent.includes('football') ||
+              lowerContent.includes('match') ||
+              !!matchup)
+          ) {
+            espnLeagues.push({ name: 'International Friendlies', url: `https://site.api.espn.com/apis/site/v2/sports/soccer/fifa.friendly/scoreboard?dates=${espnDateRange}` })
+            espnLeagues.push({ name: 'FIFA World Cup', url: `https://site.api.espn.com/apis/site/v2/sports/soccer/fifa.world/scoreboard?dates=${espnDateRange}` })
           }
 
           const espnPromises = espnLeagues.map(async (league) => {
@@ -289,17 +373,38 @@ export async function POST(req: NextRequest) {
               if (!response.ok) return null
               const data = await response.json()
               const events = data.events || []
-              if (events.length === 0) return `${league.name}: No matches scheduled today.`
-              const matchLines = events.slice(0, 5).map((e: { name: string; status?: { type?: { description?: string } }; competitions?: Array<{ competitors?: Array<{ team?: { displayName?: string }; score?: string }> }> }) => {
-                const status = e.status?.type?.description || 'Scheduled'
-                const home = e.competitions?.[0]?.competitors?.[0]?.team?.displayName || ''
-                const away = e.competitions?.[0]?.competitors?.[1]?.team?.displayName || ''
-                const homeScore = e.competitions?.[0]?.competitors?.[0]?.score || '0'
-                const awayScore = e.competitions?.[0]?.competitors?.[1]?.score || '0'
-                return `  ${home} ${homeScore} - ${awayScore} ${away} (${status})`
-              })
-              return `${league.name} (ESPN Live):\n${matchLines.join('\n')}`
-            } catch { return null }
+              if (!Array.isArray(events) || events.length === 0) return null
+              const matchLines = events
+                .slice(0, 8)
+                .map(
+                  (e: {
+                    name?: string
+                    date?: string
+                    status?: { type?: { description?: string; completed?: boolean } }
+                    competitions?: Array<{
+                      competitors?: Array<{ team?: { displayName?: string }; score?: string; homeAway?: string }>
+                    }>
+                  }) => {
+                    const status = e.status?.type?.description || 'Scheduled'
+                    const comps = e.competitions?.[0]?.competitors || []
+                    // ESPN lists home/away in arbitrary order — sort for consistent display
+                    const sorted = [...comps].sort((a, b) =>
+                      (a.homeAway === 'home' ? 0 : 1) - (b.homeAway === 'home' ? 0 : 1)
+                    )
+                    const a = sorted[0]
+                    const b = sorted[1]
+                    const aName = a?.team?.displayName || ''
+                    const bName = b?.team?.displayName || ''
+                    const aScore = a?.score ?? '0'
+                    const bScore = b?.score ?? '0'
+                    return `  ${aName} ${aScore} - ${bScore} ${bName} (${status})`
+                  }
+                )
+              if (matchLines.length === 0) return null
+              return `${league.name} (ESPN, last 3 days):\n${matchLines.join('\n')}`
+            } catch {
+              return null
+            }
           })
 
           const espnResults = await Promise.all(espnPromises)
@@ -309,9 +414,20 @@ export async function POST(req: NextRequest) {
         }
 
         if (results.length > 0) {
-          toolContext = `Web search results for "${actualContent}":\n${results.join('\n\n')}`
+          // If BOTH Tavily and Serper failed/unconfigured, only ESPN live-score data
+          // survived. That's a degraded search — ARIA must be HONEST about it instead
+          // of presenting ESPN-only data as comprehensive truth (which is what causes
+          // her to confidently treat a finished match as upcoming).
+          const degradationWarning = !webProviderHit
+            ? `\n\n⚠ DEGRADED SEARCH NOTICE: Both primary web search providers (Tavily + Serper) are unconfigured or failed. Only ESPN live-score data was retrieved — this is incomplete and may miss non-scheduled or recently-finished matches. You MUST tell the user your web search was limited to live scores only and you could not fully verify current information. Do NOT present this as a comprehensive web search.\n`
+            : ''
+          if (!webProviderHit) {
+            console.warn('[chat.web_search] DEGRADED: Tavily + Serper both failed/unconfigured. Check TAVILY_API_KEY and SERPER_API_KEY in .env. Only ESPN data available.')
+          }
+          toolContext = `REAL-TIME WEB SEARCH RESULTS for "${actualContent}" — today is ${dateStr}.${degradationWarning}\n${results.join('\n\n')}\n\nGROUNDING RULES:\n- These results are the latest information from the web. Treat them as authoritative over your training data for facts, scores, dates, and recent events.\n- If a result shows a FINAL score, the match is OVER. Report the winner and the score — do NOT describe it as upcoming, hypothetical, or "will be".\n- If results mention today, yesterday, or "recently", treat that as the current event.\n- Only fall back to your training data if the results genuinely do not answer the question.\n- If a DEGRADED SEARCH NOTICE is shown above, you MUST explicitly tell the user your web search was limited to live scores only.`
         } else {
-          toolContext = `Web search returned no results for "${actualContent}". Answer from your own knowledge.`
+          console.warn('[chat.web_search] No results from ANY provider (Tavily/Serper/ESPN all empty or failed). Check API keys in .env.')
+          toolContext = `Web search returned no results for "${actualContent}" (today is ${dateStr}). The search providers appear to be unconfigured. Answer from your own knowledge, but explicitly tell the user you could not verify current information online and that web search may be unavailable.`
         }
       } catch (e) {
         console.error('[chat.web_search]', e)
