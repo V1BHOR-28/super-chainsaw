@@ -702,10 +702,16 @@ Get straight to it. No intro. Just the raw analysis.`
               throw lastErr || new Error('Pollinations failed')
             }
 
-            // Groq — free tier (30 req/min, 14400/day), extremely fast (500+ tok/s),
-            // runs Llama 3.3 70B on dedicated LPU chips. Different infrastructure from
-            // OpenRouter — doesn't share its rate window. Works reliably from Vercel.
+            // Groq — free tier, extremely fast (500+ tok/s on LPU chips).
+            // Different infrastructure from OpenRouter — doesn't share its rate window.
             // Requires GROQ_API_KEY env var. If not configured, this provider is skipped.
+            //
+            // We use llama-3.1-8b-instant because it has 30,000 TPM (tokens per minute)
+            // on the free tier — 5x higher than llama-3.3-70b's 6,000 TPM. ARIA's system
+            // prompt is large (~3-4K tokens), so the 70B model hits its TPM limit after
+            // just 2 rapid requests. The 8B model can handle 8+ rapid requests before
+            // rate-limiting. ARIA's personality comes from the system prompt, not the
+            // model size — 8B is more than capable of following it.
             const callGroq = async (): Promise<string> => {
               if (!process.env.GROQ_API_KEY) {
                 throw new Error('Groq: no API key (GROQ_API_KEY not set)')
@@ -717,7 +723,7 @@ Get straight to it. No intro. Just the raw analysis.`
                   'Authorization': `Bearer ${process.env.GROQ_API_KEY}`,
                 },
                 body: JSON.stringify({
-                  model: 'llama-3.3-70b-versatile',
+                  model: 'llama-3.1-8b-instant',
                   messages: sdkMessages,
                   max_tokens: 4096,
                 }),
@@ -763,7 +769,7 @@ Get straight to it. No intro. Just the raw analysis.`
             // doesn't rate-limit from Vercel's IPs. This is the provider that
             // makes ARIA actually reliable in production.
             if (process.env.GROQ_API_KEY) {
-              providers.push({ name: 'groq/llama-3.3-70b', fn: () => callGroq() })
+              providers.push({ name: 'groq/llama-3.1-8b', fn: () => callGroq() })
             }
 
             try {
