@@ -151,7 +151,11 @@ export async function POST(req: NextRequest) {
       db.message.findMany({
         where: { conversationId },
         orderBy: { createdAt: 'asc' },
-        take: 10,
+        // Only send the last 4 messages (2 exchanges) to keep the payload small.
+        // Long conversations (e.g. medical case discussions) bloat the payload
+        // and cause Groq 413 errors. 4 messages = enough context for follow-ups
+        // without exceeding the model's request size limit.
+        take: 4,
       }),
     ])
 
@@ -193,13 +197,32 @@ export async function POST(req: NextRequest) {
       // most distinctive words from the user's message and matches them.
       // Includes numbers (e.g. "chapter 8") so chapter-specific questions work.
       if (knowledgeResults.length === 0) {
+        // Extract keywords — filter out common English words + medical filler
+        // so the search focuses on DISTINCTIVE terms (disease names, body parts,
+        // specific symptoms like "myeloma", "protein", "electrophoresis").
         const keywords = actualContent
           .toLowerCase()
           .replace(/[^a-z0-9\s]/g, ' ')
           .split(/\s+/)
-          .filter((w) => w.length > 2 && !['what', 'how', 'when', 'where', 'which', 'think', 'about', 'does', 'will', 'would', 'could', 'should', 'there', 'their', 'the', 'and', 'for', 'are', 'was', 'were', 'has', 'have', 'his', 'her', 'its', 'from', 'this', 'that', 'with', 'but', 'not', 'you', 'all', 'can', 'had', 'her', 'was', 'one', 'our', 'out', 'day', 'get', 'has', 'him', 'his', 'how', 'its', 'may', 'new', 'now', 'old', 'see', 'way', 'who', 'did', 'let', 'say', 'she', 'too', 'use'].includes(w))
-          .slice(0, 6)
+          .filter((w) => w.length > 2 && ![
+            'what', 'how', 'when', 'where', 'which', 'think', 'about', 'does', 'will',
+            'would', 'could', 'should', 'there', 'their', 'the', 'and', 'for', 'are',
+            'was', 'were', 'has', 'have', 'his', 'her', 'its', 'from', 'this', 'that',
+            'with', 'but', 'not', 'you', 'all', 'can', 'had', 'one', 'our', 'out', 'day',
+            'get', 'him', 'may', 'new', 'now', 'old', 'see', 'way', 'who', 'did', 'let',
+            'say', 'she', 'too', 'use', 'the', 'over', 'last', 'past', 'been', 'feeling',
+            'year', 'years', 'old', 'male', 'female', 'patient', 'history', 'present',
+            'illness', 'chief', 'complaint', 'vital', 'signs', 'general', 'exam',
+            'physical', 'notes', 'requires', 'noted', 'also', 'two', 'three', 'mild',
+            'moderate', 'severe', 'right', 'left', 'bilateral', 'without', 'upon',
+            'reported', 'denies', 'month', 'months', 'week', 'weeks', 'following',
+          ].includes(w))
+          .slice(0, 8)
         if (keywords.length > 0) {
+          // Search using OR — any keyword match returns the chunk.
+          // Rank by number of keyword matches (chunks matching more keywords
+          // are more relevant). This helps medical cases where the user lists
+          // multiple symptoms that should all point to the same diagnosis.
           const conditions = keywords
             .map((kw) => `LOWER(content) LIKE '%${kw.replace(/'/g, "''")}%' OR LOWER(title) LIKE '%${kw.replace(/'/g, "''")}%'`)
             .join(' OR ')
@@ -211,21 +234,34 @@ export async function POST(req: NextRequest) {
       }
 
       if (knowledgeResults && knowledgeResults.length > 0) {
-        // Aggressively limit knowledge context size to prevent Groq 413.
-        // Groq's llama-3.1-8b-instant has a strict request size limit.
-        // When the user's message is long (e.g. a medical case presentation)
-        // + 5 chunks × 1500 chars, the total payload exceeds the limit.
-        // 3 chunks × 800 chars = 2400 chars of knowledge — enough for ARIA
-        // to cite the right section without blowing the payload.
-        const maxChunks = 3
-        const maxCharsPerChunk = 800
+        // ADAPTIVE knowledge context size — prevent Groq 413 on long messages.
+        // If the user's message is long (e.g. a medical case presentation at ~2000 chars),
+        // use fewer + smaller chunks so the total payload fits within Groq's limit.
+        // Total budget: system prompt (~3000 chars) + knowledge + user message + history (4 msgs)
+        // must stay under ~8000 chars (~2000 tokens) for Groq's free tier.
+        const userMsgLen = actualContent.length
+        let maxChunks: number
+        let maxCharsPerChunk: number
+        if (userMsgLen > 1000) {
+          // Long message (medical case, research paper excerpt) — minimal knowledge
+          maxChunks = 2
+          maxCharsPerChunk = 500
+        } else if (userMsgLen > 500) {
+          // Medium message — moderate knowledge
+          maxChunks = 3
+          maxCharsPerChunk = 700
+        } else {
+          // Short message — full knowledge context
+          maxChunks = 3
+          maxCharsPerChunk = 800
+        }
         const chunksToShow = knowledgeResults.slice(0, maxChunks)
         knowledgeContext = chunksToShow
           .map((k, i) => `--- LIBRARY ${i + 1}: ${k.title} ---\n${k.content.slice(0, maxCharsPerChunk)}`)
           .join('\n\n')
-        // ARIA's CORE IDENTITY: she's a reader, not an encyclopedia.
-        // She uses her digital library as PRIMARY knowledge — think from the book.
-        knowledgeContext = `ARIA'S DIGITAL LIBRARY — books/papers the user fed you. This is your PRIMARY knowledge source. Use it to answer questions, cite the document, form opinions. If the knowledge covers the question, do NOT use web search — trust the library.\n\n${knowledgeContext}`
+        // ARIA's CORE IDENTITY: her digital library is her PRIMARY knowledge.
+        // She thinks from the book, cites it, and forms opinions from it.
+        knowledgeContext = `ARIA'S DIGITAL LIBRARY — your PRIMARY knowledge. Use it to answer, cite the document. Trust the library over the internet. If knowledge covers the question, do NOT use web search.\n\n${knowledgeContext}`
       }
     } catch (e) {
       // Knowledge search is best-effort — don't fail the chat if it errors
@@ -662,7 +698,7 @@ No disclaimers, no hedging, no "some might argue." Give your raw opinion and own
                 body: JSON.stringify({
                   model,
                   messages: sdkMessages,
-                  max_tokens: 2048,
+                  max_tokens: 1024,
                 }),
                 // 25s timeout — generous since providers run in PARALLEL now.
                 // Total worst case: 8s (search) + 25s (parallel) = 33s — fits in 60s.
@@ -733,7 +769,7 @@ No disclaimers, no hedging, no "some might argue." Give your raw opinion and own
                 body: JSON.stringify({
                   model: 'llama-3.1-8b-instant',
                   messages: sdkMessages,
-                  max_tokens: 2048,
+                  max_tokens: 1024,
                 }),
                 signal: AbortSignal.timeout(25000),
               })
@@ -767,7 +803,7 @@ No disclaimers, no hedging, no "some might argue." Give your raw opinion and own
                 body: JSON.stringify({
                   model: 'gemini-2.0-flash',
                   messages: sdkMessages,
-                  max_tokens: 2048,
+                  max_tokens: 1024,
                 }),
                 signal: AbortSignal.timeout(25000),
               })
