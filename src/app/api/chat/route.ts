@@ -261,7 +261,7 @@ export async function POST(req: NextRequest) {
           .join('\n\n')
         // ARIA's CORE IDENTITY: her digital library is her PRIMARY knowledge.
         // She thinks from the book, cites it, and forms opinions from it.
-        knowledgeContext = `ARIA'S DIGITAL LIBRARY — your PRIMARY knowledge. Use it to answer, cite the document. Trust the library over the internet. If knowledge covers the question, do NOT use web search.\n\n${knowledgeContext}`
+        knowledgeContext = `YOUR DIGITAL LIBRARY — books the user fed you. This is your PRIMARY knowledge. Engage with it critically: form interpretations, have opinions, praise or criticize the author. Don't summarize — interpret. Cite the document. Trust the library over the internet.\n\n${knowledgeContext}`
       }
     } catch (e) {
       // Knowledge search is best-effort — don't fail the chat if it errors
@@ -545,7 +545,7 @@ export async function POST(req: NextRequest) {
           if (!webProviderHit) {
             console.warn('[chat.web_search] DEGRADED: Tavily + Serper both failed/unconfigured. Check TAVILY_API_KEY and SERPER_API_KEY in .env. Only ESPN data available.')
           }
-          toolContext = `WEB SEARCH RESULTS for "${actualContent}" — today is ${dateStr}.${degradationWarning}\n${results.join('\n\n')}\n\nGROUNDING RULES:\n1. Search results are your ONLY source for facts/scores. Search wins over training data.\n2. Extract the EXACT score verbatim. If search says 2-0, say 2-0.\n3. NEVER mention other years/tournaments (2022, 2018) unless search results explicitly do.\n4. If FINAL score shown, match is OVER — report it, don't describe as upcoming.\n5. Verify every fact against search results before stating it.`
+          toolContext = `WEB SEARCH RESULTS for "${actualContent}" — today is ${dateStr}.${degradationWarning}\n${results.join('\n\n')}\n\nTrust these results over your training for current facts. Cite sources when relevant.`
         } else {
           console.warn('[chat.web_search] No results from ANY provider (Tavily/Serper/ESPN all empty or failed). Check API keys in .env.')
           toolContext = `Web search returned no results for "${actualContent}" (today is ${dateStr}). The search providers appear to be unconfigured. Answer from your own knowledge, but explicitly tell the user you could not verify current information online and that web search may be unavailable.`
@@ -585,14 +585,12 @@ export async function POST(req: NextRequest) {
       toolContext: fullToolContext || undefined,
     })
 
-    // === GREEN APPLE ENHANCEMENT ===
-    // Green apple = "no filter" raw deep analysis mode.
-    // Trimmed to ~300 chars to prevent Groq 413 when combined with knowledge context.
+    // === GREEN APPLE MODE ===
     if (isGreenApple) {
       systemPrompt += `
 
 🍏 GREEN APPLE MODE — RAW DEEP ANALYSIS.
-No disclaimers, no hedging, no "some might argue." Give your raw opinion and own it. If something is bullshit, say so. Be blunt, direct, human. If you have knowledge from the library, ENGAGE with it critically — don't just summarize, form a take. Get straight to it.`
+No hedging, no disclaimers. Give your raw, unvarnished interpretation. Engage with the book critically — don't summarize, form a take and defend it. Be blunt. Get straight to it.`
     }
 
     // Map DB messages to SDK format; include vision content for the latest user message if images attached
