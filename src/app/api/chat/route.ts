@@ -702,6 +702,39 @@ Get straight to it. No intro. Just the raw analysis.`
               throw lastErr || new Error('Pollinations failed')
             }
 
+            // Groq — free tier (30 req/min, 14400/day), extremely fast (500+ tok/s),
+            // runs Llama 3.3 70B on dedicated LPU chips. Different infrastructure from
+            // OpenRouter — doesn't share its rate window. Works reliably from Vercel.
+            // Requires GROQ_API_KEY env var. If not configured, this provider is skipped.
+            const callGroq = async (): Promise<string> => {
+              if (!process.env.GROQ_API_KEY) {
+                throw new Error('Groq: no API key (GROQ_API_KEY not set)')
+              }
+              const apiResponse = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json',
+                  'Authorization': `Bearer ${process.env.GROQ_API_KEY}`,
+                },
+                body: JSON.stringify({
+                  model: 'llama-3.3-70b-versatile',
+                  messages: sdkMessages,
+                  max_tokens: 4096,
+                }),
+                signal: AbortSignal.timeout(25000),
+              })
+              if (!apiResponse.ok) {
+                const errBody = await apiResponse.text()
+                throw new Error(`Groq ${apiResponse.status}: ${errBody.slice(0, 100)}`)
+              }
+              const data = await apiResponse.json()
+              const content = data.choices?.[0]?.message?.content ?? ''
+              if (!content || !content.trim()) {
+                throw new Error('Groq empty content')
+              }
+              return content.trim()
+            }
+
             // === PARALLEL LLM EXECUTION ===
             // Fire ALL providers SIMULTANEOUSLY. First success wins via Promise.any().
             //
@@ -724,6 +757,14 @@ Get straight to it. No intro. Just the raw analysis.`
 
             // Pollinations keyless backstop
             providers.push({ name: 'pollinations', fn: () => callPollinations() })
+
+            // Groq — the reliable primary path (if GROQ_API_KEY is configured).
+            // Groq has 30 req/min free (vs OpenRouter's tight free limits) and
+            // doesn't rate-limit from Vercel's IPs. This is the provider that
+            // makes ARIA actually reliable in production.
+            if (process.env.GROQ_API_KEY) {
+              providers.push({ name: 'groq/llama-3.3-70b', fn: () => callGroq() })
+            }
 
             try {
               const result = await Promise.any(
