@@ -11,10 +11,13 @@ import {
   Link2,
   LayoutGrid,
   Info,
+  ChevronDown,
+  Check,
 } from 'lucide-react'
 import { toast } from 'sonner'
 import { useAriaStore } from '@/lib/store'
 import type { AriaSettings, User as AriaUser } from '@/lib/types'
+import { Popover, PopoverTrigger, PopoverContent } from '@/components/ui/popover'
 
 type TabId = 'general' | 'account' | 'privacy' | 'customize'
 
@@ -651,7 +654,7 @@ export function SettingsModal() {
   )
 }
 
-/* ---------- Model Selector (Claude-style card list) ---------- */
+/* ---------- Model Selector (Claude-style compact dropdown) ---------- */
 
 const AI_MODELS = [
   {
@@ -660,7 +663,7 @@ const AI_MODELS = [
     desc: 'Fast, capable, great value',
     badge: 'Default',
     badgeColor: 'var(--aria-accent-glow)',
-    cost: 'Uses credits · ~$0.14/M tokens',
+    cost: 'Uses credits',
   },
   {
     id: 'meta-llama/llama-3.3-70b-instruct:free',
@@ -668,15 +671,15 @@ const AI_MODELS = [
     desc: 'High quality, 70B params',
     badge: 'Free',
     badgeColor: '#4ade80',
-    cost: 'Genuinely free · $0 forever',
+    cost: '$0 forever',
   },
   {
     id: 'openai/gpt-oss-120b:free',
     name: 'GPT-OSS 120B',
-    desc: 'Largest free model, 117B MoE',
+    desc: 'Largest free model',
     badge: 'Free',
     badgeColor: '#4ade80',
-    cost: 'Genuinely free · $0 forever',
+    cost: '$0 forever',
   },
   {
     id: 'qwen/qwen3-next-80b-a3b-instruct:free',
@@ -684,95 +687,120 @@ const AI_MODELS = [
     desc: 'Multilingual, 262K context',
     badge: 'Free',
     badgeColor: '#4ade80',
-    cost: 'Genuinely free · $0 forever',
+    cost: '$0 forever',
   },
 ] as const
 
 function ModelSelector({ value, onChange }: { value: string; onChange: (v: string) => void }) {
+  const [open, setOpen] = useState(false)
+  const current = AI_MODELS.find((m) => m.id === value) ?? AI_MODELS[0]
+
   return (
-    <div className="flex w-full flex-col gap-2" style={{ maxWidth: '420px' }}>
-      {AI_MODELS.map((m) => {
-        const selected = value === m.id
-        return (
-          <button
-            key={m.id}
-            onClick={() => onChange(m.id)}
-            className="flex items-center justify-between gap-3 rounded-xl px-4 py-3 text-left transition-all"
+    <Popover open={open} onOpenChange={setOpen}>
+      <PopoverTrigger asChild>
+        <button
+          className="inline-flex items-center gap-2 rounded-lg px-3 py-2 text-[13px] transition-colors"
+          style={{
+            background: 'var(--aria-bg-panel)',
+            border: '1px solid var(--aria-border)',
+            color: 'var(--aria-fg)',
+            cursor: 'pointer',
+            fontFamily: 'inherit',
+            minWidth: '180px',
+          }}
+        >
+          <span
+            className="rounded-full px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide"
             style={{
-              background: selected ? 'rgba(245, 158, 11, 0.06)' : 'var(--aria-card)',
-              border: `1px solid ${selected ? 'var(--aria-accent)' : 'var(--aria-border)'}`,
-              cursor: 'pointer',
-              boxShadow: selected ? '0 0 0 1px var(--aria-accent)' : 'none',
-            }}
-            onMouseEnter={(e) => {
-              if (!selected) {
-                e.currentTarget.style.borderColor = 'rgba(245, 158, 11, 0.3)'
-                e.currentTarget.style.background = 'rgba(245, 158, 11, 0.03)'
-              }
-            }}
-            onMouseLeave={(e) => {
-              if (!selected) {
-                e.currentTarget.style.borderColor = 'var(--aria-border)'
-                e.currentTarget.style.background = 'var(--aria-card)'
-              }
+              background: `${current.badgeColor}1a`,
+              color: current.badgeColor,
             }}
           >
-            <div className="flex min-w-0 flex-col gap-0.5">
-              <div className="flex items-center gap-2">
-                <span
-                  className="text-[14px] font-medium"
-                  style={{ color: 'var(--aria-fg)' }}
-                >
-                  {m.name}
-                </span>
-                <span
-                  className="rounded-full px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide"
-                  style={{
-                    background: `${m.badgeColor}1a`,
-                    color: m.badgeColor,
-                    border: `1px solid ${m.badgeColor}33`,
-                  }}
-                >
-                  {m.badge}
-                </span>
-              </div>
-              <span
-                className="text-[12px]"
-                style={{ color: 'var(--aria-fg-muted)' }}
-              >
-                {m.desc}
-              </span>
-              <span
-                className="text-[10px]"
-                style={{ color: 'var(--aria-fg-dim)', opacity: 0.7 }}
-              >
-                {m.cost}
-              </span>
-            </div>
-            {/* Selected indicator */}
-            <div
-              className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full transition-all"
+            {current.badge}
+          </span>
+          <span className="font-medium">{current.name}</span>
+          <ChevronDown
+            size={14}
+            style={{
+              color: 'var(--aria-fg-muted)',
+              transition: 'transform 0.2s',
+              transform: open ? 'rotate(180deg)' : 'none',
+            }}
+          />
+        </button>
+      </PopoverTrigger>
+      <PopoverContent
+        align="end"
+        sideOffset={6}
+        style={{
+          background: 'var(--aria-bg-soft)',
+          border: '1px solid var(--aria-border)',
+          borderRadius: '12px',
+          boxShadow: '0 12px 40px rgba(0,0,0,0.5)',
+          width: '280px',
+          padding: '6px',
+        }}
+      >
+        {AI_MODELS.map((m) => {
+          const selected = m.id === value
+          return (
+            <button
+              key={m.id}
+              onClick={() => {
+                onChange(m.id)
+                setOpen(false)
+              }}
+              className="flex w-full items-center justify-between gap-2 rounded-lg px-2.5 py-2 text-left transition-colors"
               style={{
-                background: selected ? 'var(--aria-accent)' : 'transparent',
-                border: `1.5px solid ${selected ? 'var(--aria-accent)' : 'var(--aria-border)'}`,
+                background: selected ? 'rgba(245, 158, 11, 0.08)' : 'transparent',
+                border: 'none',
+                cursor: 'pointer',
+                fontFamily: 'inherit',
+              }}
+              onMouseEnter={(e) => {
+                if (!selected) e.currentTarget.style.background = 'var(--aria-card)'
+              }}
+              onMouseLeave={(e) => {
+                if (!selected) e.currentTarget.style.background = 'transparent'
               }}
             >
+              <div className="flex min-w-0 flex-col gap-0.5">
+                <div className="flex items-center gap-1.5">
+                  <span
+                    className="text-[13px] font-medium"
+                    style={{ color: 'var(--aria-fg)' }}
+                  >
+                    {m.name}
+                  </span>
+                  <span
+                    className="rounded-full px-1.5 py-0.5 text-[8px] font-semibold uppercase tracking-wide"
+                    style={{
+                      background: `${m.badgeColor}1a`,
+                      color: m.badgeColor,
+                    }}
+                  >
+                    {m.badge}
+                  </span>
+                </div>
+                <span
+                  className="text-[11px]"
+                  style={{ color: 'var(--aria-fg-muted)' }}
+                >
+                  {m.desc}
+                </span>
+              </div>
               {selected && (
-                <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
-                  <path
-                    d="M2 5L4 7L8 3"
-                    stroke="var(--aria-bg)"
-                    strokeWidth="2"
-                    strokeLinecap="round"
-                    strokeLinejoin="round"
-                  />
-                </svg>
+                <Check
+                  size={14}
+                  className="shrink-0"
+                  style={{ color: 'var(--aria-accent-glow)' }}
+                />
               )}
-            </div>
-          </button>
-        )
-      })}
-    </div>
+            </button>
+          )
+        })}
+      </PopoverContent>
+    </Popover>
   )
 }
 
