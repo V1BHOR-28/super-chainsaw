@@ -19,8 +19,14 @@ import { useAriaStore } from '@/lib/store'
 export function MessageBubble({ message }: { message: ChatMessage }) {
   const isUser = message.role === 'user'
   const settings = useAriaStore((s) => s.settings)
+  const user = useAriaStore((s) => s.user)
   const [playing, setPlaying] = useState(false)
   const [copied, setCopied] = useState(false)
+
+  // User's avatar initial — derived from their actual name, not hardcoded.
+  // Falls back to "U" (User) if no name is set. This fixes the bug where the
+  // avatar always showed "E" regardless of who was logged in.
+  const userInitial = (user?.name?.trim()?.[0] ?? 'U').toUpperCase()
 
   const speak = () => {
     if (playing) {
@@ -102,9 +108,10 @@ export function MessageBubble({ message }: { message: ChatMessage }) {
     (!!toolBadgeEl || (message.memoriesUsed ?? 0) > 0 || !!message.moodContext)
 
   // Green apple emoji: when a user types "/green apple ..." or "/ga ...",
-  // render the prefix as a 🍏 emoji in the chat bubble. The backend strips
-  // the prefix before sending to the LLM, but the user's stored message
-  // keeps it — so we transform it for display only.
+  // the input morphs it to "🍏 ..." before sending (see chat-area.tsx), so
+  // most stored messages already start with 🍏. For older messages that
+  // still have the literal /green apple prefix, transform it for display.
+  // Messages already starting with 🍏 are left as-is.
   const displayContent = isUser
     ? message.content.replace(/^\/(?:green\s*apple|ga)\s+/i, '🍏 ')
     : message.content
@@ -242,7 +249,7 @@ export function MessageBubble({ message }: { message: ChatMessage }) {
             color: 'var(--aria-fg-muted)',
           }}
         >
-          E
+          {userInitial}
         </div>
       )}
     </div>

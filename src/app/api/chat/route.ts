@@ -50,11 +50,12 @@ export async function POST(req: NextRequest) {
     let isGreenApple = false
     let actualContent = content
 
-    // GREEN APPLE: type "/green apple" or "/ga" before a question for raw,
-    // unfiltered deep-analysis mode. This is a COMMUNICATION-STYLE layer
-    // (drop disclaimers, no hedging, deep thinking, raw opinions) — NOT a
-    // search trigger. Search is now auto-detected for ALL users below.
-    const gaMatch = content.match(/^\/(?:green\s*apple|ga)\s+(.*)/i)
+    // GREEN APPLE: type "/green apple" or "/ga" (or the 🍏 emoji it morphs
+    // into in the input) before a question for raw, unfiltered deep-analysis
+    // mode. This is a COMMUNICATION-STYLE layer (drop disclaimers, no
+    // hedging, deep thinking, raw opinions) — NOT a search trigger. Search
+    // is now auto-detected for ALL users below.
+    const gaMatch = content.match(/^(?:\/(?:green\s*apple|ga)|🍏)\s+(.*)/i)
     if (gaMatch) {
       isGreenApple = true
       actualContent = gaMatch[1].trim()
