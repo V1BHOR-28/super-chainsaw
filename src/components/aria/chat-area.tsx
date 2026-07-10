@@ -164,7 +164,15 @@ export function ChatArea() {
   }
 
   const toggleTool = (tool: 'web_search' | 'image_generation') => {
-    setPendingTool(pendingTool === tool ? null : tool)
+    // Web search is ALWAYS ON by user request (backend searches every message).
+    // - Tapping image_generation: switch to image gen.
+    // - Tapping web_search: if currently on image_generation, switch back to
+    //   search. If already on search, stay on search (can't be turned off).
+    if (tool === 'image_generation') {
+      setPendingTool(pendingTool === 'image_generation' ? 'web_search' : 'image_generation')
+    } else {
+      setPendingTool('web_search')
+    }
   }
 
   const hasMessages = messages.length > 0
@@ -264,8 +272,9 @@ export function ChatArea() {
             </div>
           )}
 
-          {/* Pending tool indicator */}
-          {pendingTool && (
+          {/* Pending tool indicator — only show for image_generation since
+              web_search is always on (showing it every message would be noise). */}
+          {pendingTool === 'image_generation' && (
             <div className="flex justify-center mb-2">
               <div
                 className="inline-flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-full"
@@ -275,9 +284,9 @@ export function ChatArea() {
                   color: 'var(--aria-accent-glow)',
                 }}
               >
-                {pendingTool === 'web_search' ? <Globe size={11} /> : <ImageIcon size={11} />}
-                {pendingTool === 'web_search' ? 'Web search on next send' : 'Image generation on next send'}
-                <button onClick={() => setPendingTool(null)} className="ml-1">
+                <ImageIcon size={11} />
+                Image generation on next send
+                <button onClick={() => setPendingTool('web_search')} className="ml-1">
                   <X size={11} />
                 </button>
               </div>
@@ -332,7 +341,7 @@ export function ChatArea() {
                   borderColor: pendingTool === 'web_search' ? 'var(--aria-accent)' : 'var(--aria-border)',
                   color: pendingTool === 'web_search' ? 'var(--aria-accent-glow)' : 'var(--aria-fg-muted)',
                 }}
-                title="Search the web"
+                title="Web search — always on for every message"
               >
                 <Globe size={15} />
               </button>

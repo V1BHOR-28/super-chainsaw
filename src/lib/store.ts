@@ -150,7 +150,7 @@ export const useAriaStore = create<AriaState>((set) => ({
   pendingAttachments: [],
   setPendingAttachments: (a) => set({ pendingAttachments: a }),
 
-  pendingTool: null,
+  pendingTool: 'web_search' as 'web_search' | 'image_generation' | null,
   setPendingTool: (t) => set({ pendingTool: t }),
 
   sidebarCollapsed: false,

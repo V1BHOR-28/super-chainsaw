@@ -45,7 +45,12 @@ export async function POST(req: NextRequest) {
       })
     }
 
-    // === AUTO-DETECT WEB SEARCH + GREEN APPLE MODE ===
+    // === WEB SEARCH IS ALWAYS ON (by user request) + GREEN APPLE MODE ===
+    // Web search now runs on EVERY message by default — no more auto-detect
+    // misses. The user explicitly accepted the higher API usage in exchange
+    // for always-accurate, real-time answers. Exceptions:
+    //   - image_generation tool was explicitly selected (mutually exclusive)
+    //   - message has image attachments (vision — search doesn't apply)
     let tool = userTool
     let isGreenApple = false
     let actualContent = content
@@ -53,68 +58,19 @@ export async function POST(req: NextRequest) {
     // GREEN APPLE: type "/green apple" or "/ga" (or the 🍏 emoji it morphs
     // into in the input) before a question for raw, unfiltered deep-analysis
     // mode. This is a COMMUNICATION-STYLE layer (drop disclaimers, no
-    // hedging, deep thinking, raw opinions) — NOT a search trigger. Search
-    // is now auto-detected for ALL users below.
+    // hedging, deep thinking, raw opinions).
     const gaMatch = content.match(/^(?:\/(?:green\s*apple|ga)|🍏)\s+(.*)/i)
     if (gaMatch) {
       isGreenApple = true
       actualContent = gaMatch[1].trim()
-      // Do NOT force tool='web_search' here — let auto-detect decide, so
-      // green-apple questions that don't need search (e.g. "what's the
-      // meaning of life") don't waste a search call, while matchup/claim
-      // questions still trigger search via the auto-detect logic below.
     }
 
-    if (!tool) {
-      const lower = content.toLowerCase()
-      const sportsKeywords = ['match', 'matches', 'score', 'scores', 'game today', 'fixture',
-        'world cup', 'fifa', 'premier league', 'la liga', 'serie a', 'bundesliga',
-        'champions league', 'nba', 'nfl', 'nhl', 'cricket', 'ipl', 'tennis',
-        'football today', 'soccer today', 'happening today', 'playing today',
-        'result today', 'results today', 'kickoff', 'kick off', 'lineup',
-        'standings', 'tournament today', 'playoff']
-      const newsKeywords = ['news today', 'latest news', 'current events', 'what happened today',
-        'today news', 'breaking', 'just happened', 'recent update']
-      const realtimeKeywords = ['live score', 'live match', 'right now', 'currently playing',
-        'who is winning', 'whats the score', "what's the score"]
-
-      // === MATCHUP DETECTION ===
-      // Catch "X vs Y" / "X v Y" / "X versus Y" phrasings even without explicit
-      // keywords like "match"/"score". This is what was missing — a user saying
-      // "i think 11th july will be spain vs england" never triggered search before.
-      const matchupPattern = /\b\w+\s+(?:vs?\.?|versus)\s+\w+/i
-      const hasMatchup = matchupPattern.test(content)
-
-      // === CLAIM DETECTION ===
-      // When a user makes a factual CLAIM about an event ("i think...", "is it...",
-      // "did...", "who won..."), we should verify via web search instead of
-      // agreeing from training data (which causes sycophancy on stale facts).
-      const claimPattern = /\b(?:i think|i thought|i heard|is it|isn't it|aren't they|did they|didn't they|who won|who won|when is|what time is|what's the|whats the|are they|will it be|was it)\b/i
-      const hasClaim = claimPattern.test(content)
-
-      // === DATE + EVENT DETECTION ===
-      // A message mentioning a specific date + a proper noun (team/country/event)
-      // is almost always a factual question that needs verification.
-      const hasDate = /\b(?:today|tonight|tomorrow|yesterday|\d{1,2}(?:st|nd|rd|th)?\s+(?:january|february|march|april|may|june|july|august|september|october|november|december)|(?:january|february|march|april|may|june|july|august|september|october|november|december)\s+\d{1,2})\b/i.test(content)
-
-      const needsSearch = sportsKeywords.some(kw => lower.includes(kw)) ||
-                         newsKeywords.some(kw => lower.includes(kw)) ||
-                         realtimeKeywords.some(kw => lower.includes(kw)) ||
-                         hasMatchup ||
-                         (hasClaim && (hasDate || hasMatchup || sportsKeywords.some(kw => lower.includes(kw))))
-
-      // Follow-up short queries that are conversational (not factual claims) —
-      // don't search for "which one?", "what about that?", etc.
-      // BUT still search if it contains a matchup or claim, because those need verification.
-      const isConversationalFollowUp = content.length < 50 && (
-        lower.includes('which') || lower.includes('what about') || lower.includes('you mean') ||
-        lower.includes('talking about') || lower.includes('are you sure') || lower.includes('really') ||
-        lower.includes('but ') || lower.includes('wait') || lower.includes('how can')
-      ) && !hasMatchup && !hasClaim
-
-      if (needsSearch && !isConversationalFollowUp) {
-        tool = 'web_search'
-      }
+    // === DEFAULT: web search ON for every message ===
+    // Only skip search if the user explicitly picked image_generation, or if
+    // the message has image attachments (vision mode — analyzing an image,
+    // not fetching web data). Everything else gets search.
+    if (tool !== 'image_generation' && !attachments?.length) {
+      tool = 'web_search'
     }
 
     // Message length cap — prevents abuse / accidental huge pastes from blowing token budget
