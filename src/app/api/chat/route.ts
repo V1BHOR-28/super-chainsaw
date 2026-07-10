@@ -138,14 +138,22 @@ export async function POST(req: NextRequest) {
     const memories = await semanticMemorySearch(userId, actualContent, 15)
 
     // === KNOWLEDGE BASE SEARCH ===
-    // Search the user's fed knowledge (articles, player lists, docs) for context
+    // Search the user's fed knowledge (articles, player lists, docs, PDFs) for
+    // context relevant to what the user just said. Two paths:
+    //   1. Semantic search via pgvector (if OPENAI_API_KEY is configured + the
+    //      knowledge has an embedding) — finds by MEANING.
+    //   2. Text search fallback (ILIKE) — finds by keyword. This ensures fed
+    //      knowledge is ALWAYS retrievable even if embeddings aren't generated.
     let knowledgeContext: string | undefined
     try {
       const { generateEmbedding, embeddingToPgVector } = await import('@/lib/embeddings')
       const queryEmbedding = await generateEmbedding(actualContent)
+      let knowledgeResults: Array<{ title: string; content: string }> = []
+
       if (queryEmbedding) {
+        // Semantic search — finds by meaning, not just exact keywords
         const vectorStr = embeddingToPgVector(queryEmbedding)
-        const knowledgeResults = await db.$queryRaw<Array<{ title: string; content: string }>>`
+        knowledgeResults = await db.$queryRaw<Array<{ title: string; content: string }>>`
           SELECT title, content
           FROM "Knowledge"
           WHERE "userId" = ${userId}
@@ -153,17 +161,41 @@ export async function POST(req: NextRequest) {
           ORDER BY embedding <=> ${vectorStr}::vector
           LIMIT 3
         `
-        if (knowledgeResults && knowledgeResults.length > 0) {
-          knowledgeContext = knowledgeResults
-            .map((k, i) => `--- KNOWLEDGE ${i + 1}: ${k.title} ---\n${k.content.slice(0, 2000)}`)
-            .join('\n\n')
-          // Add explicit framing so ARIA treats fed knowledge as authoritative
-          // for questions it covers — this is the user's personal library.
-          knowledgeContext = `USER'S FED KNOWLEDGE (from ARIA's digital library — these are documents the user explicitly taught you. Treat them as authoritative for questions they answer. If a question relates to this knowledge, cite the document and answer from it. If the knowledge doesn't cover the question, ignore it and use web search or your training.)\n\n${knowledgeContext}`
+      }
+
+      // Fallback: if no embedding results (key not configured, or knowledge
+      // stored without embedding), do a keyword ILIKE search. Extracts the
+      // most distinctive words from the user's message and matches them.
+      if (knowledgeResults.length === 0) {
+        const keywords = actualContent
+          .toLowerCase()
+          .replace(/[^a-z0-9\s]/g, ' ')
+          .split(/\s+/)
+          .filter((w) => w.length > 3 && !['what', 'how', 'when', 'where', 'which', 'think', 'about', 'does', 'will', 'would', 'could', 'should', 'there', 'their', 'the'].includes(w))
+          .slice(0, 5)
+        if (keywords.length > 0) {
+          // Build OR conditions for each keyword
+          const conditions = keywords
+            .map((kw) => `LOWER(content) LIKE '%${kw.replace(/'/g, "''")}%' OR LOWER(title) LIKE '%${kw.replace(/'/g, "''")}%'`)
+            .join(' OR ')
+          knowledgeResults = await db.$queryRawUnsafe<Array<{ title: string; content: string }>>(
+            `SELECT title, content FROM "Knowledge" WHERE "userId" = $1 AND (${conditions}) ORDER BY "createdAt" DESC LIMIT 3`,
+            userId
+          )
         }
       }
-    } catch {
+
+      if (knowledgeResults && knowledgeResults.length > 0) {
+        knowledgeContext = knowledgeResults
+          .map((k, i) => `--- KNOWLEDGE ${i + 1}: ${k.title} ---\n${k.content.slice(0, 2000)}`)
+          .join('\n\n')
+        // Explicit framing so ARIA treats fed knowledge as authoritative for
+        // questions it covers — this is the user's personal digital library.
+        knowledgeContext = `USER'S FED KNOWLEDGE (from ARIA's digital library — these are documents the user explicitly taught you. Treat them as authoritative for questions they answer. If a question relates to this knowledge, cite the document and answer from it. If the knowledge doesn't cover the question, ignore it and use web search or your training.)\n\n${knowledgeContext}`
+      }
+    } catch (e) {
       // Knowledge search is best-effort — don't fail the chat if it errors
+      console.error('[chat.knowledge_search]', e instanceof Error ? e.message : String(e))
     }
 
     const user = await db.user.findUnique({ where: { id: userId } })
