@@ -56,56 +56,44 @@ export function embeddingToPgVector(embedding: number[]): string {
 
 /**
  * Available AI models on OpenRouter that users can choose from.
- * Each model has a different personality/cost/speed tradeoff.
+ * CURATED: only models that can actually be used without draining paid
+ * credits. Premium models (Claude, GPT-4o, etc.) are excluded — they
+ * would burn through the user's OpenRouter credits fast and there's no
+ * meaningful quality gain over the free options below for ARIA's use case.
+ *
+ * Two tiers:
+ *   - Paid (cheap): DeepSeek V3 — the default, ~$0.14/M tokens
+ *   - Free ($0):    Llama 3.3 70B, GPT-OSS 120B, Qwen3 Next 80B — genuinely
+ *                   $0 on OpenRouter, don't consume paid credits at all
  */
 export const AVAILABLE_MODELS = [
   {
-    id: 'anthropic/claude-3.5-sonnet',
-    name: 'Claude 3.5 Sonnet',
-    description: 'Most natural, best for conversation.',
-    badge: 'Recommended',
-  },
-  {
-    id: 'anthropic/claude-3.5-haiku',
-    name: 'Claude 3.5 Haiku',
-    description: 'Fast, natural, great value.',
-    badge: 'Fast',
-  },
-  {
-    id: 'openai/gpt-4o-mini',
-    name: 'GPT-4o Mini',
-    description: 'Reliable, great reasoning.',
-    badge: 'Popular',
-  },
-  {
     id: 'deepseek/deepseek-chat',
     name: 'DeepSeek V3',
-    description: 'Fast, capable, great value.',
+    description: 'Fast, capable, great value. Uses credits (~$0.14/M tokens).',
     badge: 'Default',
+    tier: 'paid' as const,
   },
   {
-    id: 'deepseek/deepseek-r1',
-    name: 'DeepSeek R1',
-    description: 'Reasoning model, opinionated.',
-    badge: 'Smart',
-  },
-  {
-    id: 'qwen/qwen-2.5-72b-instruct',
-    name: 'Qwen 2.5 72B',
-    description: 'Excellent reasoning, multilingual.',
-    badge: 'Capable',
-  },
-  {
-    id: 'amazon/nova-lite-v1',
-    name: 'Amazon Nova Lite',
-    description: 'Fast, cost-effective.',
-    badge: 'Budget',
-  },
-  {
-    id: 'meta-llama/llama-3.3-70b-instruct',
+    id: 'meta-llama/llama-3.3-70b-instruct:free',
     name: 'Llama 3.3 70B',
-    description: 'Open-source, privacy-focused.',
-    badge: 'Open Source',
+    description: 'High quality, 70B params. Genuinely free — $0 forever.',
+    badge: 'Free',
+    tier: 'free' as const,
+  },
+  {
+    id: 'openai/gpt-oss-120b:free',
+    name: 'GPT-OSS 120B',
+    description: 'Largest free model, 117B MoE. Great reasoning.',
+    badge: 'Free',
+    tier: 'free' as const,
+  },
+  {
+    id: 'qwen/qwen3-next-80b-a3b-instruct:free',
+    name: 'Qwen3 Next 80B',
+    description: 'Multilingual, 262K context. Genuinely free.',
+    badge: 'Free',
+    tier: 'free' as const,
   },
 ] as const
 

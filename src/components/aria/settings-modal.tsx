@@ -446,10 +446,15 @@ export function SettingsModal() {
                 </SettingRow>
                 <SettingRow
                   title="AI Model"
-                  desc="Choose the AI model that powers ARIA. Different models have different strengths."
+                  desc="Choose the model that powers ARIA. Free models don't consume your OpenRouter credits."
                 >
                   <ModelSelector
-                    value={settings?.modelPreference ?? 'deepseek/deepseek-chat'}
+                    value={
+                      settings?.modelPreference &&
+                      ['deepseek/deepseek-chat', 'meta-llama/llama-3.3-70b-instruct:free', 'openai/gpt-oss-120b:free', 'qwen/qwen3-next-80b-a3b-instruct:free'].includes(settings.modelPreference)
+                        ? settings.modelPreference
+                        : 'deepseek/deepseek-chat'
+                    }
                     onChange={(v) => updateField('modelPreference', v)}
                   />
                 </SettingRow>
@@ -646,42 +651,128 @@ export function SettingsModal() {
   )
 }
 
-/* ---------- Model Selector ---------- */
+/* ---------- Model Selector (Claude-style card list) ---------- */
 
 const AI_MODELS = [
-  { id: 'deepseek/deepseek-chat', name: 'DeepSeek V3', desc: 'Fast, capable, free', badge: 'Default' },
-  { id: 'openai/gpt-4o-mini', name: 'GPT-4o Mini', desc: 'Reliable, free tier', badge: 'Popular' },
-  { id: 'qwen/qwen-2.5-72b-instruct', name: 'Qwen 2.5 72B', desc: 'Excellent reasoning, free', badge: 'Capable' },
-  { id: 'amazon/nova-lite-v1', name: 'Amazon Nova Lite', desc: 'Fast, free tier', badge: 'Fast' },
-  { id: 'meta-llama/llama-3.3-70b-instruct', name: 'Llama 3.3 70B', desc: 'Open-source, free', badge: 'Open Source' },
-  { id: 'anthropic/claude-3.5-sonnet', name: 'Claude 3.5 Sonnet', desc: 'Most natural (needs OpenRouter credits)', badge: 'Premium' },
-  { id: 'anthropic/claude-3.5-haiku', name: 'Claude 3.5 Haiku', desc: 'Fast + natural (needs credits)', badge: 'Premium' },
-  { id: 'deepseek/deepseek-r1', name: 'DeepSeek R1', desc: 'Reasoning model (needs credits)', badge: 'Premium' },
+  {
+    id: 'deepseek/deepseek-chat',
+    name: 'DeepSeek V3',
+    desc: 'Fast, capable, great value',
+    badge: 'Default',
+    badgeColor: 'var(--aria-accent-glow)',
+    cost: 'Uses credits · ~$0.14/M tokens',
+  },
+  {
+    id: 'meta-llama/llama-3.3-70b-instruct:free',
+    name: 'Llama 3.3 70B',
+    desc: 'High quality, 70B params',
+    badge: 'Free',
+    badgeColor: '#4ade80',
+    cost: 'Genuinely free · $0 forever',
+  },
+  {
+    id: 'openai/gpt-oss-120b:free',
+    name: 'GPT-OSS 120B',
+    desc: 'Largest free model, 117B MoE',
+    badge: 'Free',
+    badgeColor: '#4ade80',
+    cost: 'Genuinely free · $0 forever',
+  },
+  {
+    id: 'qwen/qwen3-next-80b-a3b-instruct:free',
+    name: 'Qwen3 Next 80B',
+    desc: 'Multilingual, 262K context',
+    badge: 'Free',
+    badgeColor: '#4ade80',
+    cost: 'Genuinely free · $0 forever',
+  },
 ] as const
 
 function ModelSelector({ value, onChange }: { value: string; onChange: (v: string) => void }) {
   return (
-    <select
-      value={value}
-      onChange={(e) => onChange(e.target.value)}
-      className="rounded-lg outline-none transition-colors focus:border-[rgba(245,158,11,0.45)]"
-      style={{
-        width: '200px',
-        background: 'var(--aria-bg-panel)',
-        border: '1px solid var(--aria-border)',
-        padding: '8px 12px',
-        color: 'var(--aria-fg)',
-        fontSize: '13px',
-        fontFamily: 'inherit',
-        cursor: 'pointer',
-      }}
-    >
-      {AI_MODELS.map((m) => (
-        <option key={m.id} value={m.id} style={{ background: 'var(--aria-bg-panel)' }}>
-          {m.name} ({m.badge})
-        </option>
-      ))}
-    </select>
+    <div className="flex w-full flex-col gap-2" style={{ maxWidth: '420px' }}>
+      {AI_MODELS.map((m) => {
+        const selected = value === m.id
+        return (
+          <button
+            key={m.id}
+            onClick={() => onChange(m.id)}
+            className="flex items-center justify-between gap-3 rounded-xl px-4 py-3 text-left transition-all"
+            style={{
+              background: selected ? 'rgba(245, 158, 11, 0.06)' : 'var(--aria-card)',
+              border: `1px solid ${selected ? 'var(--aria-accent)' : 'var(--aria-border)'}`,
+              cursor: 'pointer',
+              boxShadow: selected ? '0 0 0 1px var(--aria-accent)' : 'none',
+            }}
+            onMouseEnter={(e) => {
+              if (!selected) {
+                e.currentTarget.style.borderColor = 'rgba(245, 158, 11, 0.3)'
+                e.currentTarget.style.background = 'rgba(245, 158, 11, 0.03)'
+              }
+            }}
+            onMouseLeave={(e) => {
+              if (!selected) {
+                e.currentTarget.style.borderColor = 'var(--aria-border)'
+                e.currentTarget.style.background = 'var(--aria-card)'
+              }
+            }}
+          >
+            <div className="flex min-w-0 flex-col gap-0.5">
+              <div className="flex items-center gap-2">
+                <span
+                  className="text-[14px] font-medium"
+                  style={{ color: 'var(--aria-fg)' }}
+                >
+                  {m.name}
+                </span>
+                <span
+                  className="rounded-full px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-wide"
+                  style={{
+                    background: `${m.badgeColor}1a`,
+                    color: m.badgeColor,
+                    border: `1px solid ${m.badgeColor}33`,
+                  }}
+                >
+                  {m.badge}
+                </span>
+              </div>
+              <span
+                className="text-[12px]"
+                style={{ color: 'var(--aria-fg-muted)' }}
+              >
+                {m.desc}
+              </span>
+              <span
+                className="text-[10px]"
+                style={{ color: 'var(--aria-fg-dim)', opacity: 0.7 }}
+              >
+                {m.cost}
+              </span>
+            </div>
+            {/* Selected indicator */}
+            <div
+              className="flex h-5 w-5 shrink-0 items-center justify-center rounded-full transition-all"
+              style={{
+                background: selected ? 'var(--aria-accent)' : 'transparent',
+                border: `1.5px solid ${selected ? 'var(--aria-accent)' : 'var(--aria-border)'}`,
+              }}
+            >
+              {selected && (
+                <svg width="10" height="10" viewBox="0 0 10 10" fill="none">
+                  <path
+                    d="M2 5L4 7L8 3"
+                    stroke="var(--aria-bg)"
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                  />
+                </svg>
+              )}
+            </div>
+          </button>
+        )
+      })}
+    </div>
   )
 }
 
