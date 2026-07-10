@@ -265,7 +265,7 @@ export async function POST(req: NextRequest) {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify(body),
-                signal: AbortSignal.timeout(12000),
+                signal: AbortSignal.timeout(8000),
               })
               if (!r.ok) return null
               return await r.json()
@@ -618,7 +618,10 @@ Get straight to it. No intro. Just the raw analysis.`
                   messages: sdkMessages,
                   max_tokens: 4096,
                 }),
-                signal: AbortSignal.timeout(45000),
+                // 18s timeout — tight enough that all 3 fallback layers fit
+                // within Vercel's 60s function limit (18s + 18s + 15s = 51s,
+                // leaving ~9s for web search + overhead).
+                signal: AbortSignal.timeout(18000),
               })
               if (!apiResponse.ok) {
                 const errBody = await apiResponse.text()
@@ -645,7 +648,8 @@ Get straight to it. No intro. Just the raw analysis.`
                   model: 'openai',
                   messages: sdkMessages,
                 }),
-                signal: AbortSignal.timeout(45000),
+                // 15s timeout — Pollinations is usually fast (<3s).
+                signal: AbortSignal.timeout(15000),
               })
               if (!apiResponse.ok) {
                 throw new Error(`Pollinations ${apiResponse.status}: ${await apiResponse.text().then(t => t.slice(0, 200))}`)
@@ -686,8 +690,13 @@ Get straight to it. No intro. Just the raw analysis.`
                   providerUsed = 'pollinations (keyless fallback)'
                 } catch (e3) {
                   // ALL layers failed — ARIA can't reach any LLM
-                  console.error('[chat.llm] ALL LAYERS FAILED:', (e3 as Error).message)
-                  throw new Error('All LLM providers failed (OpenRouter paid, OpenRouter free, Pollinations). Check OPENROUTER_API_KEY and network.')
+                  const allErrors = [
+                    `Layer 1 (${selectedModel}): ${(e1 as Error).message?.slice(0, 100)}`,
+                    `Layer 2 (gpt-oss-120b:free): ${(e2 as Error).message?.slice(0, 100)}`,
+                    `Layer 3 (Pollinations): ${(e3 as Error).message?.slice(0, 100)}`,
+                  ].join(' | ')
+                  console.error('[chat.llm] ALL LAYERS FAILED:', allErrors)
+                  throw new Error(`All LLM providers failed. ${allErrors}`)
                 }
               }
             }
@@ -720,8 +729,10 @@ Get straight to it. No intro. Just the raw analysis.`
               stack: e instanceof Error ? e.stack : undefined,
               name: e instanceof Error ? e.name : undefined,
             })
+            // Include the actual error reason so the user (and CEO) can see
+            // what's failing instead of a generic "lost my train of thought".
             fullText =
-              "I lost my train of thought there for a moment. The connection to my reasoning layer dropped. Try sending that again — I'm here."
+              `I hit a snag reaching my reasoning layer. This usually means all my fallback providers are busy or rate-limited. Try again in a moment — I'm still here.\n\n*(Debug: ${errMsg.slice(0, 200)})*`
             send({ type: 'token', value: fullText })
           }
 
