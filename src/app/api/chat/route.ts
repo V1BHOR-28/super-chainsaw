@@ -45,23 +45,30 @@ export async function POST(req: NextRequest) {
       })
     }
 
-    // === AUTO-DETECT WEB SEARCH ===
-    // If the user didn't explicitly toggle a tool, auto-detect if they need web search.
-    // This prevents the user from having to manually toggle search for every query.
+    // === AUTO-DETECT WEB SEARCH + GREEN APPLE MODE ===
     let tool = userTool
-    if (!tool) {
+    let isGreenApple = false
+    let actualContent = content
+
+    // GREEN APPLE: type "/green apple" or "/ga" before a question for deep analysis mode
+    // Forces web search across all sources + uses enhanced brutally honest system prompt
+    const gaMatch = content.match(/^\/(?:green\s*apple|ga)\s+(.*)/i)
+    if (gaMatch) {
+      isGreenApple = true
+      actualContent = gaMatch[1].trim()
+      tool = 'web_search'
+    }
+
+    if (!tool && !isGreenApple) {
       const lower = content.toLowerCase()
-      // Sports/live data queries
       const sportsKeywords = ['match', 'matches', 'score', 'scores', 'game today', 'fixture',
         'world cup', 'fifa', 'premier league', 'la liga', 'serie a', 'bundesliga',
         'champions league', 'nba', 'nfl', 'nhl', 'cricket', 'ipl', 'tennis',
         'football today', 'soccer today', 'happening today', 'playing today',
         'result today', 'results today', 'kickoff', 'kick off', 'lineup',
         'standings', 'tournament today', 'playoff']
-      // News/current events queries
       const newsKeywords = ['news today', 'latest news', 'current events', 'what happened today',
         'today news', 'breaking', 'just happened', 'recent update']
-      // Real-time queries
       const realtimeKeywords = ['live score', 'live match', 'right now', 'currently playing',
         'who is winning', 'whats the score', "what's the score"]
 
@@ -69,8 +76,6 @@ export async function POST(req: NextRequest) {
                          newsKeywords.some(kw => lower.includes(kw)) ||
                          realtimeKeywords.some(kw => lower.includes(kw))
 
-      // Don't auto-search for very short messages (follow-ups like "yes", "ok", "which one")
-      // or questions that reference previous context ("which world cup are you talking about")
       const isFollowUp = content.length < 50 && (
         lower.includes('which') || lower.includes('what about') || lower.includes('you mean') ||
         lower.includes('talking about') || lower.includes('are you sure') || lower.includes('really') ||
@@ -144,14 +149,14 @@ export async function POST(req: NextRequest) {
     // Semantic memory search: find memories most relevant to what the user just said
     // Falls back to most-recent if embeddings aren't available
     const { semanticMemorySearch } = await import('@/app/api/memory/route')
-    const memories = await semanticMemorySearch(userId, content, 15)
+    const memories = await semanticMemorySearch(userId, actualContent, 15)
 
     // === KNOWLEDGE BASE SEARCH ===
     // Search the user's fed knowledge (articles, player lists, docs) for context
     let knowledgeContext: string | undefined
     try {
       const { generateEmbedding, embeddingToPgVector } = await import('@/lib/embeddings')
-      const queryEmbedding = await generateEmbedding(content)
+      const queryEmbedding = await generateEmbedding(actualContent)
       if (queryEmbedding) {
         const vectorStr = embeddingToPgVector(queryEmbedding)
         const knowledgeResults = await db.$queryRaw<Array<{ title: string; content: string }>>`
@@ -181,7 +186,7 @@ export async function POST(req: NextRequest) {
     if (tool === 'web_search') {
       try {
         const results: string[] = []
-        const lowerContent = content.toLowerCase()
+        const lowerContent = actualContent.toLowerCase()
 
         // === ESPN for live sports scores (runs in parallel with Tavily) ===
         const sportsKeywords = ['match', 'matches', 'score', 'scores', 'game', 'games', 'fixture',
@@ -198,7 +203,7 @@ export async function POST(req: NextRequest) {
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({
               api_key: process.env.TAVILY_API_KEY,
-              query: content,
+              query: actualContent,
               max_results: 5,
               include_answer: true,
             }),
@@ -233,7 +238,7 @@ export async function POST(req: NextRequest) {
                 'X-API-KEY': process.env.SERPER_API_KEY || '',
                 'Content-Type': 'application/json',
               },
-              body: JSON.stringify({ q: content, num: 6 }),
+              body: JSON.stringify({ q: actualContent, num: 6 }),
               signal: AbortSignal.timeout(8000),
             })
 
@@ -304,9 +309,9 @@ export async function POST(req: NextRequest) {
         }
 
         if (results.length > 0) {
-          toolContext = `Web search results for "${content}":\n${results.join('\n\n')}`
+          toolContext = `Web search results for "${actualContent}":\n${results.join('\n\n')}`
         } else {
-          toolContext = `Web search returned no results for "${content}". Answer from your own knowledge.`
+          toolContext = `Web search returned no results for "${actualContent}". Answer from your own knowledge.`
         }
       } catch (e) {
         console.error('[chat.web_search]', e)
@@ -329,9 +334,9 @@ export async function POST(req: NextRequest) {
     // === BUILD MESSAGE PAYLOAD ===
     const fullToolContext = [toolContext, knowledgeContext].filter(Boolean).join('\n\n')
 
-    const systemPrompt = buildAriaSystemPrompt({
+    let systemPrompt = buildAriaSystemPrompt({
       tone: settings?.tone ?? 'Warm & Honest',
-      responseLength: settings?.responseLength ?? 'Balanced',
+      responseLength: isGreenApple ? 'In-depth' : (settings?.responseLength ?? 'Balanced'),
       userName: user?.name,
       persona: user?.persona,
       age: user?.age,
@@ -342,6 +347,25 @@ export async function POST(req: NextRequest) {
         : null,
       toolContext: fullToolContext || undefined,
     })
+
+    // === GREEN APPLE ENHANCEMENT ===
+    // Override the system prompt with deep analysis mode
+    if (isGreenApple) {
+      systemPrompt += `
+
+DEEP ANALYSIS MODE ACTIVATED.
+The user has requested raw, unfiltered deep analysis. In this mode:
+- Be MAXIMALLY honest. No sugarcoating, no hedging, no disclaimers.
+- Give your RAW OPINION backed by the search data. Don't present "both sides" — tell them what you actually think.
+- Be thorough. Analyze every angle, every data point from the search results.
+- If the search data contains conflicting information, point it out and tell them which source you trust more and why.
+- Don't say "some might argue" — say "I think" and own it.
+- If something is bullshit, call it bullshit.
+- If something is brilliant, say it's brilliant.
+- Use the search results as your primary source of truth. If the search data contradicts your training, trust the search data.
+- Be direct. No warmup, no preamble. Get straight to the analysis.
+- Think step by step internally, then present a clear, structured, opinionated analysis.`
+    }
 
     // Map DB messages to SDK format; include vision content for the latest user message if images attached
     type SdkMessage = {
@@ -370,24 +394,25 @@ export async function POST(req: NextRequest) {
     }
 
     // If the last message wasn't the vision-augmented one, ensure the user content is present
+    // Use actualContent (without /green apple prefix) for the LLM
     const last = sdkMessages[sdkMessages.length - 1]
     const lastIsCurrentUser =
       last &&
       last.role === 'user' &&
       (typeof last.content === 'string'
-        ? last.content === content
-        : last.content.some((p) => p.type === 'text' && p.text === content))
+        ? last.content === content || last.content === actualContent
+        : last.content.some((p) => p.type === 'text' && (p.text === content || p.text === actualContent)))
     if (!lastIsCurrentUser) {
       if (attachments?.length) {
         const parts: Array<{ type: string; text?: string; image_url?: { url: string } }> = [
-          { type: 'text', text: content },
+          { type: 'text', text: actualContent },
         ]
         for (const a of attachments) {
           parts.push({ type: 'image_url', image_url: { url: a.dataUrl } })
         }
         sdkMessages.push({ role: 'user', content: parts })
       } else {
-        sdkMessages.push({ role: 'user', content })
+        sdkMessages.push({ role: 'user', content: actualContent })
       }
     }
 
@@ -480,7 +505,7 @@ export async function POST(req: NextRequest) {
 
           // Auto-title the conversation on first exchange
           if (recentMessages.length <= 1) {
-            const title = content.slice(0, 60).trim() || 'New Conversation'
+            const title = actualContent.slice(0, 60).trim() || 'New Conversation'
             await db.conversation.update({ where: { id: conversationId }, data: { title } })
           }
 
