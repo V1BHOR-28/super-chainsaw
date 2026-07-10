@@ -558,32 +558,109 @@ Get straight to it. No intro. Just the raw analysis.`
             const { getModelFromSettings } = await import('@/lib/embeddings')
             const selectedModel = getModelFromSettings(settings?.modelPreference)
 
-            // PRIMARY PATH: OpenRouter API with user's selected model
-            const apiResponse = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-              method: 'POST',
-              headers: {
-                'Content-Type': 'application/json',
-                'Authorization': `Bearer ${process.env.OPENROUTER_API_KEY}`,
-                'HTTP-Referer': 'https://ariav2-seven.vercel.app',
-                'X-Title': 'ARIA',
-              },
-              body: JSON.stringify({
-                model: selectedModel,
-                messages: sdkMessages,
-                max_tokens: 4096, // cap output tokens — keeps each call affordable
-                // and prevents OpenRouter 402 "requires more credits" errors
-                // when the account is low on free-tier credits.
-              }),
-            })
-
-            if (!apiResponse.ok) {
-              throw new Error(`OpenRouter API returned ${apiResponse.status}: ${await apiResponse.text()}`)
+            // === LLM FALLBACK CHAIN ===
+            // ARIA will never die. When one provider fails or runs out of
+            // credits, we automatically fall through to the next:
+            //   Layer 1: OpenRouter paid model (DeepSeek — best quality, uses credits)
+            //   Layer 2: OpenRouter FREE model (llama-3.3-70b — genuinely $0 cost,
+            //            doesn't consume paid credits, same API key)
+            //   Layer 3: Pollinations keyless API (no key needed at all — the
+            //            absolute last-resort fallback that always works)
+            //
+            // Triggered fallbacks: 402 (out of credits), 429 (rate limit),
+            // 5xx (server error), network errors, empty responses.
+            const callOpenRouter = async (model: string): Promise<string> => {
+              const apiResponse = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json',
+                  'Authorization': `Bearer ${process.env.OPENROUTER_API_KEY}`,
+                  'HTTP-Referer': 'https://ariav2-seven.vercel.app',
+                  'X-Title': 'ARIA',
+                },
+                body: JSON.stringify({
+                  model,
+                  messages: sdkMessages,
+                  max_tokens: 4096,
+                }),
+                signal: AbortSignal.timeout(45000),
+              })
+              if (!apiResponse.ok) {
+                const errBody = await apiResponse.text()
+                const err = new Error(`OpenRouter ${apiResponse.status} (${model}): ${errBody.slice(0, 200)}`)
+                // Attach the status so the caller can decide whether to fall back
+                ;(err as Error & { status?: number }).status = apiResponse.status
+                throw err
+              }
+              const data = await apiResponse.json()
+              const content = data.choices?.[0]?.message?.content ?? ''
+              if (!content || !content.trim()) {
+                throw new Error(`OpenRouter returned empty content for ${model}`)
+              }
+              return content.trim()
             }
 
-            const apiData = await apiResponse.json()
-            text = apiData.choices?.[0]?.message?.content ?? ''
+            const callPollinations = async (): Promise<string> => {
+              // Pollinations is keyless + free. OpenAI-compatible POST endpoint.
+              // Last-resort fallback — always works, no credits/key needed.
+              const apiResponse = await fetch('https://text.pollinations.ai/openai', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  model: 'openai',
+                  messages: sdkMessages,
+                }),
+                signal: AbortSignal.timeout(45000),
+              })
+              if (!apiResponse.ok) {
+                throw new Error(`Pollinations ${apiResponse.status}: ${await apiResponse.text().then(t => t.slice(0, 200))}`)
+              }
+              const data = await apiResponse.json()
+              const content = data.choices?.[0]?.message?.content ?? ''
+              if (!content || !content.trim()) {
+                throw new Error('Pollinations returned empty content')
+              }
+              return content.trim()
+            }
 
-            fullText = text.trim()
+            let text = ''
+            let providerUsed = ''
+            let fallbackHappened = false
+
+            // Layer 1: paid OpenRouter model
+            try {
+              text = await callOpenRouter(selectedModel)
+              providerUsed = selectedModel
+            } catch (e1) {
+              const status = (e1 as Error & { status?: number }).status
+              console.warn(`[chat.llm] Layer 1 (${selectedModel}) failed (status ${status}). Trying Layer 2 (free model)...`, (e1 as Error).message?.slice(0, 150))
+              fallbackHappened = true
+
+              // Layer 2: OpenRouter FREE model (doesn't consume paid credits)
+              // llama-3.3-70b is high quality + genuinely $0 on OpenRouter.
+              try {
+                text = await callOpenRouter('meta-llama/llama-3.3-70b-instruct:free')
+                providerUsed = 'meta-llama/llama-3.3-70b-instruct:free'
+              } catch (e2) {
+                console.warn(`[chat.llm] Layer 2 (free OpenRouter) failed. Trying Layer 3 (Pollinations keyless)...`, (e2 as Error).message?.slice(0, 150))
+
+                // Layer 3: Pollinations keyless API (no key needed at all)
+                try {
+                  text = await callPollinations()
+                  providerUsed = 'pollinations (keyless fallback)'
+                } catch (e3) {
+                  // ALL layers failed — ARIA can't reach any LLM
+                  console.error('[chat.llm] ALL LAYERS FAILED:', (e3 as Error).message)
+                  throw new Error('All LLM providers failed (OpenRouter paid, OpenRouter free, Pollinations). Check OPENROUTER_API_KEY and network.')
+                }
+              }
+            }
+
+            if (fallbackHappened) {
+              console.log(`[chat.llm] Fallback resolved — using: ${providerUsed}`)
+            }
+
+            fullText = text
 
             if (!fullText) {
               fullText =
