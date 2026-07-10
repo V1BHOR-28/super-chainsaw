@@ -95,4 +95,6 @@ export type ChatMessage = {
   createdAt: string
   memoriesUsed?: number
   moodContext?: string | null
+  /** Web sources cited in this response (for the "Found N web pages" bar). */
+  sources?: Array<{ title: string; url: string; host: string }>
 }

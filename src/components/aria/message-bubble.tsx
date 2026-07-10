@@ -213,6 +213,59 @@ export function MessageBubble({ message }: { message: ChatMessage }) {
           ) : null}
         </div>
 
+        {/* Web sources bar — "Found N web pages" with favicon logos (like DeepSeek) */}
+        {!isUser && message.sources && message.sources.length > 0 && (
+          <div
+            className="flex items-center gap-2 mt-2 flex-wrap"
+            style={{ maxWidth: '100%' }}
+          >
+            <span
+              className="text-[10px] flex items-center gap-1 shrink-0"
+              style={{ color: 'var(--aria-fg-dim)' }}
+            >
+              <Globe size={10} />
+              Found {message.sources.length} {message.sources.length === 1 ? 'source' : 'sources'}
+            </span>
+            <div className="flex items-center gap-1 flex-wrap">
+              {message.sources.slice(0, 5).map((src, i) => (
+                <a
+                  key={i}
+                  href={src.url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="flex items-center gap-1.5 rounded-full px-2 py-1 transition-all hover:scale-105"
+                  style={{
+                    background: 'var(--aria-card)',
+                    border: '1px solid var(--aria-border)',
+                    textDecoration: 'none',
+                  }}
+                  title={src.title}
+                >
+                  {/* Favicon via Google's favicon service — no API key needed */}
+                  <img
+                    src={`https://www.google.com/s2/favicons?domain=${src.host}&sz=32`}
+                    alt=""
+                    width={12}
+                    height={12}
+                    className="rounded-sm"
+                    style={{ display: 'block' }}
+                    onError={(e) => {
+                      // If favicon fails to load, hide the image and show a globe fallback
+                      ;(e.target as HTMLImageElement).style.display = 'none'
+                    }}
+                  />
+                  <span
+                    className="text-[10px] truncate"
+                    style={{ color: 'var(--aria-fg-muted)', maxWidth: '120px' }}
+                  >
+                    {src.host}
+                  </span>
+                </a>
+              ))}
+            </div>
+          </div>
+        )}
+
         {/* Action row for ARIA messages */}
         {!isUser && !message.streaming && message.content && (
           <div className="flex items-center gap-1 mt-1.5 opacity-60 hover:opacity-100 transition-opacity">

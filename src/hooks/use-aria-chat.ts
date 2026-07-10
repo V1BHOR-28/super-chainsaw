@@ -183,6 +183,7 @@ export function useAriaChat() {
         let accumulated = ''
         let imageUrl: string | null = null
         let imagePrompt = ''
+        let collectedSources: Array<{ title: string; url: string; host: string }> = []
 
         // 3. Parse SSE
         while (true) {
@@ -202,6 +203,7 @@ export function useAriaChat() {
               const data = JSON.parse(payload) as
                 | { type: 'token'; value: string }
                 | { type: 'image'; url: string; prompt: string }
+                | { type: 'sources'; sources: Array<{ title: string; url: string; host: string }> }
                 | {
                     type: 'done'
                     messageId: string
@@ -219,6 +221,11 @@ export function useAriaChat() {
                 imagePrompt = data.prompt
                 accumulated += `\n\n![${imagePrompt}](${imageUrl})\n`
                 updateMessage(ariaMsgId, { content: accumulated, streaming: true })
+              } else if (data.type === 'sources') {
+                // Store the web sources so the message bubble can render the
+                // "Found N web pages" bar with favicon logos.
+                collectedSources = data.sources
+                updateMessage(ariaMsgId, { sources: collectedSources })
               } else if (data.type === 'done') {
                 updateMessage(ariaMsgId, {
                   content: accumulated,
@@ -227,6 +234,7 @@ export function useAriaChat() {
                   toolUsed: toolForThisSend ?? (attachmentsForThisSend.length ? 'vision' : null),
                   memoriesUsed: data.memoriesUsed,
                   moodContext: data.moodContext ?? null,
+                  sources: collectedSources.length > 0 ? collectedSources : undefined,
                 })
                 if (data.usage?.tokens) {
                   useAriaStore.getState().addUsage(data.usage.tokens)

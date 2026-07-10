@@ -191,11 +191,21 @@ export async function POST(req: NextRequest) {
           .join('\n\n')
         // Explicit framing so ARIA treats fed knowledge as authoritative for
         // questions it covers — this is the user's personal digital library.
-        knowledgeContext = `USER'S FED KNOWLEDGE (from ARIA's digital library — these are documents the user explicitly taught you. Treat them as authoritative for questions they answer. If a question relates to this knowledge, cite the document and answer from it. If the knowledge doesn't cover the question, ignore it and use web search or your training.)\n\n${knowledgeContext}`
+        // When knowledge is found, ARIA answers from it — NOT from web search.
+        knowledgeContext = `USER'S FED KNOWLEDGE (from ARIA's digital library — these are documents the user explicitly taught you. The user is asking about something covered in this knowledge. ANSWER FROM THIS KNOWLEDGE — do NOT use web search results even if they're provided. Cite the document by name. If the knowledge genuinely doesn't cover the user's specific question, say so and offer to search the web.)\n\n${knowledgeContext}`
       }
     } catch (e) {
       // Knowledge search is best-effort — don't fail the chat if it errors
       console.error('[chat.knowledge_search]', e instanceof Error ? e.message : String(e))
+    }
+
+    // === KNOWLEDGE PRIORITY ===
+    // If the user's fed knowledge covers this question, SKIP web search entirely.
+    // ARIA answers from the PDF/doc the user fed her — that's the whole point of
+    // the digital library USP. Web search only runs when knowledge doesn't apply.
+    if (knowledgeContext && tool === 'web_search') {
+      console.log('[chat.knowledge_priority] Knowledge found — skipping web search. ARIA will answer from fed documents.')
+      tool = null // cancel the web search; knowledgeContext is already in the prompt
     }
 
     const user = await db.user.findUnique({ where: { id: userId } })
@@ -203,6 +213,7 @@ export async function POST(req: NextRequest) {
     // === TOOL EXECUTION (pre-LLM) ===
     let toolContext: string | undefined
     let generatedImage: { url: string; prompt: string } | undefined
+    let webSources: Array<{ title: string; url: string; host: string }> = []
 
     if (tool === 'web_search') {
       try {
@@ -293,6 +304,16 @@ export async function POST(req: NextRequest) {
                   : ''
                 results.push(`${item.title}${datePart}\n   ${item.content.slice(0, 350)}\n   URL: ${item.url || ''}`)
                 webProviderHit = true
+                // Collect source for the UI source bar
+                if (item.url && webSources.length < 6) {
+                  try {
+                    webSources.push({
+                      title: item.title.slice(0, 60),
+                      url: item.url,
+                      host: new URL(item.url).hostname.replace(/^www\./, ''),
+                    })
+                  } catch {}
+                }
               }
             }
           }
@@ -327,6 +348,16 @@ export async function POST(req: NextRequest) {
                   if (r.title) {
                     results.push(`${r.title}\n   ${r.snippet || ''}\n   URL: ${r.link || ''}`)
                     webProviderHit = true
+                    // Collect source for the UI source bar
+                    if (r.link && webSources.length < 6) {
+                      try {
+                        webSources.push({
+                          title: r.title.slice(0, 60),
+                          url: r.link,
+                          host: new URL(r.link).hostname.replace(/^www\./, ''),
+                        })
+                      } catch {}
+                    }
                   }
                 }
               }
@@ -580,6 +611,13 @@ Get straight to it. No intro. Just the raw analysis.`
           // If an image was generated, surface it first
           if (generatedImage) {
             send({ type: 'image', url: generatedImage.url, prompt: generatedImage.prompt })
+          }
+
+          // Send web search sources to the frontend BEFORE the response streams.
+          // The UI renders a "Found N web pages" bar with favicon logos (like
+          // DeepSeek/ChatGPT) so the user sees where ARIA pulled data from.
+          if (webSources.length > 0) {
+            send({ type: 'sources', sources: webSources })
           }
 
           // Call OpenRouter API non-streaming, then stream the result word-by-word
