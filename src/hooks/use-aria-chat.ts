@@ -135,8 +135,11 @@ export function useAriaChat() {
       setStreaming(true)
       const toolForThisSend = pendingTool
       const attachmentsForThisSend = pendingAttachments
-      // Reset tool/attachments for the next message
-      setPendingTool(null)
+      // Reset tool/attachments for the next message.
+      // Web search is ALWAYS ON now, so after sending we reset back to
+      // 'web_search' (not null) — this keeps the globe button lit between
+      // messages. If image_generation was used, it reverts to search.
+      setPendingTool('web_search')
       setPendingAttachments([])
 
       try {
