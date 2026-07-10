@@ -449,14 +449,14 @@ export function SettingsModal() {
                 </SettingRow>
                 <SettingRow
                   title="AI Model"
-                  desc="Choose the model that powers ARIA. Free models don't consume your OpenRouter credits."
+                  desc="Llama 3.3 70B is the default — free forever, tuned for raw honest conversation."
                 >
                   <ModelSelector
                     value={
                       settings?.modelPreference &&
-                      ['deepseek/deepseek-chat', 'meta-llama/llama-3.3-70b-instruct:free', 'openai/gpt-oss-120b:free', 'qwen/qwen3-next-80b-a3b-instruct:free'].includes(settings.modelPreference)
+                      ['meta-llama/llama-3.3-70b-instruct:free', 'openai/gpt-oss-120b:free', 'qwen/qwen3-next-80b-a3b-instruct:free', 'deepseek/deepseek-chat'].includes(settings.modelPreference)
                         ? settings.modelPreference
-                        : 'deepseek/deepseek-chat'
+                        : 'meta-llama/llama-3.3-70b-instruct:free'
                     }
                     onChange={(v) => updateField('modelPreference', v)}
                   />
@@ -658,28 +658,20 @@ export function SettingsModal() {
 
 const AI_MODELS = [
   {
-    id: 'deepseek/deepseek-chat',
-    name: 'DeepSeek V3',
-    desc: 'Fast, capable, great value',
-    badge: 'Default',
-    badgeColor: 'var(--aria-accent-glow)',
-    cost: 'Uses credits',
-  },
-  {
     id: 'meta-llama/llama-3.3-70b-instruct:free',
     name: 'Llama 3.3 70B',
-    desc: 'High quality, 70B params',
-    badge: 'Free',
-    badgeColor: '#4ade80',
-    cost: '$0 forever',
+    desc: 'Raw, unfiltered, tuned for honesty',
+    badge: 'Default',
+    badgeColor: 'var(--aria-accent-glow)',
+    cost: 'Free forever',
   },
   {
     id: 'openai/gpt-oss-120b:free',
     name: 'GPT-OSS 120B',
-    desc: 'Largest free model',
+    desc: 'Largest free model, 117B MoE',
     badge: 'Free',
     badgeColor: '#4ade80',
-    cost: '$0 forever',
+    cost: 'Free forever',
   },
   {
     id: 'qwen/qwen3-next-80b-a3b-instruct:free',
@@ -687,7 +679,15 @@ const AI_MODELS = [
     desc: 'Multilingual, 262K context',
     badge: 'Free',
     badgeColor: '#4ade80',
-    cost: '$0 forever',
+    cost: 'Free forever',
+  },
+  {
+    id: 'deepseek/deepseek-chat',
+    name: 'DeepSeek V3',
+    desc: 'Alternative — uses paid credits',
+    badge: 'Paid',
+    badgeColor: '#f59e0b',
+    cost: '~$0.14/M tokens',
   },
 ] as const
 

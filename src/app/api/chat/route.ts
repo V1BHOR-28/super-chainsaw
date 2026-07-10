@@ -635,11 +635,13 @@ Get straight to it. No intro. Just the raw analysis.`
               console.warn(`[chat.llm] Layer 1 (${selectedModel}) failed (status ${status}). Trying Layer 2 (free model)...`, (e1 as Error).message?.slice(0, 150))
               fallbackHappened = true
 
-              // Layer 2: OpenRouter FREE model (doesn't consume paid credits)
-              // llama-3.3-70b is high quality + genuinely $0 on OpenRouter.
+              // Layer 2: a DIFFERENT free OpenRouter model (not the same as Layer 1,
+              // which may already be Llama). GPT-OSS 120B is genuinely $0 and high quality.
+              // If Layer 1 was Llama and it failed, we need a different model here for
+              // actual redundancy.
               try {
-                text = await callOpenRouter('meta-llama/llama-3.3-70b-instruct:free')
-                providerUsed = 'meta-llama/llama-3.3-70b-instruct:free'
+                text = await callOpenRouter('openai/gpt-oss-120b:free')
+                providerUsed = 'openai/gpt-oss-120b:free'
               } catch (e2) {
                 console.warn(`[chat.llm] Layer 2 (free OpenRouter) failed. Trying Layer 3 (Pollinations keyless)...`, (e2 as Error).message?.slice(0, 150))
 

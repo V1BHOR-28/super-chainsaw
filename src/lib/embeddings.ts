@@ -61,24 +61,21 @@ export function embeddingToPgVector(embedding: number[]): string {
  * would burn through the user's OpenRouter credits fast and there's no
  * meaningful quality gain over the free options below for ARIA's use case.
  *
+ * Llama 3.3 70B is now the DEFAULT — it's free ($0 forever), so token
+ * usage is never a concern. The system prompt is tuned specifically to
+ * push Llama past its RLHF "corporate assistant" default into raw,
+ * unfiltered, opinionated output.
+ *
  * Two tiers:
- *   - Paid (cheap): DeepSeek V3 — the default, ~$0.14/M tokens
- *   - Free ($0):    Llama 3.3 70B, GPT-OSS 120B, Qwen3 Next 80B — genuinely
- *                   $0 on OpenRouter, don't consume paid credits at all
+ *   - Free ($0): Llama 3.3 70B (default), GPT-OSS 120B, Qwen3 Next 80B
+ *   - Paid (cheap): DeepSeek V3 — available as an alternative, ~$0.14/M tokens
  */
 export const AVAILABLE_MODELS = [
   {
-    id: 'deepseek/deepseek-chat',
-    name: 'DeepSeek V3',
-    description: 'Fast, capable, great value. Uses credits (~$0.14/M tokens).',
-    badge: 'Default',
-    tier: 'paid' as const,
-  },
-  {
     id: 'meta-llama/llama-3.3-70b-instruct:free',
     name: 'Llama 3.3 70B',
-    description: 'High quality, 70B params. Genuinely free — $0 forever.',
-    badge: 'Free',
+    description: 'Raw, unfiltered, free forever. Tuned for honest conversation.',
+    badge: 'Default',
     tier: 'free' as const,
   },
   {
@@ -95,13 +92,20 @@ export const AVAILABLE_MODELS = [
     badge: 'Free',
     tier: 'free' as const,
   },
+  {
+    id: 'deepseek/deepseek-chat',
+    name: 'DeepSeek V3',
+    description: 'Alternative. Uses credits (~$0.14/M tokens).',
+    badge: 'Paid',
+    tier: 'paid' as const,
+  },
 ] as const
 
 /**
- * Get the model ID from user settings, with fallback to default.
+ * Get the model ID from user settings, with fallback to default (Llama 3.3 70B).
  */
 export function getModelFromSettings(modelPreference: string | null | undefined): string {
-  if (!modelPreference) return 'deepseek/deepseek-chat'
+  if (!modelPreference) return 'meta-llama/llama-3.3-70b-instruct:free'
   const isValid = AVAILABLE_MODELS.some(m => m.id === modelPreference)
-  return isValid ? modelPreference : 'deepseek/deepseek-chat'
+  return isValid ? modelPreference : 'meta-llama/llama-3.3-70b-instruct:free'
 }
