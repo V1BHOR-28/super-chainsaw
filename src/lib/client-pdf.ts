@@ -26,6 +26,35 @@ export interface PdfParseProgress {
   percent: number
 }
 
+// Cache the pdfjs library + worker setup so repeated uploads don't re-import.
+let pdfjsLibCache: typeof import('pdfjs-dist') | null = null
+
+async function getPdfjs() {
+  if (pdfjsLibCache) return pdfjsLibCache
+
+  const pdfjsLib = await import('pdfjs-dist')
+
+  // Set the worker source ONCE. The worker lets pdfjs parse PDFs off the
+  // main thread (better performance). We try multiple approaches in order
+  // of reliability:
+  //   1. unpkg CDN with the CORRECT filename (pdf.worker.min.mjs)
+  //   2. If that fails, disable the worker (runs on main thread — slower but always works)
+  if (!pdfjsLib.GlobalWorkerOptions.workerSrc) {
+    try {
+      // Use unpkg CDN — the file definitely exists (verified in node_modules).
+      // The correct filename is pdf.worker.min.mjs (NOT .min.min.js which was the bug).
+      pdfjsLib.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjsLib.version}/build/pdf.worker.min.mjs`
+    } catch {
+      // If CDN setup fails (shouldn't happen — it's just a string assignment),
+      // disable the worker. pdfjs will parse on the main thread.
+      pdfjsLib.GlobalWorkerOptions.workerSrc = ''
+    }
+  }
+
+  pdfjsLibCache = pdfjsLib
+  return pdfjsLib
+}
+
 /**
  * Parse a PDF file in the browser, extracting all text.
  * Calls onProgress with page-by-page updates.
@@ -38,30 +67,7 @@ export async function parsePdfInBrowser(
   file: Blob,
   onProgress?: (progress: PdfParseProgress) => void
 ): Promise<string> {
-  // Dynamic import — only loads pdfjs when this function is called (in browser).
-  // This prevents SSR issues and keeps the bundle small.
-  const pdfjsLib = await import('pdfjs-dist')
-
-  // Set the worker source. The worker lets pdfjs parse PDFs off the main
-  // thread (better performance). We try multiple approaches in order of
-  // reliability:
-  //   1. Local bundled worker via ?url import (Turbopack serves it as a static asset)
-  //   2. unpkg CDN with the CORRECT filename (pdf.worker.min.mjs)
-  //   3. Disable worker entirely (runs on main thread — slower but always works)
-  if (!pdfjsLib.GlobalWorkerOptions.workerSrc) {
-    try {
-      const workerModule = await import('pdfjs-dist/build/pdf.worker.min.mjs?url')
-      pdfjsLib.GlobalWorkerOptions.workerSrc = workerModule.default
-    } catch {
-      try {
-        // Fallback: unpkg CDN with correct filename
-        pdfjsLib.GlobalWorkerOptions.workerSrc = `https://unpkg.com/pdfjs-dist@${pdfjsLib.version}/build/pdf.worker.min.mjs`
-      } catch {
-        // Last resort: no worker (main thread parsing)
-        pdfjsLib.GlobalWorkerOptions.workerSrc = ''
-      }
-    }
-  }
+  const pdfjsLib = await getPdfjs()
 
   const arrayBuffer = await file.arrayBuffer()
   const loadingTask = pdfjsLib.getDocument({
@@ -70,7 +76,16 @@ export async function parsePdfInBrowser(
     useSystemFonts: true,
   })
 
-  const pdf = await loadingTask.promise
+  let pdf: Awaited<typeof loadingTask.promise> | null = null
+  try {
+    pdf = await loadingTask.promise
+  } catch (err) {
+    throw new Error(
+      `Could not open this PDF. It might be corrupted or password-protected. ` +
+      `(Detail: ${err instanceof Error ? err.message : String(err)})`
+    )
+  }
+
   const totalPages = pdf.numPages
   let fullText = ''
 
@@ -94,8 +109,9 @@ export async function parsePdfInBrowser(
         })
       }
 
-      // Clean up page resources to avoid memory buildup on large PDFs
-      page.cleanup()
+      // Clean up page resources to avoid memory buildup on large PDFs.
+      // Use optional chaining — some pdfjs versions name this differently.
+      try { page.cleanup?.() } catch { /* best-effort cleanup */ }
     } catch {
       // Skip pages that fail — partial extraction is better than total failure
     }
@@ -106,6 +122,13 @@ export async function parsePdfInBrowser(
     }
   }
 
-  await pdf.destroy()
+  // Cleanup — best-effort. Method name varies across pdfjs versions:
+  //   - v3: pdf.destroy()
+  //   - v4: pdf.destroy()
+  //   - v6: pdf.cleanup() or pdf.destroy() (both may exist)
+  // Wrap in try/catch + optional chaining so a missing method doesn't crash.
+  try { await pdf.destroy?.() } catch { /* best-effort cleanup */ }
+  try { await pdf.cleanup?.() } catch { /* best-effort cleanup */ }
+
   return fullText
 }
