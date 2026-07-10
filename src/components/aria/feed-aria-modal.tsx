@@ -28,7 +28,7 @@ export function FeedAriaModal() {
   const [url, setUrl] = useState('')
   const [file, setFile] = useState<File | null>(null)
   const [state, setState] = useState<FeedState>('idle')
-  const [knowledge, setKnowledge] = useState<Array<{ id: string; title: string; source: string; contentLength: number }>>([])
+  const [knowledge, setKnowledge] = useState<Array<{ id: string; title: string; source: string; contentLength: number; chunks?: number }>>([])
   // Large-file pipeline progress
   const [parseProgress, setParseProgress] = useState<PdfParseProgress | null>(null)
   const [indexProgress, setIndexProgress] = useState<{ current: number; total: number } | null>(null)
@@ -550,7 +550,7 @@ export function FeedAriaModal() {
                           {k.title}
                         </div>
                         <div className="text-[11px] mt-1" style={{ color: 'var(--aria-fg-dim)' }}>
-                          {k.source === 'url' ? '🌐 URL' : k.source === 'pdf' ? '📄 PDF' : k.source === 'file' ? '📎 File' : '📝 Text'} · {k.contentLength.toLocaleString()} chars
+                          {k.source === 'url' ? '🌐 URL' : k.source === 'pdf' ? '📄 PDF' : k.source === 'file' ? '📎 File' : '📝 Text'} · {k.contentLength.toLocaleString()} chars{k.chunks > 1 ? ` · ${k.chunks} sections` : ''}
                         </div>
                       </div>
                       <button

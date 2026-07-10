@@ -7,7 +7,10 @@ import { generateEmbedding, embeddingToPgVector } from '@/lib/embeddings'
 import { chunkText } from '@/lib/chunk-text'
 
 /**
- * GET /api/knowledge — list all knowledge entries
+ * GET /api/knowledge — list all knowledge entries.
+ * Chunks from the same book are GROUPED into one entry so the library
+ * doesn't show 100 "Part 1/100", "Part 2/100"... entries for one book.
+ * The base title (without " — Part N/M") is used as the group key.
  */
 export async function GET() {
   try {
@@ -20,12 +23,50 @@ export async function GET() {
       select: { id: true, title: true, source: true, sourceUrl: true, createdAt: true, content: true },
     })
 
-    // Truncate content for list view
-    const list = knowledge.map(k => ({
-      ...k,
-      content: k.content.slice(0, 200) + (k.content.length > 200 ? '...' : ''),
-      contentLength: k.content.length,
-    }))
+    // Group chunks by base title (strip " — Part N/M" suffix).
+    // This collapses 100 chunks of one book into a single library entry.
+    const groups = new Map<string, { id: string; title: string; source: string; sourceUrl: string | null; createdAt: Date; totalLength: number; chunkCount: number }>()
+
+    for (const k of knowledge) {
+      // Extract base title: "Book Title — Part 3/100" → "Book Title"
+      // Also handles "Book Title — Part 1/1" (single chunk, shouldn't have suffix but just in case)
+      const baseTitle = k.title.replace(/\s+—\s+Part\s+\d+\/\d+$/, '')
+
+      const existing = groups.get(baseTitle)
+      if (existing) {
+        // Same book — accumulate
+        existing.totalLength += k.content.length
+        existing.chunkCount += 1
+        // Keep the most recent createdAt
+        if (k.createdAt > existing.createdAt) {
+          existing.createdAt = k.createdAt
+        }
+      } else {
+        // New book
+        groups.set(baseTitle, {
+          id: k.id, // first chunk's ID (used for delete — but we need to delete ALL chunks)
+          title: baseTitle,
+          source: k.source,
+          sourceUrl: k.sourceUrl,
+          createdAt: k.createdAt,
+          totalLength: k.content.length,
+          chunkCount: 1,
+        })
+      }
+    }
+
+    // Convert to array, sorted by most recent
+    const list = Array.from(groups.values())
+      .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
+      .map(g => ({
+        id: g.title, // use the BASE TITLE as the ID for display + delete purposes
+        title: g.title,
+        source: g.source,
+        sourceUrl: g.sourceUrl,
+        createdAt: g.createdAt.toISOString(),
+        contentLength: g.totalLength,
+        chunks: g.chunkCount,
+      }))
 
     return NextResponse.json({ knowledge: list })
   } catch (err) {
