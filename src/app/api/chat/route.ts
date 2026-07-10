@@ -65,12 +65,35 @@ export async function POST(req: NextRequest) {
       actualContent = gaMatch[1].trim()
     }
 
-    // === DEFAULT: web search ON for every message ===
-    // Only skip search if the user explicitly picked image_generation, or if
-    // the message has image attachments (vision mode — analyzing an image,
-    // not fetching web data). Everything else gets search.
+    // === SMART WEB SEARCH + TOGGLE ===
+    // Web search is ON by default BUT:
+    //   1. User can toggle it OFF via the globe button (pendingTool = null means off)
+    //   2. Skip search for short casual messages ("hi", "yeah", "thanks") — these
+    //      don't need web data and skipping them makes ARIA respond in 2-3s instead
+    //      of 40s. This also prevents Groq 413 (payload too large) by not adding
+    //      search results to casual conversations.
     if (tool !== 'image_generation' && !attachments?.length) {
-      tool = 'web_search'
+      // Check if user explicitly turned OFF search (pendingTool = null from globe toggle)
+      // userTool === null means the frontend sent null (user turned it off)
+      const userWantsSearchOff = userTool === null
+
+      // Smart skip: don't search for casual/greeting messages
+      const lowerContent = content.toLowerCase().trim()
+      const casualPatterns = [
+        /^(hi|hey|hello|yo|sup|hi aria|hey aria)\b/i,
+        /^(yeah|yes|no|ok|okay|sure|cool|nice|got it|makes sense)\b/i,
+        /^(thanks|thank you|thx|ty)\b/i,
+        /^(lol|lmao|haha|hmm|oh|wow|damn|fr|true|right)\b/i,
+        /^(bye|goodbye|see ya|cya)\b/i,
+        /^(how are you|how are u|whats up|what's up|how's it going)\b/i,
+      ]
+      const isCasual = casualPatterns.some(p => p.test(lowerContent)) || lowerContent.length < 12
+
+      if (!userWantsSearchOff && !isCasual) {
+        tool = 'web_search'
+      } else {
+        tool = null // skip search — respond fast
+      }
     }
 
     // Message length cap — prevents abuse / accidental huge pastes from blowing token budget
@@ -187,7 +210,7 @@ export async function POST(req: NextRequest) {
 
       if (knowledgeResults && knowledgeResults.length > 0) {
         knowledgeContext = knowledgeResults
-          .map((k, i) => `--- KNOWLEDGE ${i + 1}: ${k.title} ---\n${k.content.slice(0, 2000)}`)
+          .map((k, i) => `--- KNOWLEDGE ${i + 1}: ${k.title} ---\n${k.content.slice(0, 1000)}`)
           .join('\n\n')
         // Explicit framing so ARIA treats fed knowledge as authoritative for
         // questions it covers — this is the user's personal digital library.
@@ -296,13 +319,13 @@ export async function POST(req: NextRequest) {
           }
           const res = tavilyData.results
           if (Array.isArray(res)) {
-            for (const r of res.slice(0, 5)) {
+            for (const r of res.slice(0, 3)) {
               const item = r as { title?: string; content?: string; url?: string; published_date?: string }
               if (item.title && item.content) {
                 const datePart = item.published_date
                   ? ` [published ${String(item.published_date).slice(0, 10)}]`
                   : ''
-                results.push(`${item.title}${datePart}\n   ${item.content.slice(0, 350)}\n   URL: ${item.url || ''}`)
+                results.push(`${item.title}${datePart}\n   ${item.content.slice(0, 200)}\n   URL: ${item.url || ''}`)
                 webProviderHit = true
                 // Collect source for the UI source bar
                 if (item.url && webSources.length < 6) {

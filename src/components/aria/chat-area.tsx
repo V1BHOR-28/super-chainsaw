@@ -164,14 +164,15 @@ export function ChatArea() {
   }
 
   const toggleTool = (tool: 'web_search' | 'image_generation') => {
-    // Web search is ALWAYS ON by user request (backend searches every message).
-    // - Tapping image_generation: switch to image gen.
-    // - Tapping web_search: if currently on image_generation, switch back to
-    //   search. If already on search, stay on search (can't be turned off).
+    // Web search is ON by default but can be TOGGLED OFF.
+    // - Tapping web_search when it's on: turn it OFF (pendingTool = null)
+    // - Tapping web_search when it's off: turn it ON
+    // - Tapping image_generation: switch to image gen (or back to search)
     if (tool === 'image_generation') {
       setPendingTool(pendingTool === 'image_generation' ? 'web_search' : 'image_generation')
     } else {
-      setPendingTool('web_search')
+      // Toggle: if currently on (web_search), turn off (null). If off or on image_gen, turn on.
+      setPendingTool(pendingTool === 'web_search' ? null : 'web_search')
     }
   }
 
@@ -272,8 +273,8 @@ export function ChatArea() {
             </div>
           )}
 
-          {/* Pending tool indicator — only show for image_generation since
-              web_search is always on (showing it every message would be noise). */}
+          {/* Pending tool indicator — only show for image_generation.
+              Web search shows its state via the globe button highlight. */}
           {pendingTool === 'image_generation' && (
             <div className="flex justify-center mb-2">
               <div
@@ -341,7 +342,7 @@ export function ChatArea() {
                   borderColor: pendingTool === 'web_search' ? 'var(--aria-accent)' : 'var(--aria-border)',
                   color: pendingTool === 'web_search' ? 'var(--aria-accent-glow)' : 'var(--aria-fg-muted)',
                 }}
-                title="Web search — always on for every message"
+                title={pendingTool === 'web_search' ? 'Web search ON — click to turn off' : 'Web search OFF — click to turn on'}
               >
                 <Globe size={15} />
               </button>
