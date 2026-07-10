@@ -415,8 +415,8 @@ export function FeedAriaModal() {
                   onChange={(e) => {
                     const f = e.target.files?.[0]
                     if (f) {
-                      if (f.size > 50 * 1024 * 1024) {
-                        toast.error('File too large (max 50MB)')
+                      if (f.size > 70 * 1024 * 1024) {
+                        toast.error('File too large (max 70MB)')
                         return
                       }
                       setFile(f)
@@ -456,7 +456,7 @@ export function FeedAriaModal() {
                         Drop a PDF or text file here
                       </div>
                       <div className="text-[11px] mt-1" style={{ color: 'var(--aria-fg-dim)' }}>
-                        PDF, TXT, or Markdown · Max 50MB
+                        PDF, TXT, or Markdown · Max 70MB
                       </div>
                     </div>
                   )}
