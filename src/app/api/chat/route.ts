@@ -656,86 +656,100 @@ Get straight to it. No intro. Just the raw analysis.`
                   messages: sdkMessages,
                   max_tokens: 4096,
                 }),
-                // 18s timeout — tight enough that all 3 fallback layers fit
-                // within Vercel's 60s function limit (18s + 18s + 15s = 51s,
-                // leaving ~9s for web search + overhead).
-                signal: AbortSignal.timeout(18000),
+                // 12s timeout — OpenRouter free models rate-limit (429) frequently,
+                // and they're often SLOW to return the 429. A tight timeout means
+                // we fail fast and move to the next fallback layer instead of
+                // eating the whole 60s Vercel budget waiting on a rate-limited model.
+                signal: AbortSignal.timeout(12000),
               })
               if (!apiResponse.ok) {
                 const errBody = await apiResponse.text()
-                const err = new Error(`OpenRouter ${apiResponse.status} (${model}): ${errBody.slice(0, 200)}`)
-                // Attach the status so the caller can decide whether to fall back
+                const err = new Error(`OR ${apiResponse.status} (${model.split('/').pop()}): ${errBody.slice(0, 100)}`)
                 ;(err as Error & { status?: number }).status = apiResponse.status
                 throw err
               }
               const data = await apiResponse.json()
               const content = data.choices?.[0]?.message?.content ?? ''
               if (!content || !content.trim()) {
-                throw new Error(`OpenRouter returned empty content for ${model}`)
+                throw new Error(`empty content from ${model}`)
               }
               return content.trim()
             }
 
+            // Pollinations — try multiple models in sequence. Pollinations is
+            // keyless, free, and does NOT rate-limit (tested 5 rapid requests).
+            // This is the reliable last-resort that always works.
             const callPollinations = async (): Promise<string> => {
-              // Pollinations is keyless + free. OpenAI-compatible POST endpoint.
-              // Last-resort fallback — always works, no credits/key needed.
-              const apiResponse = await fetch('https://text.pollinations.ai/openai', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                  model: 'openai',
-                  messages: sdkMessages,
-                }),
-                // 15s timeout — Pollinations is usually fast (<3s).
-                signal: AbortSignal.timeout(15000),
-              })
-              if (!apiResponse.ok) {
-                throw new Error(`Pollinations ${apiResponse.status}: ${await apiResponse.text().then(t => t.slice(0, 200))}`)
+              const models = ['openai-fast', 'openai']
+              let lastErr: Error | null = null
+              for (const model of models) {
+                try {
+                  const apiResponse = await fetch('https://text.pollinations.ai/openai', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ model, messages: sdkMessages }),
+                    signal: AbortSignal.timeout(15000),
+                  })
+                  if (!apiResponse.ok) {
+                    lastErr = new Error(`Pollinations ${model} ${apiResponse.status}`)
+                    continue
+                  }
+                  const data = await apiResponse.json()
+                  const content = data.choices?.[0]?.message?.content ?? ''
+                  if (content && content.trim()) return content.trim()
+                  lastErr = new Error(`Pollinations ${model} empty`)
+                } catch (e) {
+                  lastErr = e instanceof Error ? e : new Error(String(e))
+                }
               }
-              const data = await apiResponse.json()
-              const content = data.choices?.[0]?.message?.content ?? ''
-              if (!content || !content.trim()) {
-                throw new Error('Pollinations returned empty content')
-              }
-              return content.trim()
+              throw lastErr || new Error('Pollinations all models failed')
             }
 
             let providerUsed = ''
             let fallbackHappened = false
 
-            // Layer 1: paid OpenRouter model
-            try {
-              text = await callOpenRouter(selectedModel)
-              providerUsed = selectedModel
-            } catch (e1) {
-              const status = (e1 as Error & { status?: number }).status
-              console.warn(`[chat.llm] Layer 1 (${selectedModel}) failed (status ${status}). Trying Layer 2 (free model)...`, (e1 as Error).message?.slice(0, 150))
-              fallbackHappened = true
+            // === RESILIENT FALLBACK CHAIN ===
+            // OpenRouter free models rate-limit aggressively (429). We try
+            // multiple models in sequence so one 429 doesn't kill ARIA.
+            // Pollinations (Layer 3) never rate-limits — it's the reliable backstop.
+            const freeModels = [
+              selectedModel,
+              'openai/gpt-oss-120b:free',
+              'openai/gpt-oss-20b:free',
+            ].filter((m, i, arr) => arr.indexOf(m) === i).slice(0, 3) // max 3 OpenRouter attempts so we always have time for Pollinations
 
-              // Layer 2: a DIFFERENT free OpenRouter model (not the same as Layer 1,
-              // which may already be Llama). GPT-OSS 120B is genuinely $0 and high quality.
-              // If Layer 1 was Llama and it failed, we need a different model here for
-              // actual redundancy.
+            let text = ''
+            let layer1Err = ''
+            let layer2Err = ''
+
+            // Layer 1+2: try each free OpenRouter model in sequence
+            for (let i = 0; i < freeModels.length; i++) {
+              const model = freeModels[i]
               try {
-                text = await callOpenRouter('openai/gpt-oss-120b:free')
-                providerUsed = 'openai/gpt-oss-120b:free'
-              } catch (e2) {
-                console.warn(`[chat.llm] Layer 2 (free OpenRouter) failed. Trying Layer 3 (Pollinations keyless)...`, (e2 as Error).message?.slice(0, 150))
+                text = await callOpenRouter(model)
+                providerUsed = model
+                if (i > 0) fallbackHappened = true
+                break
+              } catch (e) {
+                const errMsg = (e as Error).message?.slice(0, 80) || 'unknown'
+                if (i === 0) layer1Err = errMsg
+                else layer2Err = (layer2Err ? layer2Err + '; ' : '') + errMsg
+                console.warn(`[chat.llm] OpenRouter ${model} failed: ${errMsg}`)
+                if (i === 0) fallbackHappened = true
+                // Continue to next model
+              }
+            }
 
-                // Layer 3: Pollinations keyless API (no key needed at all)
-                try {
-                  text = await callPollinations()
-                  providerUsed = 'pollinations (keyless fallback)'
-                } catch (e3) {
-                  // ALL layers failed — ARIA can't reach any LLM
-                  const allErrors = [
-                    `Layer 1 (${selectedModel}): ${(e1 as Error).message?.slice(0, 100)}`,
-                    `Layer 2 (gpt-oss-120b:free): ${(e2 as Error).message?.slice(0, 100)}`,
-                    `Layer 3 (Pollinations): ${(e3 as Error).message?.slice(0, 100)}`,
-                  ].join(' | ')
-                  console.error('[chat.llm] ALL LAYERS FAILED:', allErrors)
-                  throw new Error(`All LLM providers failed. ${allErrors}`)
-                }
+            // Layer 3: Pollinations (keyless, no rate limit) — the reliable backstop
+            if (!text) {
+              console.warn(`[chat.llm] All OpenRouter models failed. Trying Pollinations...`)
+              try {
+                text = await callPollinations()
+                providerUsed = 'pollinations (keyless)'
+              } catch (e3) {
+                const allErrors = `L1: ${layer1Err} | L2: ${layer2Err} | L3: ${(e3 as Error).message?.slice(0, 80)}`
+                console.error('[chat.llm] ALL LAYERS FAILED:', allErrors)
+                throw new Error(`All providers failed. ${allErrors}`)
               }
             }
 
