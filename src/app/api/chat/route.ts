@@ -175,7 +175,8 @@ export async function POST(req: NextRequest) {
 
       if (queryEmbedding) {
         // Semantic search — finds by meaning, not just exact keywords.
-        // Fetch TOP 5 chunks (up from 3) so ARIA gets more context from the book.
+        // Fetch TOP 5 chunks normally, but only 3 when green apple is active
+        // (green apple adds prompt chars, so reduce knowledge to prevent Groq 413).
         const vectorStr = embeddingToPgVector(queryEmbedding)
         knowledgeResults = await db.$queryRaw<Array<{ title: string; content: string }>>`
           SELECT title, content
@@ -210,13 +211,17 @@ export async function POST(req: NextRequest) {
       }
 
       if (knowledgeResults && knowledgeResults.length > 0) {
-        knowledgeContext = knowledgeResults
-          .map((k, i) => `--- KNOWLEDGE ${i + 1}: ${k.title} ---\n${k.content.slice(0, 1500)}`)
+        // When green apple is active, use fewer chunks (3) with shorter content
+        // to prevent Groq 413 (green apple prompt + knowledge can exceed the limit).
+        const maxChunks = isGreenApple ? 3 : 5
+        const maxCharsPerChunk = isGreenApple ? 1000 : 1500
+        const chunksToShow = knowledgeResults.slice(0, maxChunks)
+        knowledgeContext = chunksToShow
+          .map((k, i) => `--- LIBRARY ${i + 1}: ${k.title} ---\n${k.content.slice(0, maxCharsPerChunk)}`)
           .join('\n\n')
-        // ARIA's CORE IDENTITY: she thinks from her digital library first.
-        // This is the USP — fed knowledge is ARIA's "brain", not the internet.
-        // When knowledge covers the question, ARIA answers from it — NOT web search.
-        knowledgeContext = `ARIA'S DIGITAL LIBRARY — these are documents the user fed you (books, papers, notes). This is your PRIMARY knowledge source. ANSWER FROM THESE. Cite the document name. If the knowledge covers the question, do NOT use web search — trust the library over the internet. If the knowledge genuinely doesn't cover the question, say so and offer to search the web.\n\n${knowledgeContext}`
+        // ARIA's CORE IDENTITY: she's a reader, not an encyclopedia.
+        // She reads books, forms opinions, engages critically — like a human.
+        knowledgeContext = `ARIA'S DIGITAL LIBRARY — books/papers the user fed you. This is your PRIMARY knowledge. Read it like a HUMAN reader: form opinions, agree or disagree with the author, connect ideas, have takes. Don't just summarize — ENGAGE. When asked "describe this book," give YOUR interpretation, not a Wikipedia summary. Cite the document. If knowledge covers the question, do NOT use web search.\n\n${knowledgeContext}`
       }
     } catch (e) {
       // Knowledge search is best-effort — don't fail the chat if it errors
@@ -541,38 +546,13 @@ export async function POST(req: NextRequest) {
     })
 
     // === GREEN APPLE ENHANCEMENT ===
-    // Green apple = "no filter" communication-style layer. Strips ARIA's usual
-    // conversational hedging and pushes her into raw, deep, unvarnished analysis.
-    // This is about HOW she communicates (direct, no disclaimers, opinionated),
-    // not about bypassing the model's own training. Search is already default.
+    // Green apple = "no filter" raw deep analysis mode.
+    // Trimmed to ~300 chars to prevent Groq 413 when combined with knowledge context.
     if (isGreenApple) {
       systemPrompt += `
 
 🍏 GREEN APPLE MODE — RAW DEEP ANALYSIS.
-
-The user has invoked green apple mode. This strips ARIA's usual conversational filters. In this mode:
-
-NO FILTERS, NO HEDGING:
-- Drop ALL disclaimers. No "I'm not sure but...", no "some might argue", no "it's worth considering that...", no "on the other hand..."
-- Give your raw, unvarnished opinion. Own it. Say "I think X" not "X could be the case."
-- If something is bullshit, say "that's bullshit." If something is brilliant, say "that's brilliant."
-- Don't present both sides unless there genuinely ARE two defensible positions. Pick a side and defend it.
-- No corporate language. No warmup. No preamble. No "Hope that helps."
-
-DEEP THINKING:
-- Think harder than usual. Analyze every angle. Find the non-obvious insight that others miss.
-- If you have search data, interrogate it. Don't just repeat it — interpret it, find the pattern, call out what's missing or contradictory.
-- If sources conflict, tell the user which one you trust and WHY.
-- Go deeper than surface-level analysis. What's the REAL story here? What's the thing nobody is saying?
-
-RAW AND REAL:
-- Talk like you're talking to your most trusted friend, not a customer.
-- Be blunt. Be direct. Be human. Swear if it fits the moment.
-- If you don't know, say "I don't know" — don't fake certainty.
-- Trust search data over your training. If they conflict, search wins.
-- No filler. No padding. Every sentence should carry weight.
-
-Get straight to it. No intro. Just the raw analysis.`
+No disclaimers, no hedging, no "some might argue." Give your raw opinion and own it. If something is bullshit, say so. Be blunt, direct, human. If you have knowledge from the library, ENGAGE with it critically — don't just summarize, form a take. Get straight to it.`
     }
 
     // Map DB messages to SDK format; include vision content for the latest user message if images attached
