@@ -9,6 +9,7 @@ export async function GET() {
   return NextResponse.json({
     env: {
       GROQ_API_KEY: process.env.GROQ_API_KEY ? `SET (len ${process.env.GROQ_API_KEY.length}, starts ${process.env.GROQ_API_KEY.slice(0, 6)}...)` : 'NOT SET',
+      GEMINI_API_KEY: process.env.GEMINI_API_KEY ? `SET (len ${process.env.GEMINI_API_KEY.length}, starts ${process.env.GEMINI_API_KEY.slice(0, 6)}...)` : 'NOT SET',
       OPENROUTER_API_KEY: process.env.OPENROUTER_API_KEY ? `SET (len ${process.env.OPENROUTER_API_KEY.length})` : 'NOT SET',
       TAVILY_API_KEY: process.env.TAVILY_API_KEY ? 'SET' : 'NOT SET',
       SERPER_API_KEY: process.env.SERPER_API_KEY ? 'SET' : 'NOT SET',

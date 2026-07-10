@@ -741,6 +741,40 @@ Get straight to it. No intro. Just the raw analysis.`
               return content.trim()
             }
 
+            // Gemini — Google's free tier (15 req/min, 1,500 req/day on Flash).
+            // Runs on Google TPUs — completely separate infrastructure from Groq
+            // (LPUs) and OpenRouter (GPUs). Requires GEMINI_API_KEY env var.
+            // This is the 2nd reliable free provider alongside Groq — with both
+            // in the parallel race, ARIA has two independent generous free paths.
+            const callGemini = async (): Promise<string> => {
+              if (!process.env.GEMINI_API_KEY) {
+                throw new Error('Gemini: no API key (GEMINI_API_KEY not set)')
+              }
+              const apiResponse = await fetch('https://generativelanguage.googleapis.com/v1beta/openai/chat/completions', {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json',
+                  'Authorization': `Bearer ${process.env.GEMINI_API_KEY}`,
+                },
+                body: JSON.stringify({
+                  model: 'gemini-2.0-flash',
+                  messages: sdkMessages,
+                  max_tokens: 4096,
+                }),
+                signal: AbortSignal.timeout(25000),
+              })
+              if (!apiResponse.ok) {
+                const errBody = await apiResponse.text()
+                throw new Error(`Gemini ${apiResponse.status}: ${errBody.slice(0, 100)}`)
+              }
+              const data = await apiResponse.json()
+              const content = data.choices?.[0]?.message?.content ?? ''
+              if (!content || !content.trim()) {
+                throw new Error('Gemini empty content')
+              }
+              return content.trim()
+            }
+
             // === PARALLEL LLM EXECUTION ===
             // Fire ALL providers SIMULTANEOUSLY. First success wins via Promise.any().
             //
@@ -765,11 +799,15 @@ Get straight to it. No intro. Just the raw analysis.`
             providers.push({ name: 'pollinations', fn: () => callPollinations() })
 
             // Groq — the reliable primary path (if GROQ_API_KEY is configured).
-            // Groq has 30 req/min free (vs OpenRouter's tight free limits) and
-            // doesn't rate-limit from Vercel's IPs. This is the provider that
-            // makes ARIA actually reliable in production.
             if (process.env.GROQ_API_KEY) {
               providers.push({ name: 'groq/llama-3.1-8b', fn: () => callGroq() })
+            }
+
+            // Gemini — 2nd reliable free provider (if GEMINI_API_KEY is configured).
+            // Different infrastructure from Groq — with both, ARIA has two independent
+            // generous free paths. This is what makes ARIA actually reliable.
+            if (process.env.GEMINI_API_KEY) {
+              providers.push({ name: 'gemini-2.0-flash', fn: () => callGemini() })
             }
 
             try {
