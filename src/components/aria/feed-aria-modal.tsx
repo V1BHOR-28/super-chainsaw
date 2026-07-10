@@ -55,12 +55,12 @@ export function FeedAriaModal() {
       if (tab === 'file' && file) {
         const formData = new FormData()
         formData.append('file', file)
-        res = await fetch('/api/knowledge/upload', {
+        res = await fetch('/api/knowledge', {
           method: 'POST',
           body: formData,
         })
       } else {
-        res = await fetch('/api/knowledge/upload', {
+        res = await fetch('/api/knowledge', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
