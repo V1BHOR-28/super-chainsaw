@@ -75,7 +75,7 @@ export async function POST(req: NextRequest) {
     if (tool !== 'image_generation' && !attachments?.length) {
       // Check if user explicitly turned OFF search (pendingTool = null from globe toggle)
       // userTool === null means the frontend sent null (user turned it off)
-      const userWantsSearchOff = userTool === null
+      
 
       // Smart skip: don't search for casual/greeting messages
       const lowerContent = content.toLowerCase().trim()
@@ -89,7 +89,7 @@ export async function POST(req: NextRequest) {
       ]
       const isCasual = casualPatterns.some(p => p.test(lowerContent)) || lowerContent.length < 12
 
-      if (!userWantsSearchOff && !isCasual) {
+      if (userTool === 'web_search' && !isCasual) {
         tool = 'web_search'
       } else {
         tool = null // skip search — respond fast

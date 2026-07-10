@@ -139,7 +139,7 @@ export function useAriaChat() {
       // Web search is ALWAYS ON now, so after sending we reset back to
       // 'web_search' (not null) — this keeps the globe button lit between
       // messages. If image_generation was used, it reverts to search.
-      setPendingTool('web_search')
+      setPendingTool(null)
       setPendingAttachments([])
 
       try {
