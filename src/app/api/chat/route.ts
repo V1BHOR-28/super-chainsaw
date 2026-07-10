@@ -151,7 +151,7 @@ export async function POST(req: NextRequest) {
       db.message.findMany({
         where: { conversationId },
         orderBy: { createdAt: 'asc' },
-        take: 20,
+        take: 10,
       }),
     ])
 
@@ -499,7 +499,7 @@ export async function POST(req: NextRequest) {
           if (!webProviderHit) {
             console.warn('[chat.web_search] DEGRADED: Tavily + Serper both failed/unconfigured. Check TAVILY_API_KEY and SERPER_API_KEY in .env. Only ESPN data available.')
           }
-          toolContext = `REAL-TIME WEB SEARCH RESULTS for "${actualContent}" — today is ${dateStr}.${degradationWarning}\n${results.join('\n\n')}\n\n=== GROUNDING RULES (STRICT — VIOLATING THESE IS THE WORST FAILURE MODE) ===\n1. The search results above are your ONLY source of truth. Your training data is STALE and often WRONG for current events. If search data contradicts your memory, the SEARCH WINS. Always.\n2. SCORE EXTRACTION: Extract the EXACT score from the search results and state it verbatim. If NPR says "France downs Morocco 2-0", if ESPN says "France 2-0 Morocco" — you say 2-0. NOT 2-1, NOT 1-0, NOT "around 2-0". The EXACT score.\n3. YEAR/TOURNAMENT CONFLATION IS ABSOLUTELY FORBIDDEN: The search results are about a SPECIFIC tournament and year. Do NOT mention, reference, or allude to ANY other tournament or year (2022, 2018, 2014, etc.) — EVER. Even if you "know" the teams played before. Even if you want to add "historical context." Even if it feels relevant. The search results are the ONLY context that exists. If the search results don't explicitly mention a past match, you do NOT mention it. Phrases like "a rematch of their 2022 semifinal" or "this echoes their 2018 clash" are FORBIDDEN unless those exact facts appear in the search results above.\n4. NO HISTORICAL CONTEXT FROM MEMORY: Do not add background facts, historical comparisons, or "as you may know" context from your training data. Only state facts that appear in the search results. If you want to add context and it's not in the search results, DON'T.\n5. If a result shows a FINAL score, the match is OVER. Report the winner and the score — do NOT describe it as upcoming, hypothetical, or "will be".\n6. If results mention today, yesterday, or "recently", treat that as the current event.\n7. Only fall back to your training data if the search results genuinely do not answer the question AND you have no other option. If you do fall back, explicitly say "I couldn't verify this with current data."\n8. If a DEGRADED SEARCH NOTICE is shown above, you MUST explicitly tell the user your web search was limited to live scores only.\n9. Before stating ANY score, date, result, or historical fact, VERIFY it appears in the search results above. If it doesn't appear, don't say it. This includes "rematch", "repeat", "echo", "similar to", or any phrase that references a past event not in the search results.`
+          toolContext = `WEB SEARCH RESULTS for "${actualContent}" — today is ${dateStr}.${degradationWarning}\n${results.join('\n\n')}\n\nGROUNDING RULES:\n1. Search results are your ONLY source for facts/scores. Search wins over training data.\n2. Extract the EXACT score verbatim. If search says 2-0, say 2-0.\n3. NEVER mention other years/tournaments (2022, 2018) unless search results explicitly do.\n4. If FINAL score shown, match is OVER — report it, don't describe as upcoming.\n5. Verify every fact against search results before stating it.`
         } else {
           console.warn('[chat.web_search] No results from ANY provider (Tavily/Serper/ESPN all empty or failed). Check API keys in .env.')
           toolContext = `Web search returned no results for "${actualContent}" (today is ${dateStr}). The search providers appear to be unconfigured. Answer from your own knowledge, but explicitly tell the user you could not verify current information online and that web search may be unavailable.`
@@ -677,7 +677,7 @@ Get straight to it. No intro. Just the raw analysis.`
                 body: JSON.stringify({
                   model,
                   messages: sdkMessages,
-                  max_tokens: 4096,
+                  max_tokens: 2048,
                 }),
                 // 25s timeout — generous since providers run in PARALLEL now.
                 // Total worst case: 8s (search) + 25s (parallel) = 33s — fits in 60s.
@@ -748,7 +748,7 @@ Get straight to it. No intro. Just the raw analysis.`
                 body: JSON.stringify({
                   model: 'llama-3.1-8b-instant',
                   messages: sdkMessages,
-                  max_tokens: 4096,
+                  max_tokens: 2048,
                 }),
                 signal: AbortSignal.timeout(25000),
               })
@@ -782,7 +782,7 @@ Get straight to it. No intro. Just the raw analysis.`
                 body: JSON.stringify({
                   model: 'gemini-2.0-flash',
                   messages: sdkMessages,
-                  max_tokens: 4096,
+                  max_tokens: 2048,
                 }),
                 signal: AbortSignal.timeout(25000),
               })
