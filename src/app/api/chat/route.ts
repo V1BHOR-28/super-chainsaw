@@ -787,11 +787,12 @@ Get straight to it. No intro. Just the raw analysis.`
               }
             } catch (aggErr) {
               // AggregateError — ALL parallel providers failed.
+              const providerNames = providers.map(p => p.name).join(', ')
               const errors = aggErr instanceof AggregateError
                 ? aggErr.errors.map((e, i) => `${providers[i]?.name}: ${e?.message?.slice(0, 60)}`).join(' | ')
                 : 'unknown error'
-              console.error('[chat.llm] ALL PROVIDERS FAILED:', errors)
-              throw new Error(`All providers failed. ${errors}`)
+              console.error(`[chat.llm] ALL PROVIDERS FAILED. Tried [${providerNames}]:`, errors)
+              throw new Error(`All providers failed (${providers.length} tried: ${providerNames}). ${errors}`)
             }
 
             fullText = text
