@@ -35,7 +35,7 @@ export async function GET() {
 
 // ─── Upload helpers ───────────────────────────────────────────────────────
 
-const MAX_CONTENT_LENGTH = 50_000 // ~12K tokens; keep embedding + retrieval sane
+const MAX_CONTENT_LENGTH = 200_000 // ~50K tokens — covers most books up to 300 pages
 
 /** Light text cleanup — collapse whitespace, strip obvious artifacts. */
 function refineText(raw: string): string {
@@ -46,6 +46,55 @@ function refineText(raw: string): string {
     .replace(/\ufeff/g, '')
     .trim()
     .slice(0, MAX_CONTENT_LENGTH)
+}
+
+/**
+ * Split text into chunks at paragraph boundaries.
+ * Target ~3000 chars per chunk (roughly 750 tokens — good for embedding + retrieval).
+ * Chunks overlap by 200 chars to preserve context at boundaries.
+ * This is what lets ARIA read WHOLE BOOKS — each chunk is stored + embedded
+ * separately, so semantic search finds the right section from anywhere in the book.
+ */
+function chunkText(text: string, targetSize = 3000, overlap = 200): string[] {
+  // Split on double newlines (paragraph boundaries)
+  const paragraphs = text.split(/\n\n+/).filter(p => p.trim().length > 0)
+  const chunks: string[] = []
+  let current = ''
+
+  for (const para of paragraphs) {
+    // If adding this paragraph exceeds target and we already have content, flush
+    if (current.length + para.length > targetSize && current.length > 0) {
+      chunks.push(current.trim())
+      // Start next chunk with overlap (last N chars of previous)
+      current = current.slice(-overlap) + '\n\n' + para
+    } else {
+      current = current ? current + '\n\n' + para : para
+    }
+  }
+  if (current.trim()) chunks.push(current.trim())
+
+  // If a single paragraph is huge (no \n\n breaks), split by sentence
+  const finalChunks: string[] = []
+  for (const chunk of chunks) {
+    if (chunk.length <= targetSize * 1.5) {
+      finalChunks.push(chunk)
+    } else {
+      // Hard split very long chunks at sentence boundaries
+      const sentences = chunk.match(/[^.!?]+[.!?]+/g) || [chunk]
+      let s = ''
+      for (const sent of sentences) {
+        if (s.length + sent.length > targetSize && s.length > 0) {
+          finalChunks.push(s.trim())
+          s = sent
+        } else {
+          s += sent
+        }
+      }
+      if (s.trim()) finalChunks.push(s.trim())
+    }
+  }
+
+  return finalChunks.length > 0 ? finalChunks : [text.slice(0, targetSize)]
 }
 
 function titleFromUrl(url: string): string {
@@ -158,38 +207,84 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Could not extract enough text to learn from. Try a different source.' }, { status: 400 })
     }
 
-    let embeddingClause: { embedding?: string } = {}
-    try {
-      const embedding = await generateEmbedding(content.slice(0, 8000))
-      if (embedding) {
-        embeddingClause = { embedding: embeddingToPgVector(embedding) }
-      }
-    } catch (e) {
-      console.error('[knowledge.upload] embedding failed (stored without vector):', e instanceof Error ? e.message : String(e))
+    // === CHUNKING ===
+    // Split the content into ~3000-char chunks at paragraph boundaries.
+    // Each chunk is stored as a separate Knowledge row with its own embedding,
+    // so semantic search can find the RIGHT section from anywhere in a 300-page
+    // book. Without this, only the first ~50 pages would be retrievable.
+    const chunks = chunkText(content)
+    const totalChunks = chunks.length
+    const documentId = `doc-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
+
+    console.log(`[knowledge.upload] Chunking: ${content.length} chars → ${totalChunks} chunks (doc: ${documentId})`)
+
+    // Generate embeddings for all chunks in parallel (batched to avoid rate limits).
+    // Each embedding is ~750 tokens, so even 60 chunks = 45K tokens = $0.001 (essentially free).
+    // Batch in groups of 10 to avoid hammering the OpenAI API.
+    const BATCH_SIZE = 10
+    const embeddings: (number[] | null)[] = new Array(totalChunks).fill(null)
+
+    for (let i = 0; i < chunks.length; i += BATCH_SIZE) {
+      const batch = chunks.slice(i, i + BATCH_SIZE)
+      const batchResults = await Promise.all(
+        batch.map(async (chunk) => {
+          try {
+            return await generateEmbedding(chunk.slice(0, 8000))
+          } catch {
+            return null // best-effort — chunk stored without embedding, still keyword-searchable
+          }
+        })
+      )
+      batchResults.forEach((emb, j) => { embeddings[i + j] = emb })
     }
 
-    let saved: { id: string; title: string; source: string }
-    if (embeddingClause.embedding) {
-      const id = `${Date.now()}-${Math.random().toString(36).slice(2, 10)}`
-      await db.$executeRaw`
-        INSERT INTO "Knowledge" (id, "userId", title, content, source, "sourceUrl", embedding, "createdAt")
-        VALUES (${id}, ${userId}, ${title}, ${content}, ${source}, ${sourceUrl ?? null}, ${embeddingClause.embedding}::vector, NOW())
-      `
-      saved = { id, title, source }
-    } else {
-      const row = await db.knowledge.create({
-        data: { userId, title, content, source, sourceUrl },
-      })
-      saved = { id: row.id, title: row.title, source: row.source }
+    const embeddedCount = embeddings.filter(e => e !== null).length
+    console.log(`[knowledge.upload] Embeddings: ${embeddedCount}/${totalChunks} chunks embedded`)
+
+    // Store each chunk as a separate Knowledge row.
+    // Title format: "[Book Title] — Part N/M" so ARIA knows which section she's reading.
+    const savedIds: string[] = []
+    for (let i = 0; i < chunks.length; i++) {
+      const chunk = chunks[i]
+      const chunkTitle = totalChunks > 1
+        ? `${title} — Part ${i + 1}/${totalChunks}`
+        : title!
+      const id = `${Date.now()}-${i}-${Math.random().toString(36).slice(2, 8)}`
+      const embedding = embeddings[i]
+
+      try {
+        if (embedding) {
+          const vectorStr = embeddingToPgVector(embedding)
+          await db.$executeRaw`
+            INSERT INTO "Knowledge" (id, "userId", title, content, source, "sourceUrl", embedding, "createdAt")
+            VALUES (${id}, ${userId}, ${chunkTitle}, ${chunk}, ${source}, ${sourceUrl ?? null}, ${vectorStr}::vector, NOW())
+          `
+        } else {
+          await db.knowledge.create({
+            data: { id, userId, title: chunkTitle, content: chunk, source, sourceUrl },
+          })
+        }
+        savedIds.push(id)
+      } catch (e) {
+        console.error(`[knowledge.upload] Failed to store chunk ${i + 1}:`, e instanceof Error ? e.message : String(e))
+        // Continue — partial storage is better than total failure
+      }
+    }
+
+    if (savedIds.length === 0) {
+      return NextResponse.json({ error: 'Failed to store any chunks. Check database connection.' }, { status: 500 })
     }
 
     return NextResponse.json({
       ok: true,
       knowledge: {
-        id: saved.id,
-        title: saved.title,
-        source: saved.source,
+        id: savedIds[0],
+        documentId,
+        title: title!,
+        source,
         contentLength: content.length,
+        chunks: savedIds.length,
+        embedded: embeddedCount,
       },
     })
   } catch (err) {

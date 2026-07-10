@@ -174,7 +174,8 @@ export async function POST(req: NextRequest) {
       let knowledgeResults: Array<{ title: string; content: string }> = []
 
       if (queryEmbedding) {
-        // Semantic search — finds by meaning, not just exact keywords
+        // Semantic search — finds by meaning, not just exact keywords.
+        // Fetch TOP 5 chunks (up from 3) so ARIA gets more context from the book.
         const vectorStr = embeddingToPgVector(queryEmbedding)
         knowledgeResults = await db.$queryRaw<Array<{ title: string; content: string }>>`
           SELECT title, content
@@ -182,7 +183,7 @@ export async function POST(req: NextRequest) {
           WHERE "userId" = ${userId}
             AND embedding IS NOT NULL
           ORDER BY embedding <=> ${vectorStr}::vector
-          LIMIT 3
+          LIMIT 5
         `
       }
 
@@ -197,12 +198,11 @@ export async function POST(req: NextRequest) {
           .filter((w) => w.length > 3 && !['what', 'how', 'when', 'where', 'which', 'think', 'about', 'does', 'will', 'would', 'could', 'should', 'there', 'their', 'the'].includes(w))
           .slice(0, 5)
         if (keywords.length > 0) {
-          // Build OR conditions for each keyword
           const conditions = keywords
             .map((kw) => `LOWER(content) LIKE '%${kw.replace(/'/g, "''")}%' OR LOWER(title) LIKE '%${kw.replace(/'/g, "''")}%'`)
             .join(' OR ')
           knowledgeResults = await db.$queryRawUnsafe<Array<{ title: string; content: string }>>(
-            `SELECT title, content FROM "Knowledge" WHERE "userId" = $1 AND (${conditions}) ORDER BY "createdAt" DESC LIMIT 3`,
+            `SELECT title, content FROM "Knowledge" WHERE "userId" = $1 AND (${conditions}) ORDER BY "createdAt" DESC LIMIT 5`,
             userId
           )
         }
@@ -210,12 +210,12 @@ export async function POST(req: NextRequest) {
 
       if (knowledgeResults && knowledgeResults.length > 0) {
         knowledgeContext = knowledgeResults
-          .map((k, i) => `--- KNOWLEDGE ${i + 1}: ${k.title} ---\n${k.content.slice(0, 1000)}`)
+          .map((k, i) => `--- KNOWLEDGE ${i + 1}: ${k.title} ---\n${k.content.slice(0, 1500)}`)
           .join('\n\n')
-        // Explicit framing so ARIA treats fed knowledge as authoritative for
-        // questions it covers — this is the user's personal digital library.
-        // When knowledge is found, ARIA answers from it — NOT from web search.
-        knowledgeContext = `USER'S FED KNOWLEDGE (from ARIA's digital library — these are documents the user explicitly taught you. The user is asking about something covered in this knowledge. ANSWER FROM THIS KNOWLEDGE — do NOT use web search results even if they're provided. Cite the document by name. If the knowledge genuinely doesn't cover the user's specific question, say so and offer to search the web.)\n\n${knowledgeContext}`
+        // ARIA's CORE IDENTITY: she thinks from her digital library first.
+        // This is the USP — fed knowledge is ARIA's "brain", not the internet.
+        // When knowledge covers the question, ARIA answers from it — NOT web search.
+        knowledgeContext = `ARIA'S DIGITAL LIBRARY — these are documents the user fed you (books, papers, notes). This is your PRIMARY knowledge source. ANSWER FROM THESE. Cite the document name. If the knowledge covers the question, do NOT use web search — trust the library over the internet. If the knowledge genuinely doesn't cover the question, say so and offer to search the web.\n\n${knowledgeContext}`
       }
     } catch (e) {
       // Knowledge search is best-effort — don't fail the chat if it errors

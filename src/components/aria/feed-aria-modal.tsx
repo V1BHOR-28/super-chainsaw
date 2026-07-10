@@ -77,7 +77,8 @@ export function FeedAriaModal() {
       }
 
       setState('done')
-      toast.success("ARIA has learned this. She'll use it in your conversations.")
+      const chunkInfo = data.knowledge.chunks > 1 ? ` (${data.knowledge.chunks} sections indexed)` : ''
+      toast.success(`ARIA has learned this.${chunkInfo} She'll use it in your conversations.`)
 
       setKnowledge(prev => [{
         id: data.knowledge.id,
