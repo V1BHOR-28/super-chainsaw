@@ -78,28 +78,38 @@ async function fetchUrlContent(url: string): Promise<{ title: string; content: s
 /**
  * Parse a PDF Blob into text using pdfjs-dist (legacy build for Node.js).
  *
- * NOTE: We use pdfjs-dist/legacy/build/pdf.mjs directly — NOT the
- * `pdf-parse` wrapper package. pdf-parse v2 changed its API (class instead
- * of function) and its underlying pdfjs tries to use DOMMatrix (a browser-
- * only API) which throws "DOMMatrix is not defined" in serverless/Node.js.
- * The legacy build of pdfjs-dist works correctly in Node.js.
+ * Includes a DOMMatrix polyfill because pdfjs references this browser-only
+ * API even in the legacy build, and Vercel's Node.js serverless environment
+ * doesn't define it. Text extraction doesn't actually need real matrix math,
+ * so a minimal stub is sufficient.
  */
 async function parsePdf(file: Blob): Promise<string> {
+  // Polyfill DOMMatrix for Node.js/serverless — pdfjs references it but
+  // text extraction doesn't need real matrix operations.
+  if (typeof (globalThis as { DOMMatrix?: unknown }).DOMMatrix === 'undefined') {
+    class DOMMatrixStub {
+      a = 1; b = 0; c = 0; d = 1; e = 0; f = 0
+      m11 = 1; m12 = 0; m21 = 0; m22 = 1; m41 = 0; m42 = 0
+      multiply() { return new DOMMatrixStub() }
+      translate() { return new DOMMatrixStub() }
+      scale() { return new DOMMatrixStub() }
+      rotate() { return new DOMMatrixStub() }
+      inverse() { return new DOMMatrixStub() }
+      transformPoint() { return { x: 0, y: 0 } }
+    }
+    ;(globalThis as { DOMMatrix?: unknown }).DOMMatrix = DOMMatrixStub
+  }
+
   const arrayBuffer = await file.arrayBuffer()
   const uint8 = new Uint8Array(arrayBuffer)
-  // Dynamic import of the legacy build — avoids bundler issues + ensures
-  // we get the Node.js-compatible version, not the browser version.
   const pdfjs = await import('pdfjs-dist/legacy/build/pdf.mjs')
   const loadingTask = pdfjs.getDocument({
     data: uint8,
-    // Suppress the standardFontDataUrl warning — we don't need font metrics
-    // for text extraction, and Vercel's serverless can't serve the font files.
     disableFontFace: true,
     useSystemFonts: true,
   })
   const doc = await loadingTask.promise
   let fullText = ''
-  // Cap at 200 pages to prevent runaway parsing on huge PDFs
   const maxPages = Math.min(doc.numPages, 200)
   for (let i = 1; i <= maxPages; i++) {
     try {
@@ -110,10 +120,12 @@ async function parsePdf(file: Blob): Promise<string> {
         .join(' ')
       fullText += pageText + '\n'
     } catch {
-      // Skip pages that fail to parse — partial extraction is better than none
+      // Skip pages that fail — partial extraction > total failure
     }
   }
-  await doc.destroy()
+  // Cleanup — best-effort, method name varies across pdfjs versions
+  try { await doc.cleanup?.() } catch {}
+  try { await doc.destroy?.() } catch {}
   return refineText(fullText)
 }
 
