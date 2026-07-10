@@ -45,7 +45,7 @@ export async function POST(req: NextRequest) {
       })
     }
 
-    // === WEB SEARCH IS ALWAYS ON (by user request) + GREEN APPLE MODE ===
+    // === GREEN APPLE MODE ===
     // Web search now runs on EVERY message by default — no more auto-detect
     // misses. The user explicitly accepted the higher API usage in exchange
     // for always-accurate, real-time answers. Exceptions:
@@ -211,17 +211,21 @@ export async function POST(req: NextRequest) {
       }
 
       if (knowledgeResults && knowledgeResults.length > 0) {
-        // When green apple is active, use fewer chunks (3) with shorter content
-        // to prevent Groq 413 (green apple prompt + knowledge can exceed the limit).
-        const maxChunks = isGreenApple ? 3 : 5
-        const maxCharsPerChunk = isGreenApple ? 1000 : 1500
+        // Aggressively limit knowledge context size to prevent Groq 413.
+        // Groq's llama-3.1-8b-instant has a strict request size limit.
+        // When the user's message is long (e.g. a medical case presentation)
+        // + 5 chunks × 1500 chars, the total payload exceeds the limit.
+        // 3 chunks × 800 chars = 2400 chars of knowledge — enough for ARIA
+        // to cite the right section without blowing the payload.
+        const maxChunks = 3
+        const maxCharsPerChunk = 800
         const chunksToShow = knowledgeResults.slice(0, maxChunks)
         knowledgeContext = chunksToShow
           .map((k, i) => `--- LIBRARY ${i + 1}: ${k.title} ---\n${k.content.slice(0, maxCharsPerChunk)}`)
           .join('\n\n')
         // ARIA's CORE IDENTITY: she's a reader, not an encyclopedia.
-        // She reads books, forms opinions, engages critically — like a human.
-        knowledgeContext = `ARIA'S DIGITAL LIBRARY — books/papers the user fed you. This is your PRIMARY knowledge. Read it like a HUMAN reader: form opinions, agree or disagree with the author, connect ideas, have takes. Don't just summarize — ENGAGE. When asked "describe this book," give YOUR interpretation, not a Wikipedia summary. Cite the document. If knowledge covers the question, do NOT use web search.\n\n${knowledgeContext}`
+        // She uses her digital library as PRIMARY knowledge — think from the book.
+        knowledgeContext = `ARIA'S DIGITAL LIBRARY — books/papers the user fed you. This is your PRIMARY knowledge source. Use it to answer questions, cite the document, form opinions. If the knowledge covers the question, do NOT use web search — trust the library.\n\n${knowledgeContext}`
       }
     } catch (e) {
       // Knowledge search is best-effort — don't fail the chat if it errors
