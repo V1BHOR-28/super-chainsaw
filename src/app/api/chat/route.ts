@@ -190,13 +190,14 @@ export async function POST(req: NextRequest) {
       // Fallback: if no embedding results (key not configured, or knowledge
       // stored without embedding), do a keyword ILIKE search. Extracts the
       // most distinctive words from the user's message and matches them.
+      // Includes numbers (e.g. "chapter 8") so chapter-specific questions work.
       if (knowledgeResults.length === 0) {
         const keywords = actualContent
           .toLowerCase()
           .replace(/[^a-z0-9\s]/g, ' ')
           .split(/\s+/)
-          .filter((w) => w.length > 3 && !['what', 'how', 'when', 'where', 'which', 'think', 'about', 'does', 'will', 'would', 'could', 'should', 'there', 'their', 'the'].includes(w))
-          .slice(0, 5)
+          .filter((w) => w.length > 2 && !['what', 'how', 'when', 'where', 'which', 'think', 'about', 'does', 'will', 'would', 'could', 'should', 'there', 'their', 'the', 'and', 'for', 'are', 'was', 'were', 'has', 'have', 'his', 'her', 'its', 'from', 'this', 'that', 'with', 'but', 'not', 'you', 'all', 'can', 'had', 'her', 'was', 'one', 'our', 'out', 'day', 'get', 'has', 'him', 'his', 'how', 'its', 'may', 'new', 'now', 'old', 'see', 'way', 'who', 'did', 'let', 'say', 'she', 'too', 'use'].includes(w))
+          .slice(0, 6)
         if (keywords.length > 0) {
           const conditions = keywords
             .map((kw) => `LOWER(content) LIKE '%${kw.replace(/'/g, "''")}%' OR LOWER(title) LIKE '%${kw.replace(/'/g, "''")}%'`)
