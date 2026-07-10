@@ -31,15 +31,39 @@ export function UsageMeter() {
 
   if (!usage) return null
 
-  const pct = Math.min(100, Math.round((usage.tokensUsed / usage.dailyLimit) * 100))
-  const remaining = Math.max(0, usage.dailyLimit - usage.tokensUsed)
-  const isLow = remaining < usage.dailyLimit * 0.1
+  // Admin users get unlimited credits — show a special badge instead of the meter.
+  const isAdmin = (usage as { isAdmin?: boolean }).isAdmin === true
 
   const fmt = (n: number) => {
     if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`
     if (n >= 1_000) return `${(n / 1_000).toFixed(1)}k`
     return String(n)
   }
+
+  if (isAdmin) {
+    return (
+      <div
+        className="flex items-center gap-1.5 rounded-full px-3 py-1.5"
+        style={{
+          background: 'rgba(245, 158, 11, 0.08)',
+          border: '1px solid rgba(245, 158, 11, 0.3)',
+        }}
+        title="Admin account — unlimited credits. You're the creator, no daily limit."
+      >
+        <Zap size={11} style={{ color: 'var(--aria-accent-glow)' }} fill="currentColor" />
+        <span
+          className="text-[10px] font-mono-aria font-semibold"
+          style={{ color: 'var(--aria-accent-glow)' }}
+        >
+          Unlimited
+        </span>
+      </div>
+    )
+  }
+
+  const pct = Math.min(100, Math.round((usage.tokensUsed / usage.dailyLimit) * 100))
+  const remaining = Math.max(0, usage.dailyLimit - usage.tokensUsed)
+  const isLow = remaining < usage.dailyLimit * 0.1
 
   const resetsIn = (() => {
     const now = new Date()
