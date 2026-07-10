@@ -76,57 +76,24 @@ async function fetchUrlContent(url: string): Promise<{ title: string; content: s
 }
 
 /**
- * Parse a PDF Blob into text using pdfjs-dist (legacy build for Node.js).
+ * Parse a PDF Blob into text using `unpdf`.
  *
- * Includes a DOMMatrix polyfill because pdfjs references this browser-only
- * API even in the legacy build, and Vercel's Node.js serverless environment
- * doesn't define it. Text extraction doesn't actually need real matrix math,
- * so a minimal stub is sufficient.
+ * `unpdf` is specifically designed for serverless/Node.js environments and
+ * handles the two issues that break raw pdfjs-dist on Vercel:
+ *   1. DOMMatrix (browser-only API) — unpdf polyfills this internally
+ *   2. Worker module resolution — unpdf runs in fake-worker mode without
+ *      needing to load a separate worker file
+ *
+ * Using raw pdfjs-dist or pdf-parse caused "DOMMatrix is not defined" and
+ * "Setting up fake worker failed: Cannot find module pdf.worker.mjs" errors
+ * on Vercel's serverless runtime.
  */
 async function parsePdf(file: Blob): Promise<string> {
-  // Polyfill DOMMatrix for Node.js/serverless — pdfjs references it but
-  // text extraction doesn't need real matrix operations.
-  if (typeof (globalThis as { DOMMatrix?: unknown }).DOMMatrix === 'undefined') {
-    class DOMMatrixStub {
-      a = 1; b = 0; c = 0; d = 1; e = 0; f = 0
-      m11 = 1; m12 = 0; m21 = 0; m22 = 1; m41 = 0; m42 = 0
-      multiply() { return new DOMMatrixStub() }
-      translate() { return new DOMMatrixStub() }
-      scale() { return new DOMMatrixStub() }
-      rotate() { return new DOMMatrixStub() }
-      inverse() { return new DOMMatrixStub() }
-      transformPoint() { return { x: 0, y: 0 } }
-    }
-    ;(globalThis as { DOMMatrix?: unknown }).DOMMatrix = DOMMatrixStub
-  }
-
   const arrayBuffer = await file.arrayBuffer()
   const uint8 = new Uint8Array(arrayBuffer)
-  const pdfjs = await import('pdfjs-dist/legacy/build/pdf.mjs')
-  const loadingTask = pdfjs.getDocument({
-    data: uint8,
-    disableFontFace: true,
-    useSystemFonts: true,
-  })
-  const doc = await loadingTask.promise
-  let fullText = ''
-  const maxPages = Math.min(doc.numPages, 200)
-  for (let i = 1; i <= maxPages; i++) {
-    try {
-      const page = await doc.getPage(i)
-      const content = await page.getTextContent()
-      const pageText = content.items
-        .map((item: { str?: string }) => item.str || '')
-        .join(' ')
-      fullText += pageText + '\n'
-    } catch {
-      // Skip pages that fail — partial extraction > total failure
-    }
-  }
-  // Cleanup — best-effort, method name varies across pdfjs versions
-  try { await doc.cleanup?.() } catch {}
-  try { await doc.destroy?.() } catch {}
-  return refineText(fullText)
+  const { extractText } = await import('unpdf')
+  const { text } = await extractText(uint8, { mergePages: true })
+  return refineText(text)
 }
 
 /**
