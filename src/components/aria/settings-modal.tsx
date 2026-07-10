@@ -732,6 +732,7 @@ function ModelSelector({ value, onChange }: { value: string; onChange: (v: strin
       <PopoverContent
         align="end"
         sideOffset={6}
+        className="z-[300]"
         style={{
           background: 'var(--aria-bg-soft)',
           border: '1px solid var(--aria-border)',
@@ -739,6 +740,7 @@ function ModelSelector({ value, onChange }: { value: string; onChange: (v: strin
           boxShadow: '0 12px 40px rgba(0,0,0,0.5)',
           width: '280px',
           padding: '6px',
+          zIndex: 300,
         }}
       >
         {AI_MODELS.map((m) => {
