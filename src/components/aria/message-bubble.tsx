@@ -101,6 +101,14 @@ export function MessageBubble({ message }: { message: ChatMessage }) {
     !isUser &&
     (!!toolBadgeEl || (message.memoriesUsed ?? 0) > 0 || !!message.moodContext)
 
+  // Green apple emoji: when a user types "/green apple ..." or "/ga ...",
+  // render the prefix as a 🍏 emoji in the chat bubble. The backend strips
+  // the prefix before sending to the LLM, but the user's stored message
+  // keeps it — so we transform it for display only.
+  const displayContent = isUser
+    ? message.content.replace(/^\/(?:green\s*apple|ga)\s+/i, '🍏 ')
+    : message.content
+
   return (
     <div className={`flex gap-2 sm:gap-3 max-w-[720px] w-full mx-auto aria-msg-enter ${isUser ? 'justify-end' : ''}`}>
       {!isUser && (
@@ -182,7 +190,7 @@ export function MessageBubble({ message }: { message: ChatMessage }) {
         >
           {message.content ? (
             isUser ? (
-              <p className="whitespace-pre-wrap text-[15px] leading-relaxed m-0">{message.content}</p>
+              <p className="whitespace-pre-wrap text-[15px] leading-relaxed m-0">{displayContent}</p>
             ) : (
               <>
                 <Markdown content={message.content} />

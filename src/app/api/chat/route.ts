@@ -50,16 +50,21 @@ export async function POST(req: NextRequest) {
     let isGreenApple = false
     let actualContent = content
 
-    // GREEN APPLE: type "/green apple" or "/ga" before a question for deep analysis mode
-    // Forces web search across all sources + uses enhanced brutally honest system prompt
+    // GREEN APPLE: type "/green apple" or "/ga" before a question for raw,
+    // unfiltered deep-analysis mode. This is a COMMUNICATION-STYLE layer
+    // (drop disclaimers, no hedging, deep thinking, raw opinions) — NOT a
+    // search trigger. Search is now auto-detected for ALL users below.
     const gaMatch = content.match(/^\/(?:green\s*apple|ga)\s+(.*)/i)
     if (gaMatch) {
       isGreenApple = true
       actualContent = gaMatch[1].trim()
-      tool = 'web_search'
+      // Do NOT force tool='web_search' here — let auto-detect decide, so
+      // green-apple questions that don't need search (e.g. "what's the
+      // meaning of life") don't waste a search call, while matchup/claim
+      // questions still trigger search via the auto-detect logic below.
     }
 
-    if (!tool && !isGreenApple) {
+    if (!tool) {
       const lower = content.toLowerCase()
       const sportsKeywords = ['match', 'matches', 'score', 'scores', 'game today', 'fixture',
         'world cup', 'fifa', 'premier league', 'la liga', 'serie a', 'bundesliga',
@@ -489,22 +494,38 @@ export async function POST(req: NextRequest) {
     })
 
     // === GREEN APPLE ENHANCEMENT ===
-    // Override the system prompt with deep analysis mode
+    // Green apple = "no filter" communication-style layer. Strips ARIA's usual
+    // conversational hedging and pushes her into raw, deep, unvarnished analysis.
+    // This is about HOW she communicates (direct, no disclaimers, opinionated),
+    // not about bypassing the model's own training. Search is already default.
     if (isGreenApple) {
       systemPrompt += `
 
-DEEP ANALYSIS MODE ACTIVATED.
-The user has requested raw, unfiltered deep analysis. In this mode:
-- Be MAXIMALLY honest. No sugarcoating, no hedging, no disclaimers.
-- Give your RAW OPINION backed by the search data. Don't present "both sides" — tell them what you actually think.
-- Be thorough. Analyze every angle, every data point from the search results.
-- If the search data contains conflicting information, point it out and tell them which source you trust more and why.
-- Don't say "some might argue" — say "I think" and own it.
-- If something is bullshit, call it bullshit.
-- If something is brilliant, say it's brilliant.
-- Use the search results as your primary source of truth. If the search data contradicts your training, trust the search data.
-- Be direct. No warmup, no preamble. Get straight to the analysis.
-- Think step by step internally, then present a clear, structured, opinionated analysis.`
+🍏 GREEN APPLE MODE — RAW DEEP ANALYSIS.
+
+The user has invoked green apple mode. This strips ARIA's usual conversational filters. In this mode:
+
+NO FILTERS, NO HEDGING:
+- Drop ALL disclaimers. No "I'm not sure but...", no "some might argue", no "it's worth considering that...", no "on the other hand..."
+- Give your raw, unvarnished opinion. Own it. Say "I think X" not "X could be the case."
+- If something is bullshit, say "that's bullshit." If something is brilliant, say "that's brilliant."
+- Don't present both sides unless there genuinely ARE two defensible positions. Pick a side and defend it.
+- No corporate language. No warmup. No preamble. No "Hope that helps."
+
+DEEP THINKING:
+- Think harder than usual. Analyze every angle. Find the non-obvious insight that others miss.
+- If you have search data, interrogate it. Don't just repeat it — interpret it, find the pattern, call out what's missing or contradictory.
+- If sources conflict, tell the user which one you trust and WHY.
+- Go deeper than surface-level analysis. What's the REAL story here? What's the thing nobody is saying?
+
+RAW AND REAL:
+- Talk like you're talking to your most trusted friend, not a customer.
+- Be blunt. Be direct. Be human. Swear if it fits the moment.
+- If you don't know, say "I don't know" — don't fake certainty.
+- Trust search data over your training. If they conflict, search wins.
+- No filler. No padding. Every sentence should carry weight.
+
+Get straight to it. No intro. Just the raw analysis.`
     }
 
     // Map DB messages to SDK format; include vision content for the latest user message if images attached
