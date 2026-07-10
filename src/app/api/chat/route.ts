@@ -822,7 +822,7 @@ Get straight to it. No intro. Just the raw analysis.`
             // Include the actual error reason so the user (and CEO) can see
             // what's failing instead of a generic "lost my train of thought".
             fullText =
-              `I hit a snag reaching my reasoning layer. This usually means all my fallback providers are busy or rate-limited. Try again in a moment — I'm still here.\n\n*(Debug: ${errMsg.slice(0, 200)})*`
+              `I hit a snag reaching my reasoning layer. This usually means all my fallback providers are busy or rate-limited. Try again in a moment — I'm still here.\n\n*(Debug: ${errMsg.slice(0, 600)})*`
             send({ type: 'token', value: fullText })
           }
 
