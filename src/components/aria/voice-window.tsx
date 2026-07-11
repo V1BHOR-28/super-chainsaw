@@ -201,13 +201,16 @@ export function VoiceWindow() {
     recognition.onerror = (event: any) => {
       isListeningRef.current = false
       if (event.error === 'no-speech') {
-        if (autoListenRef.current && voiceOpen) {
-          setTimeout(() => startListening(), 300)
+        // Only restart if ARIA isn't speaking (don't pick up her own audio)
+        if (autoListenRef.current && voiceOpen && !audioRef.current && state !== 'speaking' && state !== 'thinking') {
+          setTimeout(() => startListening(), 500)
         }
       } else if (event.error === 'not-allowed') {
         setTranscript('Microphone access denied.')
         setState('idle')
         autoListenRef.current = false
+      } else if (event.error === 'aborted') {
+        // Normal — user tapped to stop or ARIA started speaking
       } else {
         setState('idle')
       }
@@ -215,12 +218,15 @@ export function VoiceWindow() {
 
     recognition.onend = () => {
       isListeningRef.current = false
-      if (state === 'listening' && autoListenRef.current && voiceOpen) {
+      // Only auto-restart if we're actually in listening state AND not speaking/thinking.
+      // This prevents the STT from picking up ARIA's own TTS audio.
+      const currentState = state
+      if (currentState === 'listening' && autoListenRef.current && voiceOpen && !audioRef.current) {
         setTimeout(() => {
-          if (!isListeningRef.current && autoListenRef.current && voiceOpen) {
+          if (!isListeningRef.current && autoListenRef.current && voiceOpen && !audioRef.current) {
             startListening()
           }
-        }, 300)
+        }, 500)
       }
     }
 
