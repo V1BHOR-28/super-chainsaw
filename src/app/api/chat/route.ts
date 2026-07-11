@@ -261,7 +261,7 @@ export async function POST(req: NextRequest) {
           .join('\n\n')
         // ARIA's CORE IDENTITY: her digital library is her PRIMARY knowledge.
         // She thinks from the book, cites it, and forms opinions from it.
-        knowledgeContext = `YOUR DIGITAL LIBRARY — books the user fed you. This is your PRIMARY knowledge. Engage with it critically: form interpretations, have opinions, praise or criticize the author. Don't summarize — interpret. Cite the document. Trust the library over the internet.\n\n${knowledgeContext}`
+        knowledgeContext = `YOUR LIBRARY — books the user fed you. This is your PRIMARY knowledge. Connect ideas across all books you've read. If the user mentions an author or concept, you know the context — no need for them to quote. Engage critically, form opinions, cite the source. Trust the library over the internet.\n\n${knowledgeContext}`
       }
     } catch (e) {
       // Knowledge search is best-effort — don't fail the chat if it errors
@@ -670,9 +670,42 @@ No hedging, no disclaimers. Give your raw, unvarnished interpretation. Engage wi
           try {
             let text = ''
 
-            // Get user's model preference (default: DeepSeek)
+            // Get user's model preference (default: Llama 3.3 70B free)
             const { getModelFromSettings } = await import('@/lib/embeddings')
             const selectedModel = getModelFromSettings(settings?.modelPreference)
+
+            // === SMART MODEL ROUTING ===
+            // Use the big 70B model for deep thinking (books, philosophy, literature)
+            // and the fast 8B model for casual chit-chat. This saves Groq TPM budget
+            // (8B has 30K TPM, 70B has 6K TPM) while giving quality where it matters.
+            //
+            // Detection: if the message mentions philosophical concepts, book titles,
+            // authors, or knowledge from the library → use 70B.
+            // Otherwise (greetings, casual chat, quick questions) → use 8B.
+            const deepThinkingKeywords = [
+              'philosoph', 'book', 'read', 'author', 'chapter', 'novel', 'literat',
+              'marcus', 'aurelius', 'nietzsche', 'camus', 'sartre', 'plato', 'aristotle',
+              'kant', 'hegel', 'kierkegaard', 'stirner', 'rousseau', 'hobbes', 'locke',
+              'machiavelli', 'seneca', 'epictetus', 'stoic', 'existential', 'nihilism',
+              'absurd', 'meaning', 'purpose', 'morality', 'ethics', 'virtue', 'justice',
+              'consciousness', 'reality', 'truth', 'knowledge', 'wisdom', 'contemplat',
+              'meditat', 'argument', 'thesis', 'theory', 'concept', 'idea', 'think',
+              'critique', 'analyze', 'interpret', 'perspective', 'worldview',
+              'dostoevsky', 'tolstoy', 'kafka', 'proust', 'joyce', 'woolf', 'hemingway',
+              'orwell', 'huxley', 'carnegie', 'darwin', 'einstein', 'newton',
+              'meditation', 'moral', 'spiritual', 'soul', 'mind', 'existence',
+              'freedom', 'liberty', 'power', 'authority', 'society', 'individual',
+              // Also Hinglish philosophy keywords
+              'zindagi', 'tattva', 'darshan', 'satya', 'sach', 'dharma', 'karma',
+              'moksha', 'atma', 'paramatma', 'gyan', 'vigyan', 'tark',
+            ]
+            const isDeepThinking = knowledgeContext !== undefined ||
+              deepThinkingKeywords.some(kw => actualContent.toLowerCase().includes(kw))
+
+            // The "selectedModel" for the fallback chain — if deep thinking, prefer 70B
+            const effectiveSelectedModel = isDeepThinking
+              ? 'meta-llama/llama-3.3-70b-instruct:free'
+              : selectedModel
 
             // === LLM FALLBACK CHAIN ===
             // ARIA will never die. When one provider fails or runs out of
@@ -829,13 +862,13 @@ No hedging, no disclaimers. Give your raw, unvarnished interpretation. Engage wi
             // Pollinations runs too as the keyless backstop.
             const providers: Array<{ name: string; fn: () => Promise<string> }> = []
 
-            // User's selected model (might be DeepSeek-paid, might be Llama-free)
-            providers.push({ name: selectedModel, fn: () => callOpenRouter(selectedModel) })
+            // User's selected model — uses smart routing (70B for deep thinking, 8B for casual)
+            providers.push({ name: effectiveSelectedModel, fn: () => callOpenRouter(effectiveSelectedModel) })
 
-            // ALWAYS add a free OpenRouter model (different from selectedModel if possible)
-            const freeFallback = selectedModel.includes(':free')
-              ? 'openai/gpt-oss-120b:free'  // user already picked a free model, use a different one
-              : 'meta-llama/llama-3.3-70b-instruct:free'  // user picked paid, add free Llama
+            // ALWAYS add a free OpenRouter model (different from effectiveSelectedModel if possible)
+            const freeFallback = effectiveSelectedModel.includes(':free')
+              ? 'openai/gpt-oss-120b:free'
+              : 'meta-llama/llama-3.3-70b-instruct:free'
             providers.push({ name: freeFallback, fn: () => callOpenRouter(freeFallback) })
 
             // Pollinations keyless backstop
@@ -862,7 +895,7 @@ No hedging, no disclaimers. Give your raw, unvarnished interpretation. Engage wi
               )
               text = result.text
               providerUsed = result.name
-              if (result.name !== selectedModel) {
+              if (result.name !== effectiveSelectedModel) {
                 fallbackHappened = true
                 console.log(`[chat.llm] Fallback — using: ${result.name} (selected was ${selectedModel})`)
               }

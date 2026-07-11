@@ -6,7 +6,6 @@ import { Sidebar, SidebarToggle } from '@/components/aria/sidebar'
 import { ChatArea } from '@/components/aria/chat-area'
 import { SettingsModal } from '@/components/aria/settings-modal'
 import { FeedAriaModal } from '@/components/aria/feed-aria-modal'
-import { VoiceWindow } from '@/components/aria/voice-window'
 import { LandingPage } from '@/components/aria/landing-page'
 import { AuthModal } from '@/components/aria/auth-modal'
 import { OnboardingScreen } from '@/components/aria/onboarding-screen'
@@ -159,7 +158,6 @@ export default function HomePage() {
         <ChatArea />
         <SettingsModal />
         <FeedAriaModal />
-        <VoiceWindow />
       </div>
       <AuthModal />
     </>
