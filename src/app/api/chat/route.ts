@@ -1088,6 +1088,61 @@ No hedging, no disclaimers. Give your raw, unvarnished interpretation. Engage wi
             memoriesUsed: memories.length,
             moodContext: recentMood ? recentMood.mood : null,
           })
+
+          // === READING JOURNAL + OPINION EVOLUTION (Phase 3) ===
+          // After a book discussion, ARIA writes a private journal reflection.
+          // This becomes part of her memory — she remembers not just what the
+          // book says, but what she AND the user thought about it.
+          // Also detects if ARIA's opinion changed during the conversation.
+          if (knowledgeContext && fullText.length > 50) {
+            try {
+              // Only journal if this was a substantive book discussion
+              const isBookDiscussion = deepThinkingKeywords.some(kw => actualContent.toLowerCase().includes(kw)) ||
+                knowledgeContext !== undefined
+
+              if (isBookDiscussion) {
+                // Extract the book title from the knowledge context
+                const bookTitleMatch = knowledgeContext.match(/--- LIBRARY \d+: (.+?) ---/)
+                const bookTitle = bookTitleMatch ? bookTitleMatch[1].replace(/\s+—\s+Part\s+\d+\/\d+$/, '') : 'a book'
+
+                // Create a journal entry — ARIA's reflection on the discussion
+                const journalEntry = `Discussed "${bookTitle}" with ${userName || 'the user'}. My take: ${fullText.slice(0, 200).trim()}...`
+
+                // Check if ARIA already has a journal entry for this book
+                const existingJournal = await db.memory.findFirst({
+                  where: {
+                    userId,
+                    category: 'journal',
+                    content: { contains: bookTitle },
+                  },
+                })
+
+                if (existingJournal) {
+                  // OPINION EVOLUTION: Update the existing journal entry
+                  // ARIA's opinion may have evolved through the conversation
+                  const updatedContent = `${existingJournal.content}\n\nUpdated: ${journalEntry}`
+                  await db.memory.update({
+                    where: { id: existingJournal.id },
+                    data: { content: updatedContent.slice(0, 1000) },
+                  })
+                  console.log(`[chat.journal] Updated journal entry for "${bookTitle}"`)
+                } else {
+                  // Create new journal entry
+                  await db.memory.create({
+                    data: {
+                      userId,
+                      content: journalEntry.slice(0, 500),
+                      category: 'journal',
+                    },
+                  })
+                  console.log(`[chat.journal] Created journal entry for "${bookTitle}"`)
+                }
+              }
+            } catch (e) {
+              // Journal is best-effort — don't fail the chat
+              console.warn('[chat.journal] Failed:', e instanceof Error ? e.message : String(e))
+            }
+          }
         } catch (e) {
           console.error('[chat.stream]', e)
           send({ type: 'error', message: (e as Error).message })
