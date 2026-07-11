@@ -7,21 +7,17 @@ import { useAriaStore } from '@/lib/store'
 import { useAriaChat } from '@/hooks/use-aria-chat'
 
 /**
- * ARIA Voice Window (v3.0) — FULLY WIRED
+ * ARIA Voice Window (v3.0) — FULLY WIRED with ElevenLabs TTS
  *
  * Walkie-talkie voice mode:
  *   1. User taps orb → STT starts listening (browser SpeechRecognition API)
  *   2. User speaks → "Listening..." → interim transcript shows
  *   3. User pauses → transcript sent to /api/chat → "Thinking..."
- *   4. ARIA responds → TTS speaks via speechSynthesis → "Speaking..."
+ *   4. ARIA responds → ElevenLabs TTS speaks → "Speaking..."
  *   5. Speech ends → auto-restart listening (loop)
  *
- * Supports English + Hindi:
- *   - STT: SpeechRecognition lang set to 'en-US' or 'hi-IN'
- *   - TTS: picks the best available voice for the language
- *   - ARIA's response language detected from Devanagari characters
- *
- * Friday from Iron Man inspired — calm, warm, amber.
+ * Voice: "Sarah" from ElevenLabs — Mature, Reassuring, Confident (Friday-like).
+ * Supports English + Hindi via eleven_turbo_v2_5 model.
  */
 
 type VoiceState = 'idle' | 'listening' | 'thinking' | 'speaking'
@@ -63,127 +59,86 @@ function isHindiText(text: string): boolean {
   return /[\u0900-\u097F]/.test(text)
 }
 
-/** Strip markdown for cleaner speech */
-function stripMarkdown(text: string): string {
-  return text
-    .replace(/```[\s\S]*?```/g, ' (code block) ')
-    .replace(/`([^`]+)`/g, '$1')
-    .replace(/!\[[^\]]*\]\([^)]*\)/g, '')
-    .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
-    .replace(/[#*_>~]/g, '')
-    .replace(/\n+/g, '. ')
-    .slice(0, 1500) // cap TTS length — don't speak more than ~1500 chars
-}
-
-/** Get the best available voice for the target language */
-function pickVoice(voices: SpeechSynthesisVoice[], preferHindi: boolean): SpeechSynthesisVoice | null {
-  if (!voices.length) return null
-
-  if (preferHindi) {
-    // Prefer Hindi female voices
-    const hindiFemale = voices.find(v =>
-      v.lang.startsWith('hi') &&
-      /female|samantha|google|priya|kalpana/i.test(v.name)
-    )
-    if (hindiFemale) return hindiFemale
-
-    const hindi = voices.find(v => v.lang.startsWith('hi'))
-    if (hindi) return hindi
-  }
-
-  // English female voices — prefer natural-sounding ones
-  const englishFemale = voices.find(v =>
-    v.lang.startsWith('en') &&
-    /female|samantha|google|karen|tessa|moira|fiona|veena/i.test(v.name)
-  )
-  if (englishFemale) return englishFemale
-
-  // Fallback: any English voice
-  const english = voices.find(v => v.lang.startsWith('en'))
-  if (english) return english
-
-  return voices[0]
-}
-
 export function VoiceWindow() {
   const { voiceOpen, setVoiceOpen, activeConversationId } = useAriaStore()
   const { sendMessage } = useAriaChat()
   const [state, setState] = useState<VoiceState>('idle')
   const [transcript, setTranscript] = useState('')
-  const [ariaResponse, setAriaResponse] = useState('')
   const [language, setLanguage] = useState<'en' | 'hi'>('en')
 
-  // Refs for STT/TTS — must survive re-renders
+  // Refs
   const recognitionRef = useRef<any>(null)
-  const voicesRef = useRef<SpeechSynthesisVoice[]>([])
   const isListeningRef = useRef(false)
   const autoListenRef = useRef(true)
+  const audioRef = useRef<HTMLAudioElement | null>(null)
+  const abortControllerRef = useRef<AbortController | null>(null)
 
-  // Load available TTS voices (browser-dependent)
-  useEffect(() => {
-    if (typeof window === 'undefined' || !window.speechSynthesis) return
-
-    const loadVoices = () => {
-      voicesRef.current = window.speechSynthesis.getVoices()
+  // === TTS: Speak text using ElevenLabs API ===
+  const speak = useCallback(async (text: string) => {
+    // Stop any existing audio
+    if (audioRef.current) {
+      audioRef.current.pause()
+      audioRef.current = null
     }
-    loadVoices()
-    window.speechSynthesis.onvoiceschanged = loadVoices
-    return () => {
-      window.speechSynthesis.onvoiceschanged = null
+    if (abortControllerRef.current) {
+      abortControllerRef.current.abort()
     }
-  }, [])
 
-  // === TTS: Speak text using browser speechSynthesis ===
-  const speak = useCallback((text: string) => {
-    if (typeof window === 'undefined' || !window.speechSynthesis) {
-      // No TTS available — skip to listening
+    const preferHindi = isHindiText(text) || language === 'hi'
+
+    setState('speaking')
+
+    try {
+      abortControllerRef.current = new AbortController()
+
+      const res = await fetch('/api/tts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text, hindi: preferHindi }),
+        signal: abortControllerRef.current.signal,
+      })
+
+      if (!res.ok) {
+        throw new Error('TTS failed')
+      }
+
+      // Get the audio as a blob and play it
+      const blob = await res.blob()
+      const audioUrl = URL.createObjectURL(blob)
+      const audio = new Audio(audioUrl)
+      audioRef.current = audio
+
+      audio.onended = () => {
+        URL.revokeObjectURL(audioUrl)
+        audioRef.current = null
+        // Auto-restart listening
+        if (autoListenRef.current && voiceOpen) {
+          setTimeout(() => startListening(), 400)
+        } else {
+          setState('idle')
+        }
+      }
+
+      audio.onerror = () => {
+        URL.revokeObjectURL(audioUrl)
+        audioRef.current = null
+        if (autoListenRef.current && voiceOpen) {
+          setTimeout(() => startListening(), 400)
+        } else {
+          setState('idle')
+        }
+      }
+
+      await audio.play()
+    } catch (err) {
+      // If aborted (user interrupted), don't restart
+      if (err instanceof DOMException && err.name === 'AbortError') {
+        return
+      }
+      console.error('[voice.tts]', err)
+      // Fallback to idle — don't crash the voice window
       setState('idle')
-      return
     }
-
-    // Stop any ongoing speech
-    window.speechSynthesis.cancel()
-
-    const cleanText = stripMarkdown(text)
-    const preferHindi = isHindiText(cleanText) || language === 'hi'
-    const voice = pickVoice(voicesRef.current, preferHindi)
-
-    const utterance = new SpeechSynthesisUtterance(cleanText)
-    if (voice) {
-      utterance.voice = voice
-      utterance.lang = voice.lang
-    } else {
-      utterance.lang = preferHindi ? 'hi-IN' : 'en-US'
-    }
-    utterance.rate = 0.95  // slightly slower for calm, Friday-like delivery
-    utterance.pitch = 1.05 // slightly higher pitch for female warmth
-    utterance.volume = 1.0
-
-    utterance.onstart = () => {
-      setState('speaking')
-      setAriaResponse(cleanText)
-    }
-
-    utterance.onend = () => {
-      setAriaResponse('')
-      // Auto-restart listening if the loop is active
-      if (autoListenRef.current && voiceOpen) {
-        setTimeout(() => startListening(), 500)
-      } else {
-        setState('idle')
-      }
-    }
-
-    utterance.onerror = () => {
-      setAriaResponse('')
-      if (autoListenRef.current && voiceOpen) {
-        setTimeout(() => startListening(), 500)
-      } else {
-        setState('idle')
-      }
-    }
-
-    window.speechSynthesis.speak(utterance)
   }, [language, voiceOpen])
 
   // === STT: Start listening using browser SpeechRecognition ===
@@ -192,13 +147,11 @@ export function VoiceWindow() {
 
     const SpeechRecognition = (window as any).SpeechRecognition || (window as any).webkitSpeechRecognition
     if (!SpeechRecognition) {
-      // Browser doesn't support STT — show error
-      setTranscript('Speech recognition not supported in this browser. Try Chrome or Safari.')
+      setTranscript('Speech recognition not supported. Try Chrome or Safari.')
       setState('idle')
       return
     }
 
-    // Stop any existing recognition
     if (recognitionRef.current) {
       try { recognitionRef.current.stop() } catch {}
     }
@@ -232,11 +185,11 @@ export function VoiceWindow() {
         setTranscript(final)
         isListeningRef.current = false
 
-        // Send to ARIA
         if (final.trim().length > 0) {
           setState('thinking')
+          // Clear transcript after sending (don't show stale text during thinking)
+          setTimeout(() => setTranscript(''), 1000)
           sendMessage(final.trim(), activeConversationId ?? undefined, (responseText) => {
-            // onComplete — speak ARIA's response
             speak(responseText)
           })
         } else {
@@ -248,13 +201,13 @@ export function VoiceWindow() {
     recognition.onerror = (event: any) => {
       isListeningRef.current = false
       if (event.error === 'no-speech') {
-        // No speech detected — restart listening
         if (autoListenRef.current && voiceOpen) {
           setTimeout(() => startListening(), 300)
         }
       } else if (event.error === 'not-allowed') {
-        setTranscript('Microphone access denied. Please allow microphone access in your browser settings.')
+        setTranscript('Microphone access denied.')
         setState('idle')
+        autoListenRef.current = false
       } else {
         setState('idle')
       }
@@ -262,7 +215,6 @@ export function VoiceWindow() {
 
     recognition.onend = () => {
       isListeningRef.current = false
-      // If we didn't get a final result, go back to idle or restart
       if (state === 'listening' && autoListenRef.current && voiceOpen) {
         setTimeout(() => {
           if (!isListeningRef.current && autoListenRef.current && voiceOpen) {
@@ -277,21 +229,22 @@ export function VoiceWindow() {
     try {
       recognition.start()
     } catch {
-      // Already started — ignore
+      // Already started
     }
   }, [language, voiceOpen, activeConversationId, sendMessage, speak, state])
 
   // === Handle ball tap ===
   const handleBallTap = useCallback(() => {
-    if (state === 'idle' || state === 'speaking') {
-      // Stop speaking if ARIA is talking
-      if (typeof window !== 'undefined' && window.speechSynthesis) {
-        window.speechSynthesis.cancel()
+    if (state === 'speaking') {
+      // Stop ARIA's speech and start listening
+      if (audioRef.current) {
+        audioRef.current.pause()
+        audioRef.current = null
       }
-      // Start listening
+      startListening()
+    } else if (state === 'idle') {
       startListening()
     } else if (state === 'listening') {
-      // Stop listening
       if (recognitionRef.current) {
         try { recognitionRef.current.stop() } catch {}
       }
@@ -305,18 +258,16 @@ export function VoiceWindow() {
       autoListenRef.current = true
       setState('idle')
       setTranscript('')
-      setAriaResponse('')
-      // Start listening after a short delay (let the animation play)
       const timer = setTimeout(() => startListening(), 600)
       return () => clearTimeout(timer)
     } else {
-      // Window closed — stop everything
       autoListenRef.current = false
       if (recognitionRef.current) {
         try { recognitionRef.current.stop() } catch {}
       }
-      if (typeof window !== 'undefined' && window.speechSynthesis) {
-        window.speechSynthesis.cancel()
+      if (audioRef.current) {
+        audioRef.current.pause()
+        audioRef.current = null
       }
       setState('idle')
     }
@@ -329,11 +280,24 @@ export function VoiceWindow() {
     if (recognitionRef.current) {
       try { recognitionRef.current.stop() } catch {}
     }
-    if (typeof window !== 'undefined' && window.speechSynthesis) {
-      window.speechSynthesis.cancel()
+    if (audioRef.current) {
+      audioRef.current.pause()
+      audioRef.current = null
     }
     setVoiceOpen(false)
   }, [setVoiceOpen])
+
+  // Cleanup on unmount
+  useEffect(() => {
+    return () => {
+      if (recognitionRef.current) {
+        try { recognitionRef.current.stop() } catch {}
+      }
+      if (audioRef.current) {
+        audioRef.current.pause()
+      }
+    }
+  }, [])
 
   if (!voiceOpen) return null
 
@@ -372,7 +336,6 @@ export function VoiceWindow() {
           onClick={() => {
             const newLang = language === 'en' ? 'hi' : 'en'
             setLanguage(newLang)
-            // Restart listening with new language
             if (recognitionRef.current) {
               try { recognitionRef.current.stop() } catch {}
             }
@@ -431,23 +394,13 @@ export function VoiceWindow() {
             </p>
           </div>
 
-          {/* Live transcript (listening + thinking) */}
-          {(state === 'listening' || state === 'thinking') && transcript && (
+          {/* Live transcript — only show during LISTENING (clean, short) */}
+          {state === 'listening' && transcript && (
             <div
-              className="aria-voice-transcript max-w-[500px] text-center text-[15px] leading-relaxed"
+              className="aria-voice-transcript max-w-[450px] text-center text-[16px] leading-relaxed"
               style={{ color: 'var(--aria-fg)' }}
             >
               {transcript}
-            </div>
-          )}
-
-          {/* ARIA's response preview (speaking) */}
-          {state === 'speaking' && ariaResponse && (
-            <div
-              className="aria-voice-transcript max-w-[500px] text-center text-[15px] leading-relaxed"
-              style={{ color: 'var(--aria-fg-muted)' }}
-            >
-              {ariaResponse.slice(0, 300)}{ariaResponse.length > 300 ? '...' : ''}
             </div>
           )}
         </div>
