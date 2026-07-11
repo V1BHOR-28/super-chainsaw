@@ -688,7 +688,73 @@ No hedging, no disclaimers. Give your raw, unvarnished interpretation. Engage wi
               ? 'meta-llama/llama-3.3-70b-instruct:free'
               : selectedModel
 
-            // === LLM FALLBACK CHAIN ===
+            // === REAL STREAMING ===
+            // Try streaming from OpenRouter first — real-time tokens instead of
+            // waiting for the full response + fake typewriter. The user sees the
+            // first word in 1-2s instead of 5-10s.
+            // If streaming fails (429, 402, etc.), fall through to the existing
+            // non-streaming parallel approach below.
+            let streamedDirectly = false
+            try {
+              const streamResponse = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json',
+                  'Authorization': `Bearer ${process.env.OPENROUTER_API_KEY}`,
+                  'HTTP-Referer': 'https://ariav2-seven.vercel.app',
+                  'X-Title': 'ARIA',
+                },
+                body: JSON.stringify({
+                  model: effectiveSelectedModel,
+                  messages: sdkMessages,
+                  max_tokens: 1024,
+                  stream: true,
+                }),
+                signal: AbortSignal.timeout(25000),
+              })
+
+              if (streamResponse.ok && streamResponse.body) {
+                const reader = streamResponse.body.getReader()
+                const decoder = new TextDecoder()
+                let streamBuffer = ''
+                let streamText = ''
+
+                while (true) {
+                  const { done, value } = await reader.read()
+                  if (done) break
+                  streamBuffer += decoder.decode(value, { stream: true })
+                  const lines = streamBuffer.split('\n')
+                  streamBuffer = lines.pop() || ''
+                  for (const line of lines) {
+                    if (line.startsWith('data: ')) {
+                      const data = line.slice(6).trim()
+                      if (data === '[DONE]') continue
+                      try {
+                        const parsed = JSON.parse(data)
+                        const delta = parsed.choices?.[0]?.delta?.content
+                        if (delta) {
+                          streamText += delta
+                          send({ type: 'token', value: delta })
+                        }
+                      } catch {}
+                    }
+                  }
+                }
+
+                if (streamText.trim()) {
+                  text = streamText.trim()
+                  fullText = text
+                  streamedDirectly = true
+                  providerUsed = `${effectiveSelectedModel} (streamed)`
+                  console.log(`[chat.llm] Streamed directly from ${effectiveSelectedModel}`)
+                }
+              }
+            } catch (streamErr) {
+              console.warn('[chat.llm] Streaming failed, falling back to non-streaming:', streamErr instanceof Error ? streamErr.message.slice(0, 100) : '')
+            }
+
+            if (!streamedDirectly) {
+            // === EXISTING NON-STREAMING FALLBACK ===
             // ARIA will never die. When one provider fails or runs out of
             // credits, we automatically fall through to the next:
             //   Layer 1: OpenRouter paid model (DeepSeek — best quality, uses credits)
@@ -897,16 +963,18 @@ No hedging, no disclaimers. Give your raw, unvarnished interpretation. Engage wi
                 "I'm here, but my words aren't coming through clearly. Try sending that again."
             }
 
-            // Stream word-by-word for the typewriter effect.
-            // Split on whitespace but keep the separators so spacing is preserved.
-            const tokens = fullText.split(/(\s+)/)
-            for (const t of tokens) {
-              if (!t) continue
-              send({ type: 'token', value: t })
-              // Slightly variable delay — slower on punctuation for a natural cadence.
-              const isPunct = /[.!?,;:—]/.test(t)
-              await new Promise((r) => setTimeout(r, isPunct ? 40 : 12))
+            // Fake typewriter — only if we didn't stream directly.
+            // Real streaming sends tokens as they arrive; this is the fallback.
+            if (!streamedDirectly) {
+              const tokens = fullText.split(/(\s+)/)
+              for (const t of tokens) {
+                if (!t) continue
+                send({ type: 'token', value: t })
+                const isPunct = /[.!?,;:—]/.test(t)
+                await new Promise((r) => setTimeout(r, isPunct ? 40 : 12))
+              }
             }
+            } // end if (!streamedDirectly) — closes the non-streaming fallback block
           } catch (e) {
             const errMsg = e instanceof Error ? e.message : String(e)
             console.error('[chat.llm] Detailed error:', {

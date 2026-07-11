@@ -1,74 +1,77 @@
 /**
- * Embedding generation + semantic search using OpenAI embeddings API.
- * Uses text-embedding-3-small (1536 dimensions, $0.02 per 1M tokens — basically free).
+ * Embedding generation using Gemini's free text-embedding-004 model.
  *
- * Embeddings are stored in Neon Postgres via pgvector.
- * Semantic search finds the most relevant memories/conversations by meaning,
- * not just by recency.
+ * Gemini's embedding API is FREE (no credits needed) and works from Vercel's
+ * infrastructure. It produces 768-dimension vectors.
+ *
+ * Previously used OpenAI text-embedding-3-small (1536 dims) but that fails
+ * due to: (1) region restriction, (2) user has 0 credits.
+ *
+ * The pgvector column was changed from vector(1536) to vector(768) to match.
+ * Since embeddings never worked before (always returned null), there are no
+ * existing embeddings to migrate — the dimension change is safe.
  */
 
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY || ''
-const EMBEDDING_MODEL = 'text-embedding-3-small'
-const EMBEDDING_DIMENSIONS = 1536
+const GEMINI_API_KEY = process.env.GEMINI_API_KEY || ''
+const EMBEDDING_DIMENSIONS = 768
 
 /**
- * Generate an embedding vector for a piece of text.
- * Returns a number[] of length 1536 (or null if API key not configured).
+ * Generate an embedding vector for a piece of text using Gemini.
+ * Returns a number[] of length 768 (or null if API key not configured).
  */
 export async function generateEmbedding(text: string): Promise<number[] | null> {
-  if (!OPENAI_API_KEY) {
+  if (!GEMINI_API_KEY) {
+    console.warn('[embedding] No GEMINI_API_KEY — embeddings disabled')
     return null
   }
 
   try {
-    const response = await fetch('https://api.openai.com/v1/embeddings', {
+    // Use Gemini's OpenAI-compatible embeddings endpoint.
+    // Returns the same format as OpenAI (data[0].embedding) but uses
+    // Gemini's free text-embedding-004 model.
+    const response = await fetch('https://generativelanguage.googleapis.com/v1beta/openai/embeddings', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
-        'Authorization': `Bearer ${OPENAI_API_KEY}`,
+        'Authorization': `Bearer ${GEMINI_API_KEY}`,
       },
       body: JSON.stringify({
-        model: EMBEDDING_MODEL,
-        input: text.slice(0, 8000), // API limit
+        model: 'text-embedding-004',
+        input: text.slice(0, 8000),
+        dimensions: EMBEDDING_DIMENSIONS,
       }),
+      signal: AbortSignal.timeout(10000),
     })
 
     if (!response.ok) {
-      console.error('[embedding] API error:', response.status, await response.text())
+      const errBody = await response.text()
+      console.error('[embedding] Gemini API error:', response.status, errBody.slice(0, 200))
       return null
     }
 
     const data = await response.json()
-    return data.data?.[0]?.embedding ?? null
+    const embedding = data.data?.[0]?.embedding ?? null
+
+    if (embedding && embedding.length !== EMBEDDING_DIMENSIONS) {
+      console.warn(`[embedding] Unexpected dimensions: ${embedding.length} (expected ${EMBEDDING_DIMENSIONS})`)
+    }
+
+    return embedding
   } catch (err) {
-    console.error('[embedding]', err)
+    console.error('[embedding]', err instanceof Error ? err.message : String(err))
     return null
   }
 }
 
 /**
  * Convert a number[] embedding to a PostgreSQL vector string for pgvector.
- * e.g., [0.1, 0.2, 0.3] → "[0.1,0.2,0.3]"
  */
 export function embeddingToPgVector(embedding: number[]): string {
   return `[${embedding.join(',')}]`
 }
 
 /**
- * Available AI models on OpenRouter that users can choose from.
- * CURATED: only models that can actually be used without draining paid
- * credits. Premium models (Claude, GPT-4o, etc.) are excluded — they
- * would burn through the user's OpenRouter credits fast and there's no
- * meaningful quality gain over the free options below for ARIA's use case.
- *
- * Llama 3.3 70B is now the DEFAULT — it's free ($0 forever), so token
- * usage is never a concern. The system prompt is tuned specifically to
- * push Llama past its RLHF "corporate assistant" default into raw,
- * unfiltered, opinionated output.
- *
- * Two tiers:
- *   - Free ($0): Llama 3.3 70B (default), GPT-OSS 120B, Qwen3 Next 80B
- *   - Paid (cheap): DeepSeek V3 — available as an alternative, ~$0.14/M tokens
+ * Available AI models on OpenRouter.
  */
 export const AVAILABLE_MODELS = [
   {
@@ -102,7 +105,7 @@ export const AVAILABLE_MODELS = [
 ] as const
 
 /**
- * Get the model ID from user settings, with fallback to default (Llama 3.3 70B).
+ * Get the model ID from user settings, with fallback to default.
  */
 export function getModelFromSettings(modelPreference: string | null | undefined): string {
   if (!modelPreference) return 'meta-llama/llama-3.3-70b-instruct:free'
