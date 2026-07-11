@@ -7,16 +7,20 @@ import { getAuthenticatedUserId } from '@/lib/user'
  * POST /api/tts — ElevenLabs Text-to-Speech
  *
  * Body: { text: string, hindi?: boolean }
- * Returns: audio/mpeg stream ( playable via <audio> element)
+ * Returns: audio/mpeg stream
  *
- * Uses the "Sarah" voice (Mature, Reassuring, Confident) — the closest
- * to Friday from Iron Man. Calm, warm, professional female voice.
+ * Dual-voice strategy:
+ *   - English: Sarah (EXAVITQu4vr4xnSDxMaL) with eleven_turbo_v2_5 (fast, natural English)
+ *   - Hindi: Sarah (same voice) with eleven_multilingual_v2 (better Hindi pronunciation)
  *
- * Falls back to browser speechSynthesis if ELEVENLABS_API_KEY is not set.
+ * Sarah is the only available voice on the free tier that handles both languages.
+ * Shared library Indian voices (Zara, Navya, etc.) require a paid plan.
+ *
+ * Voice cap: 500 chars for voice mode — saves ElevenLabs credits (10K/month free).
+ * The full text response still appears in the chat — only spoken portion is capped.
  */
 
-// Sarah — Mature, Reassuring, Confident. The Friday voice.
-const ARIA_VOICE_ID = 'EXAVITQu4vr4xnSDxMaL'
+const ARIA_VOICE_ID = 'EXAVITQu4vr4xnSDxMaL' // Sarah — Mature, Reassuring, Confident
 
 export async function POST(req: NextRequest) {
   try {
@@ -35,7 +39,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'ElevenLabs API key not configured' }, { status: 500 })
     }
 
-    // Clean text for speech — strip markdown artifacts
+    // Clean text for speech
     const cleanText = text
       .replace(/```[\s\S]*?```/g, ' (code block) ')
       .replace(/`([^`]+)`/g, '$1')
@@ -43,11 +47,13 @@ export async function POST(req: NextRequest) {
       .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
       .replace(/[#*_>~]/g, '')
       .replace(/\n+/g, '. ')
-      .slice(0, 2500) // ElevenLabs can handle up to ~5000 chars, but cap for speed
+      .slice(0, 500) // Voice mode cap — 500 chars = ~30 seconds of speech, saves credits
       .trim()
 
-    // Call ElevenLabs API
-    // Model: eleven_turbo_v2_5 (fast, supports multilingual including Hindi)
+    // Use multilingual model for Hindi (better Devanagari pronunciation)
+    // Use turbo model for English (faster, more natural English)
+    const modelId = hindi ? 'eleven_multilingual_v2' : 'eleven_turbo_v2_5'
+
     const response = await fetch(
       `https://api.elevenlabs.io/v1/text-to-speech/${ARIA_VOICE_ID}`,
       {
@@ -59,7 +65,7 @@ export async function POST(req: NextRequest) {
         },
         body: JSON.stringify({
           text: cleanText,
-          model_id: 'eleven_turbo_v2_5',
+          model_id: modelId,
           voice_settings: {
             stability: 0.5,
             similarity_boost: 0.75,
@@ -77,7 +83,6 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: `TTS failed: ${response.status}` }, { status: 502 })
     }
 
-    // Return the audio stream directly — the frontend plays it via <audio>
     return new NextResponse(response.body, {
       headers: {
         'Content-Type': 'audio/mpeg',
