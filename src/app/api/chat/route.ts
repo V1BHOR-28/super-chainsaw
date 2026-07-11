@@ -606,20 +606,6 @@ No hedging, no disclaimers. Give your raw, unvarnished interpretation. Engage wi
       })
     }
 
-    // === HINDI / HINGLISH LANGUAGE REINFORCEMENT ===
-    // Detect Hindi input in ANY form: Devanagari script OR romanized Hinglish
-    // (common Hindi words written in English like "kaise", "nahi", "bhai", "accha").
-    // This catches users who type in Hinglish (not Devanagari) — without this,
-    // ARIA sees English characters and responds in pure English, ignoring the
-    // user's actual language.
-    const devanagari = /[\u0900-\u097F]/.test(actualContent)
-    const hinglishWords = /\b(kaise|kaisa|kaisi|nahi|nahin|haan|bhai|accha|achha|theek|thik|kya|kyu|kyun|kahan|kahaan|kaise|matlab|dekho|suno|bata|batao|kar|karo|ho|raha|rahi|tha|thi|aap|tum|main|mera|meri|tumhara|tumhari|uska|uski|yeh|woh|waha|yaha|abhi|phir|jab|tab|kyunki|lekin|par|aur|ya|bhi|hi|toh|na|cha|chalo|achha|bahut|thoda|zyada|kam|jaldi|der|kal|aaj|kal|samjh|samjho|baat|baatein|kaam|zindagi|duniya|log|insaan|aadmi|aurat|bacha|paani|khana|naam|paise|ghar|bahar|andar|upar|niche|aage|peeche|dheere|tez|sahi|galat|bura|accha|khoob|pyaar|nafrat|khushi|dukhi|gussa|dar|umeed|bharosa|sawaal|jawaab|faisla|raaz|sach|jhooth|insaaf|zulum|azaadi|banda|bandi|dost|dushman|pyaar|mohabbat|ishq)\b/i.test(actualContent.toLowerCase())
-    const isHindiMessage = devanagari || hinglishWords
-
-    const userContentForLLM = isHindiMessage
-      ? `${actualContent}\n\n[IMPORTANT: Respond in casual Hinglish ONLY. Mix Hindi + English naturally like a friend from Mumbai. Write in Devanagari but use English words freely. NEVER use formal Hindi words like vyavastha, uchit, uttar, dharma. Talk casually: "Haan bhai, main sochti hoon ki yeh sahi hai." NOT formal Hindi.]`
-      : actualContent
-
     // If the last message wasn't the vision-augmented one, ensure the user content is present
     // Use actualContent (without /green apple prefix) for the LLM
     const last = sdkMessages[sdkMessages.length - 1]
@@ -632,19 +618,14 @@ No hedging, no disclaimers. Give your raw, unvarnished interpretation. Engage wi
     if (!lastIsCurrentUser) {
       if (attachments?.length) {
         const parts: Array<{ type: string; text?: string; image_url?: { url: string } }> = [
-          { type: 'text', text: userContentForLLM },
+          { type: 'text', text: actualContent },
         ]
         for (const a of attachments) {
           parts.push({ type: 'image_url', image_url: { url: a.dataUrl } })
         }
         sdkMessages.push({ role: 'user', content: parts })
       } else {
-        sdkMessages.push({ role: 'user', content: userContentForLLM })
-      }
-    } else {
-      // Replace the last user message content with the Hindi-reinforced version
-      if (isHindiMessage && last && typeof last.content === 'string') {
-        last.content = userContentForLLM
+        sdkMessages.push({ role: 'user', content: actualContent })
       }
     }
 
