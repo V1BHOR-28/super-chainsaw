@@ -101,7 +101,7 @@ export function useAriaChat() {
   } = useAriaStore()
 
   const sendMessage = useCallback(
-    async (rawText: string, explicitConversationId?: string) => {
+    async (rawText: string, explicitConversationId?: string, onComplete?: (responseText: string) => void) => {
       const text = rawText.trim()
       const conversationId = explicitConversationId ?? activeConversationId
       if (!text || !conversationId) return
@@ -238,6 +238,10 @@ export function useAriaChat() {
                 })
                 if (data.usage?.tokens) {
                   useAriaStore.getState().addUsage(data.usage.tokens)
+                }
+                // Voice mode callback — fires when ARIA's full response is ready
+                if (onComplete && accumulated.trim()) {
+                  onComplete(accumulated)
                 }
               } else if (data.type === 'error') {
                 updateMessage(ariaMsgId, {
