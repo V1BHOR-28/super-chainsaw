@@ -11,6 +11,7 @@ import {
   BookOpen,
   Sparkles,
   Menu,
+  Download,
 } from 'lucide-react'
 import { useAriaStore } from '@/lib/store'
 import { useAriaChat } from '@/hooks/use-aria-chat'
@@ -224,7 +225,41 @@ export function ChatArea() {
         >
           <Menu size={18} />
         </button>
-        <UsageMeter />
+        <div className="flex items-center gap-2">
+          {activeConversationId && hasMessages && (
+            <button
+              onClick={async () => {
+                try {
+                  const res = await fetch(`/api/conversations/${activeConversationId}/export?format=markdown`)
+                  if (!res.ok) throw new Error('Export failed')
+                  const blob = await res.blob()
+                  const url = URL.createObjectURL(blob)
+                  const a = document.createElement('a')
+                  a.href = url
+                  a.download = `aria-conversation-${Date.now()}.md`
+                  document.body.appendChild(a)
+                  a.click()
+                  document.body.removeChild(a)
+                  URL.revokeObjectURL(url)
+                  toast.success('Conversation exported as Markdown')
+                } catch {
+                  toast.error('Could not export conversation')
+                }
+              }}
+              className="w-9 h-9 rounded-lg flex items-center justify-center transition-colors"
+              style={{
+                background: 'var(--aria-card)',
+                border: '1px solid var(--aria-border)',
+                color: 'var(--aria-fg-muted)',
+              }}
+              aria-label="Export conversation"
+              title="Export as Markdown"
+            >
+              <Download size={16} />
+            </button>
+          )}
+          <UsageMeter />
+        </div>
       </div>
 
       {/* Ambient glow */}

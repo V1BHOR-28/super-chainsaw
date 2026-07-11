@@ -198,12 +198,15 @@ export function SettingsModal() {
   const setUser = useAriaStore((s) => s.setUser)
 
   const [activeTab, setActiveTab] = useState<TabId>('general')
+  const [lightMode, setLightMode] = useState(false)
   const [displayName, setDisplayName] = useState('Elias')
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   /* Load settings/user whenever the modal opens */
   useEffect(() => {
     if (!open) return
+    // Sync lightMode state with current DOM
+    setLightMode(document.documentElement.classList.contains('light'))
     let cancelled = false
     ;(async () => {
       try {
@@ -452,8 +455,9 @@ export function SettingsModal() {
                   desc="Switch to a light theme. Amber accents stay, background becomes warm white."
                 >
                   <AriaToggle
-                    checked={typeof document !== 'undefined' && document.documentElement.classList.contains('light')}
+                    checked={lightMode}
                     onChange={(v) => {
+                      setLightMode(v)
                       if (typeof document !== 'undefined') {
                         if (v) {
                           document.documentElement.classList.add('light')

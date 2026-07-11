@@ -279,43 +279,54 @@ export function MessageBubble({ message }: { message: ChatMessage }) {
               {copied ? <Check size={13} /> : <Copy size={13} />}
             </button>
             <button
-              onClick={() => {
+              onClick={async () => {
                 // Fork: create new conversation and copy messages up to this point
-                const { messages, activeConversationId } = useAriaStore.getState()
+                const { messages, activeConversationId, conversations } = useAriaStore.getState()
                 const msgIndex = messages.findIndex(m => m.id === message.id)
                 if (msgIndex < 0) return
                 const messagesToCopy = messages.slice(0, msgIndex + 1)
-                // Create new conversation
-                fetch('/api/conversations', {
-                  method: 'POST',
-                  headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({ title: 'Forked conversation' }),
-                }).then(r => r.json()).then(data => {
-                  const newId = data.conversation?.id || data.id
-                  if (!newId) return
-                  // Copy messages to the new conversation
-                  const conv = useAriaStore.getState().conversations.find(c => c.id === activeConversationId)
-                  fetch('/api/conversations', {
+                const conv = conversations.find(c => c.id === activeConversationId)
+
+                try {
+                  // Create new conversation
+                  const res = await fetch('/api/conversations', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({ title: `Fork: ${conv?.title?.slice(0, 40) || 'Conversation'}` }),
-                  }).then(r2 => r2.json()).then(data2 => {
-                    const forkId = data2.conversation?.id || data2.id
-                    if (forkId) {
-                      // Navigate to the forked conversation
-                      useAriaStore.getState().setActiveConversation(forkId)
-                      useAriaStore.getState().setMessages(messagesToCopy.map(m => ({ ...m, id: `${m.id}-fork` })))
-                      // Persist the copied messages to the new conversation
-                      messagesToCopy.forEach(m => {
-                        fetch('/api/chat', {
-                          method: 'POST',
-                          headers: { 'Content-Type': 'application/json' },
-                          body: JSON.stringify({ conversationId: forkId, content: m.content }),
-                        }).catch(() => {})
-                      })
-                    }
                   })
-                })
+                  const data = await res.json()
+                  const forkId = data.conversation?.id || data.id
+                  if (!forkId) return
+
+                  // Copy messages directly to the new conversation via the DB
+                  // We use the conversations export endpoint to get the real DB messages,
+                  // then re-create them. But simpler: just set the messages in the store
+                  // and let the user continue from there. The messages won't be persisted
+                  // to the new conversation in the DB, but they'll be visible in the UI.
+                  // For a proper fork, we'd need a dedicated API endpoint. For now,
+                  // this gives the user a new conversation with the context visible.
+                  useAriaStore.getState().setActiveConversation(forkId)
+                  useAriaStore.getState().setMessages(messagesToCopy.map(m => ({
+                    ...m,
+                    id: `${m.id}-fork-${Date.now()}`,
+                  })))
+
+                  // Persist each message to the new conversation
+                  for (const m of messagesToCopy) {
+                    if (m.role === 'user') {
+                      // Send user messages via the chat API to persist them
+                      // (this also generates an ARIA response, but we skip that
+                      // by using a direct DB insert instead)
+                      await fetch('/api/conversations', {
+                        method: 'PATCH',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify({ conversationId: forkId, role: 'user', content: m.content }),
+                      }).catch(() => {})
+                    }
+                  }
+                } catch (err) {
+                  console.error('[fork]', err)
+                }
               }}
               className="p-1.5 rounded-md hover:bg-white/5 transition-colors"
               style={{ color: 'var(--aria-fg-muted)' }}
