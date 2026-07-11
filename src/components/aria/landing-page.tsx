@@ -91,7 +91,7 @@ export function LandingPage({ onOpenAuth }: { onOpenAuth: () => void }) {
       ref={iframeRef}
       src="/aria-landing.html"
       onLoad={handleLoad}
-      title="ARIA — Feed her books. She'll think about them."
+      title="ARIA — Not a chatbot. A partner."
       className="fixed inset-0 w-full h-full border-0"
       style={{ background: '#0c0a08' }}
     />
