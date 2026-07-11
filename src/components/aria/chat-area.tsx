@@ -11,6 +11,7 @@ import {
   BookOpen,
   Sparkles,
   Menu,
+  Mic,
 } from 'lucide-react'
 import { useAriaStore } from '@/lib/store'
 import { useAriaChat } from '@/hooks/use-aria-chat'
@@ -37,6 +38,7 @@ export function ChatArea() {
     conversations,
     pendingMemoryCandidate,
     setPendingMemoryCandidate,
+    setVoiceOpen,
   } = useAriaStore()
 
   const { sendMessage } = useAriaChat()
@@ -317,6 +319,18 @@ export function ChatArea() {
                 title={pendingTool === 'web_search' ? 'Web search ON — click to turn off' : 'Web search OFF — click to turn on'}
               >
                 <Globe size={15} />
+              </button>
+              <button
+                onClick={() => setVoiceOpen(true)}
+                className="w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0 transition-colors"
+                style={{
+                  background: 'var(--aria-card)',
+                  border: '1px solid var(--aria-border)',
+                  color: 'var(--aria-fg-muted)',
+                }}
+                title="Voice mode"
+              >
+                <Mic size={15} />
               </button>
               <button
                 onClick={handleSend}

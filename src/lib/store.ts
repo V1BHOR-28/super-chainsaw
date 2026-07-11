@@ -78,6 +78,10 @@ type AriaState = {
   feedAriaOpen: boolean
   setFeedAriaOpen: (v: boolean) => void
 
+  // Voice window (v3.0)
+  voiceOpen: boolean
+  setVoiceOpen: (v: boolean) => void
+
   // Sending state
   isStreaming: boolean
   setStreaming: (v: boolean) => void
@@ -208,6 +212,9 @@ export const useAriaStore = create<AriaState>((set) => ({
 
   feedAriaOpen: false,
   setFeedAriaOpen: (v) => set({ feedAriaOpen: v }),
+
+  voiceOpen: false,
+  setVoiceOpen: (v) => set({ voiceOpen: v }),
 
   isStreaming: false,
   setStreaming: (v) => set({ isStreaming: v }),
