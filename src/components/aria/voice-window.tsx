@@ -72,6 +72,10 @@ export function VoiceWindow() {
   const autoListenRef = useRef(true)
   const audioRef = useRef<HTMLAudioElement | null>(null)
   const abortControllerRef = useRef<AbortController | null>(null)
+  const stateRef = useRef<VoiceState>('idle') // tracks current state for callbacks
+
+  // Keep stateRef in sync with state
+  useEffect(() => { stateRef.current = state }, [state])
 
   // === TTS: Speak text using ElevenLabs API ===
   const speak = useCallback(async (text: string) => {
@@ -201,8 +205,8 @@ export function VoiceWindow() {
     recognition.onerror = (event: any) => {
       isListeningRef.current = false
       if (event.error === 'no-speech') {
-        // Only restart if ARIA isn't speaking (don't pick up her own audio)
-        if (autoListenRef.current && voiceOpen && !audioRef.current && state !== 'speaking' && state !== 'thinking') {
+        // Only restart if ARIA isn't speaking/thinking (don't pick up her own audio)
+        if (autoListenRef.current && voiceOpen && !audioRef.current && stateRef.current !== 'speaking' && stateRef.current !== 'thinking') {
           setTimeout(() => startListening(), 500)
         }
       } else if (event.error === 'not-allowed') {
@@ -212,18 +216,22 @@ export function VoiceWindow() {
       } else if (event.error === 'aborted') {
         // Normal — user tapped to stop or ARIA started speaking
       } else {
-        setState('idle')
+        // For other errors, restart listening if we're still in the voice window
+        if (autoListenRef.current && voiceOpen && !audioRef.current && stateRef.current === 'listening') {
+          setTimeout(() => startListening(), 500)
+        } else {
+          setState('idle')
+        }
       }
     }
 
     recognition.onend = () => {
       isListeningRef.current = false
       // Only auto-restart if we're actually in listening state AND not speaking/thinking.
-      // This prevents the STT from picking up ARIA's own TTS audio.
-      const currentState = state
-      if (currentState === 'listening' && autoListenRef.current && voiceOpen && !audioRef.current) {
+      // Uses stateRef (not stale state closure) for accurate state check.
+      if (stateRef.current === 'listening' && autoListenRef.current && voiceOpen && !audioRef.current) {
         setTimeout(() => {
-          if (!isListeningRef.current && autoListenRef.current && voiceOpen && !audioRef.current) {
+          if (!isListeningRef.current && autoListenRef.current && voiceOpen && !audioRef.current && stateRef.current === 'listening') {
             startListening()
           }
         }, 500)
