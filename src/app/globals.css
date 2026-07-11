@@ -50,7 +50,7 @@
    Preserved verbatim from the intern's prototype.
    ============================================ */
 :root {
-  /* ARIA palette */
+  /* ARIA palette — Dark theme (default) */
   --aria-bg: #0c0a08;
   --aria-bg-soft: #161210;
   --aria-bg-panel: #080605;
@@ -62,6 +62,26 @@
   --aria-accent-deep: #92400e;
   --aria-accent-bright: #fbbf24;
   --aria-border: rgba(252, 211, 77, 0.12);
+  --aria-card: rgba(252, 211, 77, 0.03);
+}
+
+/* Light theme — activated when .light class is on <html> */
+.light {
+  --aria-bg: #faf8f5;
+  --aria-bg-soft: #f0ede8;
+  --aria-bg-panel: #ffffff;
+  --aria-fg: #1a1610;
+  --aria-fg-muted: #6b5e50;
+  --aria-fg-dim: #a89888;
+  --aria-accent: #d97706;
+  --aria-accent-glow: #b45309;
+  --aria-accent-deep: #92400e;
+  --aria-accent-bright: #f59e0b;
+  --aria-border: rgba(146, 64, 14, 0.15);
+  --aria-card: rgba(146, 64, 14, 0.04);
+}
+
+:root {
   --aria-card: rgba(252, 211, 77, 0.03);
 
   /* shadcn compatibility (mapped to ARIA palette) */

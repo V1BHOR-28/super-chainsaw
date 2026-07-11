@@ -1,7 +1,7 @@
 'use client'
 
 import { useState } from 'react'
-import { Volume2, Square, Globe, Image as ImageIcon, Eye, Copy, Check, Brain, Heart } from 'lucide-react'
+import { Volume2, Square, Globe, Image as ImageIcon, Eye, Copy, Check, Brain, Heart, GitBranch } from 'lucide-react'
 import { Markdown } from './markdown'
 import type { ChatMessage } from '@/lib/types'
 import { useAriaStore } from '@/lib/store'
@@ -277,6 +277,52 @@ export function MessageBubble({ message }: { message: ChatMessage }) {
               title="Copy"
             >
               {copied ? <Check size={13} /> : <Copy size={13} />}
+            </button>
+            <button
+              onClick={() => {
+                // Fork: create new conversation and copy messages up to this point
+                const { messages, activeConversationId } = useAriaStore.getState()
+                const msgIndex = messages.findIndex(m => m.id === message.id)
+                if (msgIndex < 0) return
+                const messagesToCopy = messages.slice(0, msgIndex + 1)
+                // Create new conversation
+                fetch('/api/conversations', {
+                  method: 'POST',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ title: 'Forked conversation' }),
+                }).then(r => r.json()).then(data => {
+                  const newId = data.conversation?.id || data.id
+                  if (!newId) return
+                  // Copy messages to the new conversation
+                  const conv = useAriaStore.getState().conversations.find(c => c.id === activeConversationId)
+                  fetch('/api/conversations', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ title: `Fork: ${conv?.title?.slice(0, 40) || 'Conversation'}` }),
+                  }).then(r2 => r2.json()).then(data2 => {
+                    const forkId = data2.conversation?.id || data2.id
+                    if (forkId) {
+                      // Navigate to the forked conversation
+                      useAriaStore.getState().setActiveConversation(forkId)
+                      useAriaStore.getState().setMessages(messagesToCopy.map(m => ({ ...m, id: `${m.id}-fork` })))
+                      // Persist the copied messages to the new conversation
+                      messagesToCopy.forEach(m => {
+                        fetch('/api/chat', {
+                          method: 'POST',
+                          headers: { 'Content-Type': 'application/json' },
+                          body: JSON.stringify({ conversationId: forkId, content: m.content }),
+                        }).catch(() => {})
+                      })
+                    }
+                  })
+                })
+              }}
+              className="p-1.5 rounded-md hover:bg-white/5 transition-colors"
+              style={{ color: 'var(--aria-fg-muted)' }}
+              aria-label="Fork conversation"
+              title="Fork from here"
+            >
+              <GitBranch size={13} />
             </button>
             {settings?.voiceEnabled && (
               <button

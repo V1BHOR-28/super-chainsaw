@@ -46,6 +46,35 @@ export function ChatArea() {
   const fileInputRef = useRef<HTMLInputElement>(null)
   const [greeting, setGreeting] = useState('')
 
+  // === KEYBOARD SHORTCUTS (Phase 4.3) ===
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      // Cmd/Ctrl+K → new conversation (focus input)
+      if ((e.metaKey || e.ctrlKey) && e.key === 'k') {
+        e.preventDefault()
+        textareaRef.current?.focus()
+        setInput('')
+      }
+      // Cmd/Ctrl+/ → toggle web search
+      if ((e.metaKey || e.ctrlKey) && e.key === '/') {
+        e.preventDefault()
+        setPendingTool(useAriaStore.getState().pendingTool === 'web_search' ? null : 'web_search')
+      }
+      // Esc → close any open modal (settings, feed)
+      if (e.key === 'Escape') {
+        const { settingsOpen, setSettingsOpen, feedAriaOpen, setFeedAriaOpen } = useAriaStore.getState()
+        if (settingsOpen) { setSettingsOpen(false); return }
+        if (feedAriaOpen) { setFeedAriaOpen(false); return }
+        // Otherwise unfocus the textarea
+        if (document.activeElement === textareaRef.current) {
+          textareaRef.current?.blur()
+        }
+      }
+    }
+    window.addEventListener('keydown', onKey)
+    return () => window.removeEventListener('keydown', onKey)
+  }, [setPendingTool])
+
   // Time-based greeting
   useEffect(() => {
     const hour = new Date().getHours()

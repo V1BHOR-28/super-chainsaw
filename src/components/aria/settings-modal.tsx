@@ -448,6 +448,23 @@ export function SettingsModal() {
                   />
                 </SettingRow>
                 <SettingRow
+                  title="Light Mode"
+                  desc="Switch to a light theme. Amber accents stay, background becomes warm white."
+                >
+                  <AriaToggle
+                    checked={typeof document !== 'undefined' && document.documentElement.classList.contains('light')}
+                    onChange={(v) => {
+                      if (typeof document !== 'undefined') {
+                        if (v) {
+                          document.documentElement.classList.add('light')
+                        } else {
+                          document.documentElement.classList.remove('light')
+                        }
+                      }
+                    }}
+                  />
+                </SettingRow>
+                <SettingRow
                   title="AI Model"
                   desc="Llama 3.3 70B is the default — free forever, tuned for raw honest conversation."
                 >
