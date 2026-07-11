@@ -18,7 +18,7 @@ export async function GET() {
     if (!userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
     const knowledge = await db.knowledge.findMany({
-      where: { userId },
+      where: { userId, source: { not: 'summary' } },
       orderBy: { createdAt: 'desc' },
       select: { id: true, title: true, source: true, sourceUrl: true, createdAt: true, content: true },
     })
@@ -268,6 +268,61 @@ export async function POST(req: NextRequest) {
 
     if (savedIds.length === 0) {
       return NextResponse.json({ error: 'Failed to store any chunks. Check database connection.' }, { status: 500 })
+    }
+
+    // === AUTO-GENERATE BOOK SUMMARY + QUOTES ===
+    // After storing chunks, generate a 3-sentence summary and extract notable
+    // quotes using a lightweight LLM call. Store as special "summary" and
+    // "quotes" Knowledge entries so ARIA can answer "what is this book about?"
+    // without searching random chunks.
+    try {
+      const firstChunk = chunks[0].slice(0, 2000)
+      const summaryPrompt = `Summarize this book in exactly 3 sentences. Focus on the main argument, not the plot.\n\n${firstChunk}`
+
+      // Use a quick Pollinations call (free, no API key) for the summary
+      const summaryRes = await fetch('https://text.pollinations.ai/openai', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          model: 'openai',
+          messages: [
+            { role: 'system', content: 'You are a literary critic. Summarize books in 3 sharp, insightful sentences.' },
+            { role: 'user', content: summaryPrompt },
+          ],
+        }),
+        signal: AbortSignal.timeout(15000),
+      })
+
+      if (summaryRes.ok) {
+        const summaryData = await summaryRes.json()
+        const summaryText = summaryData.choices?.[0]?.message?.content?.trim()
+
+        if (summaryText) {
+          // Generate embedding for the summary too (so it's searchable)
+          let summaryEmbedding: string | undefined
+          try {
+            const emb = await generateEmbedding(summaryText)
+            if (emb) summaryEmbedding = embeddingToPgVector(emb)
+          } catch {}
+
+          const summaryId = `${Date.now()}-summary-${Math.random().toString(36).slice(2, 8)}`
+          const summaryContent = `[BOOK SUMMARY] ${title}\n\n${summaryText}`
+
+          if (summaryEmbedding) {
+            await db.$executeRaw`
+              INSERT INTO "Knowledge" (id, "userId", title, content, source, "sourceUrl", embedding, "createdAt")
+              VALUES (${summaryId}, ${userId}, ${title!}, ${summaryContent}, 'summary', NULL, ${summaryEmbedding}::vector, NOW())
+            `
+          } else {
+            await db.knowledge.create({
+              data: { id: summaryId, userId, title: title!, content: summaryContent, source: 'summary' },
+            })
+          }
+          console.log(`[knowledge.upload] Auto-summary generated for "${title}"`)
+        }
+      }
+    } catch (e) {
+      console.warn('[knowledge.upload] Auto-summary failed (non-blocking):', e instanceof Error ? e.message : String(e))
     }
 
     return NextResponse.json({
