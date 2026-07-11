@@ -177,19 +177,83 @@ export async function POST(req: NextRequest) {
       const queryEmbedding = await generateEmbedding(actualContent)
       let knowledgeResults: Array<{ title: string; content: string }> = []
 
+      // === IN-BOOK SEARCH ===
+      // Detect if the user is asking about a SPECIFIC book (e.g. "in Meditations,
+      // where does Marcus talk about death?"). If so, restrict the search to
+      // chunks from that book only.
+      const inBookMatch = actualContent.match(/\b(?:in|from|about)\s+[""']?([^""'?]{3,60})[""']?(?:,|\s+(?:where|what|how|why|does|is|are|can|who))\b/i)
+      let bookFilter: string | null = null
+      if (inBookMatch) {
+        const bookName = inBookMatch[1].trim().toLowerCase()
+        // Check if this book name matches any Knowledge title prefix
+        const allTitles = await db.knowledge.findMany({
+          where: { userId },
+          select: { title: true },
+          distinct: ['title'],
+        })
+        const matchingTitle = allTitles.find(t =>
+          t.title.toLowerCase().startsWith(bookName) ||
+          t.title.toLowerCase().replace(/\s+—\s+part\s+\d+\/\d+$/, '').includes(bookName)
+        )
+        if (matchingTitle) {
+          const baseTitle = matchingTitle.title.replace(/\s+—\s+Part\s+\d+\/\d+$/, '')
+          bookFilter = baseTitle
+        }
+      }
+
       if (queryEmbedding) {
         // Semantic search — finds by meaning, not just exact keywords.
-        // Fetch TOP 5 chunks normally, but only 3 when green apple is active
-        // (green apple adds prompt chars, so reduce knowledge to prevent Groq 413).
         const vectorStr = embeddingToPgVector(queryEmbedding)
-        knowledgeResults = await db.$queryRaw<Array<{ title: string; content: string }>>`
-          SELECT title, content
-          FROM "Knowledge"
-          WHERE "userId" = ${userId}
-            AND embedding IS NOT NULL
-          ORDER BY embedding <=> ${vectorStr}::vector
-          LIMIT 5
-        `
+
+        // === IN-BOOK FILTERED SEARCH ===
+        if (bookFilter) {
+          // Restrict to chunks from this specific book
+          knowledgeResults = await db.$queryRawUnsafe<Array<{ title: string; content: string }>>(
+            `SELECT title, content FROM "Knowledge" WHERE "userId" = $1 AND embedding IS NOT NULL AND (title = $2 OR title LIKE $3) ORDER BY embedding <=> $4::vector LIMIT 5`,
+            userId, bookFilter, `${bookFilter} — Part%`, vectorStr
+          )
+        } else {
+          // === MULTI-BOOK COMPARISON ===
+          // Detect if the user is asking a comparison question (e.g. "compare Marcus
+          // and Nietzsche", "how do these books differ on suffering").
+          // If so, pull top-2 chunks from EACH distinct book title, not just top-5 overall.
+          // This ensures ARIA gets context from multiple books for comparison.
+          const lowerContent = actualContent.toLowerCase()
+          const isComparison = /\b(vs|versus|compare|comparison|differ|difference|contrast|both|each)\b/i.test(lowerContent)
+
+          if (isComparison) {
+            // Fetch top 8 results (to cover multiple books), then group by base title
+            knowledgeResults = await db.$queryRaw<Array<{ title: string; content: string }>>`
+              SELECT title, content
+              FROM "Knowledge"
+              WHERE "userId" = ${userId}
+                AND embedding IS NOT NULL
+              ORDER BY embedding <=> ${vectorStr}::vector
+              LIMIT 8
+            `
+            // Group by base title (strip " — Part N/M") and take top 2 from each book
+            const bookGroups = new Map<string, Array<{ title: string; content: string }>>()
+            for (const r of knowledgeResults) {
+              const baseTitle = r.title.replace(/\s+—\s+Part\s+\d+\/\d+$/, '')
+              if (!bookGroups.has(baseTitle)) bookGroups.set(baseTitle, [])
+              if (bookGroups.get(baseTitle)!.length < 2) {
+                bookGroups.get(baseTitle)!.push(r)
+              }
+            }
+            // Flatten back — max 6 chunks total (3 books × 2 chunks)
+            knowledgeResults = Array.from(bookGroups.values()).flat().slice(0, 6)
+          } else {
+            // Normal search — top 5 chunks from any book
+            knowledgeResults = await db.$queryRaw<Array<{ title: string; content: string }>>`
+              SELECT title, content
+              FROM "Knowledge"
+              WHERE "userId" = ${userId}
+                AND embedding IS NOT NULL
+              ORDER BY embedding <=> ${vectorStr}::vector
+              LIMIT 5
+            `
+          }
+        }
       }
 
       // Fallback: if no embedding results (key not configured, or knowledge
