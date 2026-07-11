@@ -27,8 +27,8 @@ export async function generateEmbedding(text: string): Promise<number[] | null> 
 
   try {
     // Use Gemini's OpenAI-compatible embeddings endpoint.
-    // Returns the same format as OpenAI (data[0].embedding) but uses
-    // Gemini's free text-embedding-004 model.
+    // Model: gemini-embedding-001 (confirmed available via ListModels API).
+    // text-embedding-004 does NOT exist — that was the wrong model name.
     const response = await fetch('https://generativelanguage.googleapis.com/v1beta/openai/embeddings', {
       method: 'POST',
       headers: {
@@ -36,7 +36,7 @@ export async function generateEmbedding(text: string): Promise<number[] | null> 
         'Authorization': `Bearer ${GEMINI_API_KEY}`,
       },
       body: JSON.stringify({
-        model: 'text-embedding-004',
+        model: 'gemini-embedding-001',
         input: text.slice(0, 8000),
         dimensions: EMBEDDING_DIMENSIONS,
       }),
