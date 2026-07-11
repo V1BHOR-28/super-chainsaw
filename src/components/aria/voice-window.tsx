@@ -65,6 +65,10 @@ export function VoiceWindow() {
   const [state, setState] = useState<VoiceState>('idle')
   const [transcript, setTranscript] = useState('')
   const [language, setLanguage] = useState<'en' | 'hi'>('en')
+  const languageRef = useRef<'en' | 'hi'>('en')
+
+  // Keep languageRef in sync
+  useEffect(() => { languageRef.current = language }, [language])
 
   // Refs
   const recognitionRef = useRef<any>(null)
@@ -88,7 +92,16 @@ export function VoiceWindow() {
       abortControllerRef.current.abort()
     }
 
-    const preferHindi = isHindiText(text) || language === 'hi'
+    // CRITICAL: Stop the microphone completely while ARIA is speaking.
+    // Without this, the STT picks up background noise (fans, traffic) and
+    // ARIA's own TTS audio, causing it to interrupt itself.
+    if (recognitionRef.current) {
+      try { recognitionRef.current.stop() } catch {}
+      recognitionRef.current = null
+    }
+    isListeningRef.current = false
+
+    const preferHindi = isHindiText(text) || languageRef.current === 'hi'
 
     setState('speaking')
 
@@ -163,7 +176,7 @@ export function VoiceWindow() {
     const recognition = new SpeechRecognition()
     recognition.continuous = false
     recognition.interimResults = true
-    recognition.lang = language === 'hi' ? 'hi-IN' : 'en-US'
+    recognition.lang = languageRef.current === 'hi' ? 'hi-IN' : 'en-US'
     recognition.maxAlternatives = 1
 
     recognition.onstart = () => {

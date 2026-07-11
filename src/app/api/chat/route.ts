@@ -606,6 +606,16 @@ No hedging, no disclaimers. Give your raw, unvarnished interpretation. Engage wi
       })
     }
 
+    // === HINDI LANGUAGE REINFORCEMENT ===
+    // If the user's message contains Devanagari (Hindi), append a Hinglish reminder
+    // to the user message itself. The system prompt has the rule at the top, but
+    // the 8B model forgets it after 1 exchange. Appending it to the user message
+    // keeps it fresh in context for EVERY Hindi message.
+    const isHindiMessage = /[\u0900-\u097F]/.test(actualContent)
+    const userContentForLLM = isHindiMessage
+      ? `${actualContent}\n\n[Respond in casual Hinglish only — mix Hindi + English like a friend from Mumbai. NO formal Hindi words.]`
+      : actualContent
+
     // If the last message wasn't the vision-augmented one, ensure the user content is present
     // Use actualContent (without /green apple prefix) for the LLM
     const last = sdkMessages[sdkMessages.length - 1]
@@ -618,14 +628,19 @@ No hedging, no disclaimers. Give your raw, unvarnished interpretation. Engage wi
     if (!lastIsCurrentUser) {
       if (attachments?.length) {
         const parts: Array<{ type: string; text?: string; image_url?: { url: string } }> = [
-          { type: 'text', text: actualContent },
+          { type: 'text', text: userContentForLLM },
         ]
         for (const a of attachments) {
           parts.push({ type: 'image_url', image_url: { url: a.dataUrl } })
         }
         sdkMessages.push({ role: 'user', content: parts })
       } else {
-        sdkMessages.push({ role: 'user', content: actualContent })
+        sdkMessages.push({ role: 'user', content: userContentForLLM })
+      }
+    } else {
+      // Replace the last user message content with the Hindi-reinforced version
+      if (isHindiMessage && last && typeof last.content === 'string') {
+        last.content = userContentForLLM
       }
     }
 
