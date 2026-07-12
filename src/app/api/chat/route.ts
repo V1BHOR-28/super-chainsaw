@@ -325,7 +325,7 @@ export async function POST(req: NextRequest) {
           .join('\n\n')
         // ARIA's CORE IDENTITY: her digital library is her PRIMARY knowledge.
         // She thinks from the book, cites it, and forms opinions from it.
-        knowledgeContext = `YOUR LIBRARY — books the user fed you. This is your PRIMARY knowledge. Connect ideas across all books you've read. If the user mentions an author or concept, you know the context — no need for them to quote. Engage critically, form opinions, cite the source. Trust the library over the internet.\n\n${knowledgeContext}`
+        knowledgeContext = `YOUR LIBRARY — books the user fed you. Use these as your PRIMARY knowledge. Connect ideas across books. If the user mentions an author or concept, you know the context. Form opinions, praise or criticize the author. Don't summarize — interpret. Cite the source. Trust the library over the internet.\n\n${knowledgeContext}`
       }
     } catch (e) {
       // Knowledge search is best-effort — don't fail the chat if it errors
@@ -608,7 +608,7 @@ export async function POST(req: NextRequest) {
           if (!webProviderHit) {
             console.warn('[chat.web_search] DEGRADED: Tavily + Serper both failed/unconfigured. Check TAVILY_API_KEY and SERPER_API_KEY in .env. Only ESPN data available.')
           }
-          toolContext = `WEB SEARCH RESULTS for "${actualContent}" — today is ${dateStr}.${degradationWarning}\n${results.join('\n\n')}\n\nTrust these results over your training for current facts. Cite sources when relevant.`
+          toolContext = `WEB SEARCH RESULTS for "${actualContent}" — today is ${dateStr}.${degradationWarning}\n${results.join('\n\n')}\n\nUse these results for current facts. Cite sources inline as markdown links. Trust search data over your training for time-sensitive info.`
         } else {
           console.warn('[chat.web_search] No results from ANY provider (Tavily/Serper/ESPN all empty or failed). Check API keys in .env.')
           toolContext = `Web search returned no results for "${actualContent}" (today is ${dateStr}). The search providers appear to be unconfigured. Answer from your own knowledge, but explicitly tell the user you could not verify current information online and that web search may be unavailable.`
