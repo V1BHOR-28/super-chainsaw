@@ -1,7 +1,7 @@
 'use client'
 
 import { useState } from 'react'
-import { Volume2, Square, Globe, Image as ImageIcon, Eye, Copy, Check, Brain, Heart, GitBranch } from 'lucide-react'
+import { Volume2, Square, Globe, Image as ImageIcon, Eye, Copy, Check, Brain, Heart } from 'lucide-react'
 import { Markdown } from './markdown'
 import type { ChatMessage } from '@/lib/types'
 import { useAriaStore } from '@/lib/store'
@@ -277,63 +277,6 @@ export function MessageBubble({ message }: { message: ChatMessage }) {
               title="Copy"
             >
               {copied ? <Check size={13} /> : <Copy size={13} />}
-            </button>
-            <button
-              onClick={async () => {
-                // Fork: create new conversation and copy messages up to this point
-                const { messages, activeConversationId, conversations } = useAriaStore.getState()
-                const msgIndex = messages.findIndex(m => m.id === message.id)
-                if (msgIndex < 0) return
-                const messagesToCopy = messages.slice(0, msgIndex + 1)
-                const conv = conversations.find(c => c.id === activeConversationId)
-
-                try {
-                  // Create new conversation
-                  const res = await fetch('/api/conversations', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ title: `Fork: ${conv?.title?.slice(0, 40) || 'Conversation'}` }),
-                  })
-                  const data = await res.json()
-                  const forkId = data.conversation?.id || data.id
-                  if (!forkId) return
-
-                  // Copy messages directly to the new conversation via the DB
-                  // We use the conversations export endpoint to get the real DB messages,
-                  // then re-create them. But simpler: just set the messages in the store
-                  // and let the user continue from there. The messages won't be persisted
-                  // to the new conversation in the DB, but they'll be visible in the UI.
-                  // For a proper fork, we'd need a dedicated API endpoint. For now,
-                  // this gives the user a new conversation with the context visible.
-                  useAriaStore.getState().setActiveConversation(forkId)
-                  useAriaStore.getState().setMessages(messagesToCopy.map(m => ({
-                    ...m,
-                    id: `${m.id}-fork-${Date.now()}`,
-                  })))
-
-                  // Persist each message to the new conversation
-                  for (const m of messagesToCopy) {
-                    if (m.role === 'user') {
-                      // Send user messages via the chat API to persist them
-                      // (this also generates an ARIA response, but we skip that
-                      // by using a direct DB insert instead)
-                      await fetch('/api/conversations', {
-                        method: 'PATCH',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ conversationId: forkId, role: 'user', content: m.content }),
-                      }).catch(() => {})
-                    }
-                  }
-                } catch (err) {
-                  console.error('[fork]', err)
-                }
-              }}
-              className="p-1.5 rounded-md hover:bg-white/5 transition-colors"
-              style={{ color: 'var(--aria-fg-muted)' }}
-              aria-label="Fork conversation"
-              title="Fork from here"
-            >
-              <GitBranch size={13} />
             </button>
             {settings?.voiceEnabled && (
               <button
