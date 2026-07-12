@@ -43,8 +43,11 @@
   em { font-style: italic; }
   .mono { font-family: 'JetBrains Mono', monospace; }
 
-  /* Film grain overlay */
-  body::before {
+  /* Film grain overlay — disabled for 60fps scrolling.
+     The feTurbulence noise + mix-blend-mode:overlay forces full-screen
+     recomposite on every scroll frame, killing performance.
+     Kept as comment for reference. */
+  /* body::before {
     content: '';
     position: fixed;
     inset: 0;
@@ -53,7 +56,7 @@
     pointer-events: none;
     z-index: 100;
     mix-blend-mode: overlay;
-  }
+  } */
 
   /* Navigation */
   nav.top-nav {
@@ -62,8 +65,11 @@
     z-index: 50;
     padding: 20px 32px;
     backdrop-filter: blur(20px);
+    -webkit-backdrop-filter: blur(20px);
     background: rgba(12, 10, 8, 0.7);
     border-bottom: 1px solid var(--border);
+    transform: translateZ(0);
+    will-change: transform;
   }
 
   .nav-link {
@@ -757,7 +763,7 @@
 </nav>
 
 <!-- HERO -->
-<section class="relative min-h-screen flex items-center px-8 pt-32 pb-24 overflow-hidden">
+<section style="contain: layout style paint;" class="relative min-h-screen flex items-center px-8 pt-32 pb-24 overflow-hidden">
   <div class="ambient-glow w-[700px] h-[700px] bg-[#f59e0b] -top-40 -right-40 opacity-25"></div>
   <div class="ambient-glow w-[500px] h-[500px] bg-[#92400e] bottom-0 -left-32 opacity-15"></div>
 
@@ -848,7 +854,7 @@
 <div class="divider"></div>
 
 <!-- SECTION 2: She's already listening -->
-<section id="preview" class="relative px-8 py-32 overflow-hidden">
+<section id="preview" style="contain: layout style paint;" class="relative px-8 py-32 overflow-hidden">
   <div class="ambient-glow w-[600px] h-[600px] bg-[#f59e0b] top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 opacity-10"></div>
 
   <div class="max-w-5xl mx-auto text-center relative z-10">
@@ -908,7 +914,7 @@
 <div class="divider"></div>
 
 <!-- TERMINAL SECTION -->
-<section id="terminal-section" class="relative px-8 py-32 border-y border-[var(--border)] overflow-hidden">
+<section id="terminal-section" style="contain: layout style paint;" class="relative px-8 py-32 border-y border-[var(--border)] overflow-hidden">
   <div class="ambient-glow w-[700px] h-[700px] bg-[#f59e0b] top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 opacity-12"></div>
 
   <div class="max-w-4xl mx-auto relative z-10">
@@ -973,7 +979,7 @@
 </section>
 
 <!-- FEATURES -->
-<section id="features" class="relative px-8 py-32">
+<section id="features" style="contain: layout style paint;" class="relative px-8 py-32">
   <div class="max-w-7xl mx-auto">
     <div class="mb-20 fade-up max-w-3xl">
       <div class="text-xs text-[var(--accent-glow)] tracking-[0.2em] uppercase mb-5">Capabilities</div>
@@ -1050,7 +1056,7 @@
 </section>
 
 <!-- ABOUT -->
-<section id="about" class="relative px-8 py-32">
+<section id="about" style="contain: layout style paint;" class="relative px-8 py-32">
   <div class="max-w-4xl mx-auto">
     <div class="text-xs text-[var(--accent-glow)] tracking-[0.2em] uppercase mb-6 fade-up">About ARIA</div>
     <h2 class="serif text-5xl md:text-7xl leading-[0.95] mb-12 fade-up max-w-3xl">
