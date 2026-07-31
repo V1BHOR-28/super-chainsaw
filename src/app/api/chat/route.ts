@@ -150,14 +150,14 @@ export async function POST(req: NextRequest) {
       db.mood.findFirst({ where: { userId }, orderBy: { createdAt: 'desc' } }),
       db.message.findMany({
         where: { conversationId },
-        orderBy: { createdAt: 'asc' },
-        // Only send the last 4 messages (2 exchanges) to keep the payload small.
-        // Long conversations (e.g. medical case discussions) bloat the payload
-        // and cause Groq 413 errors. 4 messages = enough context for follow-ups
-        // without exceeding the model's request size limit.
+        orderBy: { createdAt: 'desc' },
         take: 4,
       }),
     ])
+
+    // Fetch returns newest-first (desc). Reverse to chronological (oldest-to-newest)
+    // so downstream consumers (sdkMessages builder) get the expected order.
+    recentMessages.reverse()
 
     // Semantic memory search: find memories most relevant to what the user just said
     // Falls back to most-recent if embeddings aren't available

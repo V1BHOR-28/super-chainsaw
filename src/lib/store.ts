@@ -86,10 +86,12 @@ type AriaState = {
   isStreaming: boolean
   setStreaming: (v: boolean) => void
 
-  // Pending memory candidate from auto-detection (shown as an ask card below
-  // the latest ARIA reply). Only one at a time — high confidence auto-saves
-  // silently; medium confidence surfaces here for the user to decide.
+  // Pending memory candidates from auto-detection (shown as ask cards).
+  // Queue (not single) so a second candidate arriving while one is pending
+  // doesn't get silently dropped. High confidence auto-saves silently;
+  // medium confidence surfaces here for the user to decide.
   pendingMemoryCandidate: MemoryCandidate | null
+  pendingMemoryQueue: MemoryCandidate[]
   setPendingMemoryCandidate: (c: MemoryCandidate | null) => void
 
   // Auth (real multi-user authentication)
@@ -220,7 +222,25 @@ export const useAriaStore = create<AriaState>((set) => ({
   setStreaming: (v) => set({ isStreaming: v }),
 
   pendingMemoryCandidate: null,
-  setPendingMemoryCandidate: (c) => set({ pendingMemoryCandidate: c }),
+  pendingMemoryQueue: [],
+  setPendingMemoryCandidate: (c) => {
+    if (c === null) {
+      // Resolved — pop the next from the queue
+      set((state) => {
+        const queue = [...state.pendingMemoryQueue]
+        const next = queue.shift() ?? null
+        return { pendingMemoryCandidate: next, pendingMemoryQueue: queue }
+      })
+    } else {
+      // New candidate — if one is already showing, queue it
+      set((state) => {
+        if (state.pendingMemoryCandidate) {
+          return { pendingMemoryQueue: [...state.pendingMemoryQueue, c] }
+        }
+        return { pendingMemoryCandidate: c }
+      })
+    }
+  },
 
   authState: 'loading',
   setAuthState: (s) => set({ authState: s }),

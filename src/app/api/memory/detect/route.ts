@@ -24,7 +24,7 @@ export async function POST(req: NextRequest) {
     }
 
     // Skip detection for tiny messages
-    if (userMessage.length < 30) {
+    if (userMessage.length < 12) {
       return NextResponse.json({ candidates: [] })
     }
 
@@ -98,7 +98,6 @@ Respond with ONLY JSON: {"candidates":[{"text":"...","category":"personal|prefer
 
     const candidates = (parsed.candidates || [])
       .filter((c) => c.text && c.text.length > 3 && c.text.length < 300 && ['high', 'medium'].includes(c.confidence))
-      .map((c) => (c.category === 'personal' && c.confidence === 'high' ? { ...c, confidence: 'medium' } : c))
       .slice(0, 2)
 
     return NextResponse.json({ candidates })

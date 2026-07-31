@@ -53,11 +53,8 @@ async function detectMemory(userMessage: string, ariaReply: string) {
         /* silent */
       }
     } else if (c.confidence === 'medium') {
-      // Only show one ask card at a time — if one's already pending, skip.
-      if (!state.pendingMemoryCandidate) {
-        state.setPendingMemoryCandidate(c)
-      }
-      // Note: the decision is logged when the user resolves the card.
+      // Queue the candidate — the store handles showing one at a time.
+      state.setPendingMemoryCandidate(c)
       break
     }
   }
