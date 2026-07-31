@@ -233,6 +233,34 @@ async function checkDetectionFallsBackToDeterministicOnFailure() {
   results.push({ name: 'deterministic-fallback-on-llm-failure', pass: pass && occurrences >= 2, detail: `Found ${occurrences} call(s) — expect at least 2 (normal merge path + failure path).` })
 }
 
+// ─── DETECTION QUALITY CHECKS ─────────────────────────────────────────────
+// These verify the 4 detection-quality fixes (larger model, Gemini tier,
+// specificity rule, widened patterns) landed on main.
+
+async function checkLargerGroqModelForDetection() {
+  const src = await fetch('https://raw.githubusercontent.com/V1BHOR-28/super-chainsaw/main/src/app/api/memory/detect/route.ts').then(r => r.text()).catch(() => '')
+  const pass = /llama-3\.3-70b-versatile/.test(src)
+  results.push({ name: 'larger-model-for-detection', pass, detail: pass ? '70B model used for detection.' : 'Still using the small 8B model.' })
+}
+
+async function checkGeminiFallbackForDetection() {
+  const src = await fetch('https://raw.githubusercontent.com/V1BHOR-28/super-chainsaw/main/src/app/api/memory/detect/route.ts').then(r => r.text()).catch(() => '')
+  const pass = /callGeminiForExtraction/.test(src)
+  results.push({ name: 'gemini-fallback-for-detection', pass, detail: pass ? 'Gemini fallback tier found.' : 'No second-provider fallback before deterministic patterns.' })
+}
+
+async function checkSpecificityRuleInPrompt() {
+  const src = await fetch('https://raw.githubusercontent.com/V1BHOR-28/super-chainsaw/main/src/app/api/memory/detect/route.ts').then(r => r.text()).catch(() => '')
+  const pass = /NEVER generalize/.test(src)
+  results.push({ name: 'specificity-rule-present', pass, detail: pass ? 'Specificity rule found in prompt.' : 'Prompt still allows vague generalization.' })
+}
+
+async function checkPatternListWidened() {
+  const src = await fetch('https://raw.githubusercontent.com/V1BHOR-28/super-chainsaw/main/src/app/api/memory/detect/route.ts').then(r => r.text()).catch(() => '')
+  const count = (src.match(/regex:\s*\//g) || []).length
+  results.push({ name: 'pattern-list-widened', pass: count >= 8, detail: `Found ${count} patterns, expected >= 8.` })
+}
+
 async function main() {
   await checkConversationOrdering()
   await checkPersonalConfidenceNotDowngraded()
@@ -267,6 +295,11 @@ async function main() {
   // Detect off OpenRouter
   await checkDetectionUsesLlmFallback()
   await checkDetectionFallsBackToDeterministicOnFailure()
+  // Detection quality
+  await checkLargerGroqModelForDetection()
+  await checkGeminiFallbackForDetection()
+  await checkSpecificityRuleInPrompt()
+  await checkPatternListWidened()
 
   console.table(results.map((r) => ({ Check: r.name, Result: r.pass ? 'PASS' : 'FAIL', Detail: r.detail })))
   const anyFail = results.some((r) => !r.pass)

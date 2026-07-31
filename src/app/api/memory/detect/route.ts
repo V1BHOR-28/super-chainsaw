@@ -2,25 +2,23 @@ import { NextRequest, NextResponse } from 'next/server'
 export const runtime = "nodejs"
 import { db } from '@/lib/db'
 import { getAuthenticatedUserId } from '@/lib/user'
-import { generateWithFallback } from '@/lib/llm-fallback'
+import { generateWithFallback, callGeminiForExtraction } from '@/lib/llm-fallback'
 
 /**
  * POST /api/memory/detect
  * Body: { userMessage: string, ariaReply: string }
  *
- * Uses the shared free LLM helper (src/lib/llm-fallback.ts — Groq +
- * Pollinations, both free) to extract memory candidates. Does NOT depend
- * on OpenRouter credits.
+ * Uses free LLM providers (no OpenRouter credits) to extract memory candidates.
  *
  * Detection pipeline (in order):
  *   1. Deterministic pattern-match fallback (extractObviousCandidates) —
- *      catches "my favorite X is Y", "I work at X", etc. WITHOUT depending
- *      on an LLM call succeeding. These are the most common, clearest cases.
- *   2. Free LLM call via generateWithFallback (Groq 8B primary, Pollinations
- *      keyless backstop) — handles nuanced phrasings the patterns can't catch.
- *   3. Regex fallback parse of the LLM response (safety net — the free
- *      providers don't support response_format: json_object, so we still
- *      regex-extract {...} out of free-form text).
+ *      catches common preference phrasings WITHOUT depending on any LLM call.
+ *   2. Groq 70B (llama-3.3-70b-versatile) via generateWithFallback — larger
+ *      model, more precise named-entity extraction than the 8B default.
+ *   3. Gemini 2.0 Flash via callGeminiForExtraction — enforced JSON output
+ *      (responseMimeType: application/json), distinct second opinion.
+ *   4. Regex fallback parse of whichever LLM responded (safety net for Groq,
+ *      which doesn't enforce JSON).
  *
  * Every exit point logs a distinguishable line so failures aren't silent.
  * The deterministic floor (extractObviousCandidates) is returned on every
@@ -32,6 +30,11 @@ const OBVIOUS_PATTERNS: Array<{ regex: RegExp; category: string }> = [
   { regex: /\bi work at ([^.!?]{2,60})/i, category: 'personal' },
   { regex: /\bi live in ([^.!?]{2,60})/i, category: 'personal' },
   { regex: /\bmy name is ([^.!?]{2,60})/i, category: 'personal' },
+  // Preference phrasings — near-unambiguous, low false-positive risk
+  { regex: /\b(?:always had|always have) a soft spot for ([^.!?]{2,60})/i, category: 'preference' },
+  { regex: /\bi'?m a (?:big|huge|massive) fan of ([^.!?]{2,60})/i, category: 'preference' },
+  { regex: /\bi'?m (?:really |quite |very )?into ([^.!?]{2,60})/i, category: 'preference' },
+  { regex: /\bi (?:really |absolutely )?love ([^.!?]{2,60})/i, category: 'preference' },
 ]
 
 export function extractObviousCandidates(userMessage: string): Array<{ text: string; category: string; confidence: string }> {
@@ -105,26 +108,43 @@ RULES:
 - SKIP: transient states, temporary emotions, small talk
 - "high" = clear fact (auto-save), "medium" = borderline (ask user)
 - NEVER propose duplicates
+- CRITICAL: if the user names a specific movie, book, artist, band, place, or person, your candidate text MUST include that exact name. NEVER generalize it into a category or theme.
+  BAD: "sci-fi interests" — GOOD: "Likes the movie Blade Runner"
+  BAD: "appreciation for atmospheric storytelling" — GOOD: "Enjoys atmospheric, slow-paced films like Blade Runner"
+  If the user's statement doesn't actually name anything specific, it's fine to generalize — only avoid generalizing when a specific name was given and got lost.
 
 Respond with ONLY JSON: {"candidates":[{"text":"...","category":"personal|preference|goal|fact|general","confidence":"high|medium"}]}`
 
     let raw = ''
     try {
-      raw = await generateWithFallback(prompt) ?? ''
-      if (!raw) {
-        // generateWithFallback already logged the per-provider failure reasons
-        // inside llm-fallback.ts. Log the detect-route context here too, and
-        // return the obvious candidates as the deterministic floor.
-        console.error(`[memory.detect] llm-fallback returned empty for message: "${userMessage.slice(0, 80)}"`)
-        if (obviousCandidates.length > 0) {
-          console.log(`[memory.detect] Returning ${obviousCandidates.length} obvious candidate(s) despite LLM failure.`)
-        }
-        return NextResponse.json({ candidates: obviousCandidates.slice(0, 2) })
-      }
+      // Tier 1: Groq 70B (larger model for precise named-entity extraction).
+      // generateWithFallback runs Groq + Pollinations in parallel; passing
+      // the 70B model only affects the Groq leg, not Pollinations.
+      raw = await generateWithFallback(prompt, { model: 'llama-3.3-70b-versatile' }) ?? ''
     } catch (e) {
-      console.error(`[memory.detect] llm-fallback threw: ${e instanceof Error ? e.message : String(e)}`)
-      // Deterministic floor — the obvious patterns don't depend on any LLM call.
-      return NextResponse.json({ candidates: extractObviousCandidates(userMessage).slice(0, 2) })
+      console.error(`[memory.detect] generateWithFallback threw: ${e instanceof Error ? e.message : String(e)}`)
+    }
+
+    // Tier 2: Gemini 2.0 Flash with enforced JSON output — distinct second
+    // opinion, NOT bundled into generateWithFallback's Promise.any. Only
+    // runs if Groq + Pollinations both failed (raw is empty).
+    if (!raw) {
+      console.log(`[memory.detect] Groq tier empty — trying Gemini extraction tier.`)
+      try {
+        raw = await callGeminiForExtraction(prompt) ?? ''
+      } catch (e) {
+        console.error(`[memory.detect] callGeminiForExtraction threw: ${e instanceof Error ? e.message : String(e)}`)
+      }
+    }
+
+    if (!raw) {
+      // Both Groq and Gemini failed — llm-fallback.ts already logged the
+      // per-provider reasons. Return the deterministic floor.
+      console.error(`[memory.detect] Both Groq and Gemini extraction failed — using deterministic patterns only. Message: "${userMessage.slice(0, 80)}"`)
+      if (obviousCandidates.length > 0) {
+        console.log(`[memory.detect] Returning ${obviousCandidates.length} obvious candidate(s) despite LLM failure.`)
+      }
+      return NextResponse.json({ candidates: obviousCandidates.slice(0, 2) })
     }
 
     let parsed: { candidates?: Array<{ text: string; category: string; confidence: string }> } = { candidates: [] }
