@@ -196,6 +196,27 @@ async function checkSummarizationDoesntBlockResponse() {
   results.push({ name: 'summary-update-non-blocking', pass, detail: pass ? 'Fire-and-forget, not awaited.' : 'Either missing .catch() or being awaited — check it is not blocking the response.' })
 }
 
+// ─── MEMORY DETECTION HARDENING CHECKS ────────────────────────────────────
+// These verify the memory-detection hardening landed on main.
+
+async function checkStructuredOutputRequested() {
+  const src = await fetch('https://raw.githubusercontent.com/V1BHOR-28/super-chainsaw/main/src/app/api/memory/detect/route.ts').then(r => r.text()).catch(() => '')
+  const pass = /response_format/.test(src)
+  results.push({ name: 'structured-json-output-requested', pass, detail: pass ? 'response_format found.' : 'Still relying purely on regex extraction.' })
+}
+
+async function checkDetectionLoggingPresent() {
+  const src = await fetch('https://raw.githubusercontent.com/V1BHOR-28/super-chainsaw/main/src/app/api/memory/detect/route.ts').then(r => r.text()).catch(() => '')
+  const pass = /console\.(error|warn)\(`\[memory\.detect\]/.test(src)
+  results.push({ name: 'detection-failure-logging', pass, detail: pass ? 'Distinguishable log lines found.' : 'Failures still silent.' })
+}
+
+async function checkDeterministicFallbackPresent() {
+  const src = await fetch('https://raw.githubusercontent.com/V1BHOR-28/super-chainsaw/main/src/app/api/memory/detect/route.ts').then(r => r.text()).catch(() => '')
+  const pass = /extractObviousCandidates/.test(src)
+  results.push({ name: 'deterministic-fallback-present', pass, detail: pass ? 'Pattern-match fallback found.' : 'Detection still 100% dependent on one LLM call.' })
+}
+
 async function main() {
   await checkConversationOrdering()
   await checkPersonalConfidenceNotDowngraded()
@@ -224,6 +245,10 @@ async function main() {
   await checkSummaryUpdateWired()
   await checkSummaryInjectedIntoPrompt()
   await checkSummarizationDoesntBlockResponse()
+  // Memory detection hardening
+  await checkStructuredOutputRequested()
+  await checkDetectionLoggingPresent()
+  await checkDeterministicFallbackPresent()
 
   console.table(results.map((r) => ({ Check: r.name, Result: r.pass ? 'PASS' : 'FAIL', Detail: r.detail })))
   const anyFail = results.some((r) => !r.pass)

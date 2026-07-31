@@ -20,10 +20,18 @@ async function detectMemory(userMessage: string, ariaReply: string) {
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ userMessage, ariaReply }),
     })
-    if (!res.ok) return
+    if (!res.ok) {
+      if (process.env.NODE_ENV === 'development') {
+        console.warn('[detectMemory] /api/memory/detect returned', res.status)
+      }
+      return
+    }
     const data = await res.json()
     candidates = (data.candidates || []) as MemoryCandidate[]
-  } catch {
+  } catch (e) {
+    if (process.env.NODE_ENV === 'development') {
+      console.warn('[detectMemory] fetch failed:', e)
+    }
     return
   }
   if (candidates.length === 0) return
