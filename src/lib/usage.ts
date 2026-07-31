@@ -103,7 +103,7 @@ export async function getTodayUsage(): Promise<{
   return {
     tokensUsed: row?.tokensUsed ?? 0,
     requestCount: row?.requestCount ?? 0,
-    dailyLimit: isAdmin ? Number.MAX_SAFE_INTEGER : getDailyLimit(user?.tier ?? 'Partner'),
+    dailyLimit: isAdmin ? Number.MAX_SAFE_INTEGER : getDailyLimit(user?.tier ?? 'Free'),
     resetsAt: nextMidnightUTC().toISOString(),
     isAdmin,
   }
