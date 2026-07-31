@@ -24,6 +24,15 @@ jobs:
       - name: Generate Prisma client
         run: bunx prisma generate
 
+      - name: Backfill missing memory embeddings
+        # Idempotent: finds Memory rows with NULL embeddings (created while the
+        # Gemini model-name bug was active) and generates them now. No-op when
+        # zero rows need backfilling. Must run BEFORE verify so check 6 passes.
+        env:
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: bun run backfill:memory
+
       - name: Run verification script
         env:
           # These come from GitHub → Settings → Secrets → Actions
