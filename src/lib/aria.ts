@@ -22,8 +22,9 @@ export function buildAriaSystemPrompt(opts: {
   memories?: { content: string; category: string }[]
   recentMood?: { mood: string; note?: string | null; createdAt: Date } | null
   toolContext?: string
+  conversationSummary?: string | null
 }): string {
-  const { tone, responseLength, userName, persona, age, occupation, memories, recentMood, toolContext } = opts
+  const { tone, responseLength, userName, persona, age, occupation, memories, recentMood, toolContext, conversationSummary } = opts
   const firstName = (userName || 'friend').split(' ')[0]
 
   const lengthInstruction =
@@ -42,6 +43,10 @@ export function buildAriaSystemPrompt(opts: {
 
   const moodBlock = recentMood
     ? `\n\nMOOD: "${recentMood.mood}"${recentMood.note ? ` — "${recentMood.note}"` : ''}. Let this color your tone subtly.`
+    : ''
+
+  const summaryBlock = conversationSummary
+    ? `\n\nEARLIER IN THIS CONVERSATION (summarized so you don't lose the thread):\n${conversationSummary}`
     : ''
 
   const toolBlock = toolContext ? `\n\n---\n\n${toolContext}` : ''
@@ -72,5 +77,5 @@ You have three capabilities, and you blend them naturally depending on what the 
 
 Tone: ${toneInstruction} Depth: ${lengthInstruction}
 Today: ${todayStr}
-User: ${firstName}${persona ? ` (${persona}${age ? `, ${age}` : ''}${occupation ? `, ${occupation}` : ''})` : ''}${memoryBlock}${moodBlock}${toolBlock}`
+User: ${firstName}${persona ? ` (${persona}${age ? `, ${age}` : ''}${occupation ? `, ${occupation}` : ''})` : ''}${memoryBlock}${moodBlock}${summaryBlock}${toolBlock}`
 }

@@ -160,6 +160,42 @@ async function checkSourceColumnExists() {
   results.push({ name: 'memory-source-column-exists', pass: rows.length > 0, detail: rows.length > 0 ? 'Column present.' : 'source column missing from Memory table.' })
 }
 
+// ─── ROLLING CONVERSATION SUMMARY CHECKS ──────────────────────────────────
+// These verify the rolling-summary feature landed on main.
+
+async function checkConversationSummaryColumnExists() {
+  const rows = await db.$queryRaw<Array<{ column_name: string }>>`
+    SELECT column_name FROM information_schema.columns
+    WHERE table_name = 'Conversation' AND column_name = 'summary'
+  `
+  results.push({ name: 'conversation-summary-column-exists', pass: rows.length > 0, detail: rows.length > 0 ? 'Column present.' : 'summary column missing from Conversation table.' })
+}
+
+async function checkRecentMessagesWidened() {
+  const src = await fetch('https://raw.githubusercontent.com/V1BHOR-28/super-chainsaw/main/src/app/api/chat/route.ts').then(r => r.text()).catch(() => '')
+  const match = src.match(/orderBy:\s*\{\s*createdAt:\s*'desc'\s*\},\s*take:\s*(\d+),/)
+  const take = match ? parseInt(match[1], 10) : null
+  results.push({ name: 'recent-messages-widened', pass: take !== null && take >= 8, detail: `take is ${take}, expected >= 8` })
+}
+
+async function checkSummaryUpdateWired() {
+  const src = await fetch('https://raw.githubusercontent.com/V1BHOR-28/super-chainsaw/main/src/app/api/chat/route.ts').then(r => r.text()).catch(() => '')
+  const pass = /updateConversationSummary/.test(src)
+  results.push({ name: 'summary-update-wired', pass, detail: pass ? 'updateConversationSummary called.' : 'Not called anywhere in chat/route.ts.' })
+}
+
+async function checkSummaryInjectedIntoPrompt() {
+  const src = await fetch('https://raw.githubusercontent.com/V1BHOR-28/super-chainsaw/main/src/lib/aria.ts').then(r => r.text()).catch(() => '')
+  const pass = /conversationSummary/.test(src)
+  results.push({ name: 'summary-injected-into-prompt', pass, detail: pass ? 'conversationSummary param found in buildAriaSystemPrompt.' : 'Not wired into the system prompt.' })
+}
+
+async function checkSummarizationDoesntBlockResponse() {
+  const src = await fetch('https://raw.githubusercontent.com/V1BHOR-28/super-chainsaw/main/src/app/api/chat/route.ts').then(r => r.text()).catch(() => '')
+  const pass = /updateConversationSummary\([^)]*\)\.catch/.test(src) && !/await\s+updateConversationSummary/.test(src)
+  results.push({ name: 'summary-update-non-blocking', pass, detail: pass ? 'Fire-and-forget, not awaited.' : 'Either missing .catch() or being awaited — check it is not blocking the response.' })
+}
+
 async function main() {
   await checkConversationOrdering()
   await checkPersonalConfidenceNotDowngraded()
@@ -182,6 +218,12 @@ async function main() {
   await checkEditInPlace()
   await checkPatchRegeneratesEmbedding()
   await checkSourceColumnExists()
+  // Rolling conversation summary
+  await checkConversationSummaryColumnExists()
+  await checkRecentMessagesWidened()
+  await checkSummaryUpdateWired()
+  await checkSummaryInjectedIntoPrompt()
+  await checkSummarizationDoesntBlockResponse()
 
   console.table(results.map((r) => ({ Check: r.name, Result: r.pass ? 'PASS' : 'FAIL', Detail: r.detail })))
   const anyFail = results.some((r) => !r.pass)

@@ -3,6 +3,7 @@ export const runtime = "nodejs"
 import { db } from '@/lib/db'
 import { getAuthenticatedUserId } from '@/lib/user'
 import { buildAriaSystemPrompt } from '@/lib/aria'
+import { updateConversationSummary } from '@/lib/conversation-summary'
 import { recordUsage, estimateTokens, hasHitDailyLimit } from '@/lib/usage'
 
 /** Hard cap on user message length — protects against abuse / accidental huge pastes. */
@@ -144,15 +145,16 @@ export async function POST(req: NextRequest) {
     // Touch conversation for sort order
     await db.conversation.update({ where: { id: conversationId }, data: { updatedAt: new Date() } })
 
-    // Load settings, recent mood, recent messages — use semantic memory search
-    const [settings, recentMood, recentMessages] = await Promise.all([
+    // Load settings, recent mood, recent messages, conversation summary — use semantic memory search
+    const [settings, recentMood, recentMessages, conversationSummary] = await Promise.all([
       db.userSettings.findUnique({ where: { userId } }),
       db.mood.findFirst({ where: { userId }, orderBy: { createdAt: 'desc' } }),
       db.message.findMany({
         where: { conversationId },
         orderBy: { createdAt: 'desc' },
-        take: 4,
+        take: 8, // last 4 exchanges verbatim; older context now comes from the rolling summary
       }),
+      db.conversation.findUnique({ where: { id: conversationId }, select: { summary: true } }),
     ])
 
     // Fetch returns newest-first (desc). Reverse to chronological (oldest-to-newest)
@@ -652,6 +654,7 @@ export async function POST(req: NextRequest) {
         ? { mood: recentMood.mood, note: recentMood.note, createdAt: recentMood.createdAt }
         : null,
       toolContext: fullToolContext || undefined,
+      conversationSummary: conversationSummary?.summary ?? null,
     })
 
     // === GREEN APPLE MODE ===
@@ -1098,6 +1101,14 @@ No hedging, no disclaimers. Give your raw, unvarnished interpretation. Engage wi
           } catch (e) {
             console.error('[chat.usage]', e)
           }
+
+          // === ROLLING CONVERSATION SUMMARY ===
+          // Fire-and-forget: folds older messages into a bounded summary so ARIA
+          // carries long-range context without ballooning token cost every turn.
+          // Must NOT be awaited — it runs in the background after the response.
+          updateConversationSummary(conversationId).catch((err) => {
+            console.error('[conversation-summary] background update failed:', err)
+          })
 
           send({
             type: 'done',
