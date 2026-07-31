@@ -139,12 +139,14 @@ Respond with ONLY JSON: {"candidates":[{"text":"...","category":"personal|prefer
 
     if (!raw) {
       // Both Groq and Gemini failed — llm-fallback.ts already logged the
-      // per-provider reasons. Return the deterministic floor.
+      // per-provider reasons. Return the deterministic floor (re-derived
+      // fresh so it doesn't depend on any earlier variable state).
       console.error(`[memory.detect] Both Groq and Gemini extraction failed — using deterministic patterns only. Message: "${userMessage.slice(0, 80)}"`)
-      if (obviousCandidates.length > 0) {
-        console.log(`[memory.detect] Returning ${obviousCandidates.length} obvious candidate(s) despite LLM failure.`)
+      const floorCandidates = extractObviousCandidates(userMessage)
+      if (floorCandidates.length > 0) {
+        console.log(`[memory.detect] Returning ${floorCandidates.length} obvious candidate(s) despite LLM failure.`)
       }
-      return NextResponse.json({ candidates: obviousCandidates.slice(0, 2) })
+      return NextResponse.json({ candidates: floorCandidates.slice(0, 2) })
     }
 
     let parsed: { candidates?: Array<{ text: string; category: string; confidence: string }> } = { candidates: [] }
