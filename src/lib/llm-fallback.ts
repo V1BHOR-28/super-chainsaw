@@ -76,11 +76,25 @@ export async function generateWithFallback(prompt: string): Promise<string | nul
   // Pollinations is the keyless backstop — always available, no key needed.
   providers.push(callPollinations)
 
-  if (providers.length === 0) return null
+  if (providers.length === 0) {
+    console.error('[llm-fallback] No providers available (GROQ_API_KEY unset and Pollinations unreachable)')
+    return null
+  }
 
   try {
     return await Promise.any(providers.map((fn) => fn()))
-  } catch {
+  } catch (err) {
+    // All providers failed — log which providers were tried + the aggregate error
+    // so every caller (conversation-summary, memory-detect, etc.) gets the same
+    // visibility without each having to re-log. AggregateError (Node 15+) carries
+    // the per-provider rejection reasons on .errors.
+    const tried = providers.length === 1
+      ? 'Pollinations only'
+      : 'Groq + Pollinations'
+    const reasons = err instanceof AggregateError
+      ? err.errors.map((e, i) => `[${i}] ${e instanceof Error ? e.message : String(e)}`).join(' | ')
+      : (err instanceof Error ? err.message : String(err))
+    console.error(`[llm-fallback] All providers failed (${tried}) — ${reasons}`)
     return null
   }
 }

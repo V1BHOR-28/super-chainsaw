@@ -2,23 +2,29 @@ import { NextRequest, NextResponse } from 'next/server'
 export const runtime = "nodejs"
 import { db } from '@/lib/db'
 import { getAuthenticatedUserId } from '@/lib/user'
+import { generateWithFallback } from '@/lib/llm-fallback'
 
 /**
  * POST /api/memory/detect
  * Body: { userMessage: string, ariaReply: string }
  *
- * Uses OpenRouter API (same key as chat) to extract memory candidates.
+ * Uses the shared free LLM helper (src/lib/llm-fallback.ts — Groq +
+ * Pollinations, both free) to extract memory candidates. Does NOT depend
+ * on OpenRouter credits.
  *
  * Detection pipeline (in order):
  *   1. Deterministic pattern-match fallback (extractObviousCandidates) —
  *      catches "my favorite X is Y", "I work at X", etc. WITHOUT depending
  *      on an LLM call succeeding. These are the most common, clearest cases.
- *   2. OpenRouter LLM call with response_format: json_object (structured
- *      output) — handles nuanced phrasings the patterns can't catch.
- *   3. Regex fallback parse of the LLM response (safety net for models
- *      that ignore response_format).
+ *   2. Free LLM call via generateWithFallback (Groq 8B primary, Pollinations
+ *      keyless backstop) — handles nuanced phrasings the patterns can't catch.
+ *   3. Regex fallback parse of the LLM response (safety net — the free
+ *      providers don't support response_format: json_object, so we still
+ *      regex-extract {...} out of free-form text).
  *
  * Every exit point logs a distinguishable line so failures aren't silent.
+ * The deterministic floor (extractObviousCandidates) is returned on every
+ * LLM failure path, so a fully-down LLM still catches the obvious phrasings.
  */
 
 const OBVIOUS_PATTERNS: Array<{ regex: RegExp; category: string }> = [
@@ -102,34 +108,24 @@ RULES:
 
 Respond with ONLY JSON: {"candidates":[{"text":"...","category":"personal|preference|goal|fact|general","confidence":"high|medium"}]}`
 
-    const apiResponse = await fetch('https://openrouter.ai/api/v1/chat/completions', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'Authorization': `Bearer ${process.env.OPENROUTER_API_KEY}`,
-        'HTTP-Referer': 'https://ariav2-seven.vercel.app',
-        'X-Title': 'ARIA',
-      },
-      body: JSON.stringify({
-        model: 'deepseek/deepseek-chat',
-        messages: [{ role: 'user', content: prompt }],
-        response_format: { type: 'json_object' },
-      }),
-    })
-
-    if (!apiResponse.ok) {
-      const errBody = await apiResponse.text().catch(() => '')
-      console.error(`[memory.detect] OpenRouter API error: ${apiResponse.status} ${errBody.slice(0, 200)}`)
-      // Even if the LLM call failed, return the obvious candidates — they
-      // don't depend on the API. This is the whole point of the fallback.
-      if (obviousCandidates.length > 0) {
-        console.log(`[memory.detect] Returning ${obviousCandidates.length} obvious candidate(s) despite API failure.`)
+    let raw = ''
+    try {
+      raw = await generateWithFallback(prompt) ?? ''
+      if (!raw) {
+        // generateWithFallback already logged the per-provider failure reasons
+        // inside llm-fallback.ts. Log the detect-route context here too, and
+        // return the obvious candidates as the deterministic floor.
+        console.error(`[memory.detect] llm-fallback returned empty for message: "${userMessage.slice(0, 80)}"`)
+        if (obviousCandidates.length > 0) {
+          console.log(`[memory.detect] Returning ${obviousCandidates.length} obvious candidate(s) despite LLM failure.`)
+        }
+        return NextResponse.json({ candidates: obviousCandidates.slice(0, 2) })
       }
-      return NextResponse.json({ candidates: obviousCandidates.slice(0, 2) })
+    } catch (e) {
+      console.error(`[memory.detect] llm-fallback threw: ${e instanceof Error ? e.message : String(e)}`)
+      // Deterministic floor — the obvious patterns don't depend on any LLM call.
+      return NextResponse.json({ candidates: extractObviousCandidates(userMessage).slice(0, 2) })
     }
-
-    const apiData = await apiResponse.json()
-    const raw = apiData.choices?.[0]?.message?.content ?? ''
 
     let parsed: { candidates?: Array<{ text: string; category: string; confidence: string }> } = { candidates: [] }
     try {

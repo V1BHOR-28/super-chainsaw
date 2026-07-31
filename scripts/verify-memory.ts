@@ -198,12 +198,11 @@ async function checkSummarizationDoesntBlockResponse() {
 
 // ─── MEMORY DETECTION HARDENING CHECKS ────────────────────────────────────
 // These verify the memory-detection hardening landed on main.
-
-async function checkStructuredOutputRequested() {
-  const src = await fetch('https://raw.githubusercontent.com/V1BHOR-28/super-chainsaw/main/src/app/api/memory/detect/route.ts').then(r => r.text()).catch(() => '')
-  const pass = /response_format/.test(src)
-  results.push({ name: 'structured-json-output-requested', pass, detail: pass ? 'response_format found.' : 'Still relying purely on regex extraction.' })
-}
+// (The structured-json-output-requested check was removed when the detect
+// route moved off OpenRouter onto the free llm-fallback helper — Groq/
+// Pollinations don't support response_format: json_object. The regex
+// extraction in detect/route.ts is now the primary parse path, kept as a
+// safety net per the original hardening prompt.)
 
 async function checkDetectionLoggingPresent() {
   const src = await fetch('https://raw.githubusercontent.com/V1BHOR-28/super-chainsaw/main/src/app/api/memory/detect/route.ts').then(r => r.text()).catch(() => '')
@@ -215,6 +214,23 @@ async function checkDeterministicFallbackPresent() {
   const src = await fetch('https://raw.githubusercontent.com/V1BHOR-28/super-chainsaw/main/src/app/api/memory/detect/route.ts').then(r => r.text()).catch(() => '')
   const pass = /extractObviousCandidates/.test(src)
   results.push({ name: 'deterministic-fallback-present', pass, detail: pass ? 'Pattern-match fallback found.' : 'Detection still 100% dependent on one LLM call.' })
+}
+
+// ─── DETECT-OFF-OPENROUTER CHECKS ─────────────────────────────────────────
+// These verify the detect route moved off OpenRouter (402 credits) onto the
+// free llm-fallback helper, and that LLM failures route to the deterministic floor.
+
+async function checkDetectionUsesLlmFallback() {
+  const src = await fetch('https://raw.githubusercontent.com/V1BHOR-28/super-chainsaw/main/src/app/api/memory/detect/route.ts').then(r => r.text()).catch(() => '')
+  const pass = /from '@\/lib\/llm-fallback'/.test(src) && !/openrouter\.ai\/api/.test(src)
+  results.push({ name: 'detection-uses-free-fallback', pass, detail: pass ? 'Detect route no longer calls OpenRouter directly.' : 'Still hitting OpenRouter directly, or import missing.' })
+}
+
+async function checkDetectionFallsBackToDeterministicOnFailure() {
+  const src = await fetch('https://raw.githubusercontent.com/V1BHOR-28/super-chainsaw/main/src/app/api/memory/detect/route.ts').then(r => r.text()).catch(() => '')
+  const pass = /extractObviousCandidates\(userMessage\)/.test(src)
+  const occurrences = (src.match(/extractObviousCandidates\(userMessage\)/g) || []).length
+  results.push({ name: 'deterministic-fallback-on-llm-failure', pass: pass && occurrences >= 2, detail: `Found ${occurrences} call(s) — expect at least 2 (normal merge path + failure path).` })
 }
 
 async function main() {
@@ -246,9 +262,11 @@ async function main() {
   await checkSummaryInjectedIntoPrompt()
   await checkSummarizationDoesntBlockResponse()
   // Memory detection hardening
-  await checkStructuredOutputRequested()
   await checkDetectionLoggingPresent()
   await checkDeterministicFallbackPresent()
+  // Detect off OpenRouter
+  await checkDetectionUsesLlmFallback()
+  await checkDetectionFallsBackToDeterministicOnFailure()
 
   console.table(results.map((r) => ({ Check: r.name, Result: r.pass ? 'PASS' : 'FAIL', Detail: r.detail })))
   const anyFail = results.some((r) => !r.pass)
