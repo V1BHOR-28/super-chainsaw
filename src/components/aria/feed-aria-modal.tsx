@@ -89,8 +89,39 @@ export function FeedAriaModal() {
       }
 
       const data = await res.json()
-      if (!res.ok) {
+
+      // 409 = duplicate title. Ask the user to confirm re-upload, then resend
+      // with forceReupload:true so the backend skips the de-dup check.
+      if (res.status === 409 && data.error === 'duplicate') {
+        const ok = window.confirm(data.message || 'You have already fed ARIA something with this title. Upload anyway?')
+        if (!ok) {
+          setState('idle')
+          return
+        }
+        // Resend with forceReupload
+        if (tab === 'file' && file) {
+          const formData = new FormData()
+          formData.append('file', file)
+          formData.append('forceReupload', 'true')
+          res = await fetch('/api/knowledge', { method: 'POST', body: formData })
+        } else {
+          res = await fetch('/api/knowledge', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ type: tab, content: textContent, url: url, forceReupload: true }),
+          })
+        }
+        // Re-parse the response from the forced upload
+        const forcedData = await res.json().catch(() => ({}))
+        if (!res.ok) throw new Error(forcedData.error || 'Upload failed')
+        Object.assign(data, forcedData)
+      } else if (!res.ok) {
         throw new Error(data.error || 'Upload failed')
+      }
+
+      // Signal silent truncation — the doc was longer than ARIA's per-upload cap.
+      if (data.truncated === true) {
+        toast.warning('Only part of this document was saved — it\'s longer than ARIA can currently hold in one go.')
       }
 
       setState('done')
@@ -180,9 +211,30 @@ export function FeedAriaModal() {
         })
 
         const data = await res.json()
-        if (!res.ok) throw new Error(data.error || 'Batch upload failed')
-        storedTotal += data.stored || 0
-        embeddedTotal += data.embedded || 0
+        if (res.status === 409 && data.error === 'duplicate') {
+          // Duplicate title on a batch upload — confirm + resend this batch with forceReupload
+          const ok = window.confirm(data.message || 'Duplicate title. Upload anyway?')
+          if (!ok) throw new Error('Upload cancelled')
+          const retryRes = await fetch('/api/knowledge/batch', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              documentId, title, source: 'pdf',
+              chunks: batchChunks, batchIndex,
+              totalBatches: Math.ceil(totalChunks / BATCH_SIZE),
+              totalChunks, chunkOffset: i, forceReupload: true,
+            }),
+          })
+          const retryData = await retryRes.json()
+          if (!retryRes.ok) throw new Error(retryData.error || 'Batch upload failed')
+          storedTotal += retryData.stored || 0
+          embeddedTotal += retryData.embedded || 0
+        } else if (!res.ok) {
+          throw new Error(data.error || 'Batch upload failed')
+        } else {
+          storedTotal += data.stored || 0
+          embeddedTotal += data.embedded || 0
+        }
       }
 
       // Step 4: Done

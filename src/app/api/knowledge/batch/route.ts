@@ -91,12 +91,12 @@ export async function POST(req: NextRequest) {
         if (embedding) {
           const vectorStr = embeddingToPgVector(embedding)
           await db.$executeRaw`
-            INSERT INTO "Knowledge" (id, "userId", title, content, source, "sourceUrl", embedding, "createdAt")
-            VALUES (${id}, ${userId}, ${chunkTitle}, ${chunk}, ${source}, ${sourceUrl ?? null}, ${vectorStr}::vector, NOW())
+            INSERT INTO "Knowledge" (id, "userId", title, content, source, "sourceUrl", "documentId", embedding, "createdAt")
+            VALUES (${id}, ${userId}, ${chunkTitle}, ${chunk}, ${source}, ${sourceUrl ?? null}, ${documentId}, ${vectorStr}::vector, NOW())
           `
         } else {
           await db.knowledge.create({
-            data: { id, userId, title: chunkTitle, content: chunk, source, sourceUrl },
+            data: { id, userId, title: chunkTitle, content: chunk, source, sourceUrl, documentId },
           })
         }
         storedCount++

@@ -88,18 +88,20 @@ model Memory {
 // Knowledge base — user feeds ARIA articles, player lists, schedules, docs.
 // ARIA uses semantic search (pgvector) to find relevant knowledge for each question.
 model Knowledge {
-  id        String   @id @default(cuid())
-  userId    String
-  title     String
-  content   String
-  source    String   @default("text") // "text" | "url" | "file"
-  sourceUrl String?
-  embedding Unsupported("vector(768)")? // Gemini text-embedding-004 dimension
-  createdAt DateTime @default(now())
+  id         String   @id @default(cuid())
+  userId     String
+  title      String
+  content    String
+  source     String   @default("text") // "text" | "url" | "file"
+  sourceUrl  String?
+  documentId String?                          // groups chunks of one document together
+  embedding  Unsupported("vector(768)")? // Gemini text-embedding-004 dimension
+  createdAt  DateTime @default(now())
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId])
+  @@index([documentId])                       // delete/lookup by document is now indexed
 }
 
 // Memory decisions — logs every Save/Skip so ARIA learns the user's pattern

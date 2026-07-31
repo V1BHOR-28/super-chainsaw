@@ -1,7 +1,7 @@
 // scripts/verify-memory.ts
 // Run with: npx tsx scripts/verify-memory.ts
 //
-// Verifies all 5 memory bug fixes are in place before deploying.
+// Verifies all memory bug fixes + library/knowledge fixes are in place before deploying.
 import { db } from '@/lib/db'
 
 type Check = { name: string; pass: boolean; detail?: string }
@@ -67,6 +67,57 @@ async function checkEmbeddingGenerationWorks() {
   results.push({ name: 'embedding-generation-live', pass, detail: pass ? '768-dim vector returned.' : 'generateEmbedding() returned null — check GEMINI_API_KEY.' })
 }
 
+// ─── LIBRARY / KNOWLEDGE FIX CHECKS ───────────────────────────────────────
+// These verify the 7 library fixes landed on main. Some read source from
+// GitHub raw (so they only pass AFTER a push); others query the DB directly.
+
+async function checkDocumentIdColumnExists() {
+  const rows = await db.$queryRaw<Array<{ column_name: string }>>`
+    SELECT column_name FROM information_schema.columns
+    WHERE table_name = 'Knowledge' AND column_name = 'documentId'
+  `
+  const pass = rows.length > 0
+  results.push({ name: 'documentId-column-exists', pass, detail: pass ? 'Column present.' : 'documentId column missing.' })
+}
+
+async function checkDocumentIdActuallyPersisted() {
+  const [row] = await db.$queryRaw<Array<{ count: number }>>`
+    SELECT COUNT(*)::int as count FROM "Knowledge" WHERE "documentId" IS NOT NULL
+  `
+  const pass = !!row && row.count > 0
+  results.push({ name: 'documentId-persisted', pass, detail: pass ? `${row?.count} rows have a documentId.` : 'No rows have documentId set — it may be generated but never saved.' })
+}
+
+async function checkSsrfGuardPresent() {
+  const src = await fetch('https://raw.githubusercontent.com/V1BHOR-28/super-chainsaw/main/src/app/api/knowledge/route.ts').then(r => r.text()).catch(() => '')
+  const pass = /isUrlSafe/.test(src)
+  results.push({ name: 'ssrf-guard-present', pass, detail: pass ? 'isUrlSafe() found.' : 'No URL validation before fetchUrlContent.' })
+}
+
+async function checkTruncationSignaled() {
+  const src = await fetch('https://raw.githubusercontent.com/V1BHOR-28/super-chainsaw/main/src/app/api/knowledge/route.ts').then(r => r.text()).catch(() => '')
+  const pass = /truncated/.test(src)
+  results.push({ name: 'truncation-signaled', pass, detail: pass ? 'truncated flag found.' : 'No truncation signal.' })
+}
+
+async function checkInBookOrderingDeterministic() {
+  const src = await fetch('https://raw.githubusercontent.com/V1BHOR-28/super-chainsaw/main/src/app/api/chat/route.ts').then(r => r.text()).catch(() => '')
+  const pass = /distinct:\s*\['title'\][\s\S]{0,80}orderBy:\s*\{\s*title:\s*'asc'\s*\}/.test(src)
+  results.push({ name: 'in-book-ordering-deterministic', pass, detail: pass ? 'orderBy present on distinct title query.' : 'No orderBy — result order is non-deterministic.' })
+}
+
+async function checkKnowledgePriorityGated() {
+  const src = await fetch('https://raw.githubusercontent.com/V1BHOR-28/super-chainsaw/main/src/app/api/chat/route.ts').then(r => r.text()).catch(() => '')
+  const pass = /knowledgeFromSemanticSearch/.test(src)
+  results.push({ name: 'knowledge-priority-gated', pass, detail: pass ? 'Semantic-only gate found.' : 'Still cancels web search on any keyword match.' })
+}
+
+async function checkDeleteByDocumentId() {
+  const src = await fetch('https://raw.githubusercontent.com/V1BHOR-28/super-chainsaw/main/src/app/api/knowledge/%5Bid%5D/route.ts').then(r => r.text()).catch(() => '')
+  const pass = /documentId:\s*id/.test(src) && !/startsWith:\s*`\$\{id\}/.test(src)
+  results.push({ name: 'delete-by-documentId', pass, detail: pass ? 'Deletes scoped to documentId, not title string.' : 'Still matching deletes by title string.' })
+}
+
 async function main() {
   await checkConversationOrdering()
   await checkPersonalConfidenceNotDowngraded()
@@ -74,14 +125,22 @@ async function main() {
   await checkEnvVarsPresent()
   await checkEmbeddingGenerationWorks()
   await checkNoOrphanedEmbeddings()
+  // Library / knowledge fixes
+  await checkDocumentIdColumnExists()
+  await checkDocumentIdActuallyPersisted()
+  await checkSsrfGuardPresent()
+  await checkTruncationSignaled()
+  await checkInBookOrderingDeterministic()
+  await checkKnowledgePriorityGated()
+  await checkDeleteByDocumentId()
 
   console.table(results.map((r) => ({ Check: r.name, Result: r.pass ? 'PASS' : 'FAIL', Detail: r.detail })))
   const anyFail = results.some((r) => !r.pass)
   if (anyFail) {
-    console.error('\n❌ One or more memory checks failed. Do not deploy.')
+    console.error('\n❌ One or more checks failed. Do not deploy.')
     process.exit(1)
   }
-  console.log('\n✅ All memory checks passed.')
+  console.log('\n✅ All checks passed.')
 }
 
 main()

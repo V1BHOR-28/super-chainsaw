@@ -20,21 +20,23 @@ export async function GET() {
     const knowledge = await db.knowledge.findMany({
       where: { userId, source: { not: 'summary' } },
       orderBy: { createdAt: 'desc' },
-      select: { id: true, title: true, source: true, sourceUrl: true, createdAt: true, content: true },
+      select: { id: true, title: true, source: true, sourceUrl: true, documentId: true, createdAt: true, content: true },
     })
 
-    // Group chunks by base title (strip " — Part N/M" suffix).
-    // This collapses 100 chunks of one book into a single library entry.
+    // Group chunks by documentId when available (the robust way), falling back
+    // to base-title grouping for legacy rows uploaded before documentId existed.
     const groups = new Map<string, { id: string; title: string; source: string; sourceUrl: string | null; createdAt: Date; totalLength: number; chunkCount: number }>()
 
     for (const k of knowledge) {
       // Extract base title: "Book Title — Part 3/100" → "Book Title"
-      // Also handles "Book Title — Part 1/1" (single chunk, shouldn't have suffix but just in case)
       const baseTitle = k.title.replace(/\s+—\s+Part\s+\d+\/\d+$/, '')
+      // Prefer documentId as the group key (one upload = one documentId);
+      // fall back to baseTitle for legacy rows with NULL documentId.
+      const groupKey = k.documentId ?? baseTitle
 
-      const existing = groups.get(baseTitle)
+      const existing = groups.get(groupKey)
       if (existing) {
-        // Same book — accumulate
+        // Same document — accumulate
         existing.totalLength += k.content.length
         existing.chunkCount += 1
         // Keep the most recent createdAt
@@ -42,9 +44,9 @@ export async function GET() {
           existing.createdAt = k.createdAt
         }
       } else {
-        // New book
-        groups.set(baseTitle, {
-          id: k.id, // first chunk's ID (used for delete — but we need to delete ALL chunks)
+        // New document
+        groups.set(groupKey, {
+          id: k.documentId ?? k.id, // documentId is the stable identifier for delete
           title: baseTitle,
           source: k.source,
           sourceUrl: k.sourceUrl,
@@ -59,7 +61,7 @@ export async function GET() {
     const list = Array.from(groups.values())
       .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
       .map(g => ({
-        id: g.title, // use the BASE TITLE as the ID for display + delete purposes
+        id: g.id, // documentId (or legacy row id) — the client sends this back to DELETE
         title: g.title,
         source: g.source,
         sourceUrl: g.sourceUrl,
@@ -79,15 +81,18 @@ export async function GET() {
 
 const MAX_CONTENT_LENGTH = 200_000 // ~50K tokens — covers most books up to 300 pages
 
-/** Light text cleanup — collapse whitespace, strip obvious artifacts. */
-function refineText(raw: string): string {
-  return raw
+/** Light text cleanup — collapse whitespace, strip obvious artifacts.
+ *  Returns the cleaned text AND whether it was truncated, so the caller
+ *  can signal silent truncation to the user instead of hiding it. */
+function refineText(raw: string): { text: string; truncated: boolean } {
+  const cleaned = raw
     .replace(/[ \t]+/g, ' ')
     .replace(/\n{3,}/g, '\n\n')
     .replace(/\u0000/g, '')
     .replace(/\ufeff/g, '')
     .trim()
-    .slice(0, MAX_CONTENT_LENGTH)
+  const truncated = cleaned.length > MAX_CONTENT_LENGTH
+  return { text: cleaned.slice(0, MAX_CONTENT_LENGTH), truncated }
 }
 
 // chunkText is imported from '@/lib/chunk-text' — shared between client and server
@@ -102,7 +107,33 @@ function titleFromUrl(url: string): string {
   }
 }
 
-async function fetchUrlContent(url: string): Promise<{ title: string; content: string }> {
+/** SSRF guard — blocks fetches to private/internal hosts and non-HTTP schemes.
+ *  Known limitation: this catches IP-literal and hostname-string cases, but
+ *  NOT DNS rebinding (where a public hostname resolves to a private IP at
+ *  fetch time). That's an accepted gap for now. */
+function isUrlSafe(urlStr: string): boolean {
+  let u: URL
+  try { u = new URL(urlStr) } catch { return false }
+  if (u.protocol !== 'http:' && u.protocol !== 'https:') return false
+  const hostname = u.hostname.toLowerCase()
+  if (hostname === 'localhost' || hostname === '0.0.0.0') return false
+  const ipMatch = hostname.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/)
+  if (ipMatch) {
+    const [a, b] = [parseInt(ipMatch[1]), parseInt(ipMatch[2])]
+    if (a === 127) return false
+    if (a === 10) return false
+    if (a === 172 && b >= 16 && b <= 31) return false
+    if (a === 192 && b === 168) return false
+    if (a === 169 && b === 254) return false
+  }
+  if (hostname.endsWith('.local') || hostname.endsWith('.internal')) return false
+  return true
+}
+
+async function fetchUrlContent(url: string): Promise<{ title: string; content: string; truncated: boolean }> {
+  if (!isUrlSafe(url)) {
+    throw new Error('This URL cannot be fetched (blocked for security reasons).')
+  }
   const res = await fetch(url, {
     signal: AbortSignal.timeout(15000),
     headers: { 'User-Agent': 'Mozilla/5.0 (compatible; ARIA/1.0)' },
@@ -114,9 +145,9 @@ async function fetchUrlContent(url: string): Promise<{ title: string; content: s
   $('script, style, nav, footer, header, aside, noscript, iframe').remove()
   const title = $('title').first().text().trim() || titleFromUrl(url)
   const bodyText = $('article, main, [role=main]').first().text() || $('body').text()
-  const content = refineText(bodyText)
+  const { text: content, truncated } = refineText(bodyText)
   if (!content || content.length < 50) throw new Error('Could not extract meaningful text from the page.')
-  return { title: title.slice(0, 200), content }
+  return { title: title.slice(0, 200), content, truncated }
 }
 
 /**
@@ -132,7 +163,7 @@ async function fetchUrlContent(url: string): Promise<{ title: string; content: s
  * "Setting up fake worker failed: Cannot find module pdf.worker.mjs" errors
  * on Vercel's serverless runtime.
  */
-async function parsePdf(file: Blob): Promise<string> {
+async function parsePdf(file: Blob): Promise<{ text: string; truncated: boolean }> {
   const arrayBuffer = await file.arrayBuffer()
   const uint8 = new Uint8Array(arrayBuffer)
   const { extractText } = await import('unpdf')
@@ -158,6 +189,8 @@ export async function POST(req: NextRequest) {
     let content: string
     let source: string
     let sourceUrl: string | undefined
+    let truncated = false
+    let forceReupload = false
 
     const contentType = req.headers.get('content-type') || ''
 
@@ -168,12 +201,17 @@ export async function POST(req: NextRequest) {
         return NextResponse.json({ error: 'No file provided' }, { status: 400 })
       }
       title = (formData.get('title') as string)?.trim() || file.name || 'Uploaded document'
+      forceReupload = (formData.get('forceReupload') as string) === 'true'
       const fileName = file.name.toLowerCase()
       if (fileName.endsWith('.pdf') || file.type === 'application/pdf') {
-        content = await parsePdf(file)
+        const pdf = await parsePdf(file)
+        content = pdf.text
+        truncated = pdf.truncated
         source = 'pdf'
       } else if (fileName.endsWith('.txt') || fileName.endsWith('.md') || file.type.startsWith('text/')) {
-        content = refineText(await file.text())
+        const refined = refineText(await file.text())
+        content = refined.text
+        truncated = refined.truncated
         source = 'file'
       } else {
         return NextResponse.json({ error: 'Unsupported file type. Please upload a PDF or text file.' }, { status: 400 })
@@ -181,8 +219,11 @@ export async function POST(req: NextRequest) {
     } else {
       const body = await req.json().catch(() => ({}))
       const type = body.type
+      forceReupload = body.forceReupload === true
       if (type === 'text') {
-        content = refineText(body.content || '')
+        const refined = refineText(body.content || '')
+        content = refined.text
+        truncated = refined.truncated
         source = 'text'
         title = body.title?.trim() || content.slice(0, 60)
       } else if (type === 'url') {
@@ -190,6 +231,7 @@ export async function POST(req: NextRequest) {
         if (!url) return NextResponse.json({ error: 'URL is required' }, { status: 400 })
         const fetched = await fetchUrlContent(url)
         content = fetched.content
+        truncated = fetched.truncated
         title = fetched.title
         source = 'url'
         sourceUrl = url
@@ -200,6 +242,23 @@ export async function POST(req: NextRequest) {
 
     if (!content || content.length < 10) {
       return NextResponse.json({ error: 'Could not extract enough text to learn from. Try a different source.' }, { status: 400 })
+    }
+
+    // === DE-DUPLICATION ===
+    // If the user has already fed ARIA something with the same (base) title,
+    // refuse the upload with a 409 unless forceReupload is set. The client
+    // catches 409 and asks the user to confirm a re-upload.
+    if (!forceReupload && title) {
+      const existing = await db.knowledge.findFirst({
+        where: { userId, title: { startsWith: title } },
+        select: { documentId: true },
+      })
+      if (existing) {
+        return NextResponse.json(
+          { error: 'duplicate', message: `You've already fed ARIA something titled "${title}". Upload anyway?`, existingDocumentId: existing.documentId },
+          { status: 409 }
+        )
+      }
     }
 
     // === CHUNKING ===
@@ -251,12 +310,12 @@ export async function POST(req: NextRequest) {
         if (embedding) {
           const vectorStr = embeddingToPgVector(embedding)
           await db.$executeRaw`
-            INSERT INTO "Knowledge" (id, "userId", title, content, source, "sourceUrl", embedding, "createdAt")
-            VALUES (${id}, ${userId}, ${chunkTitle}, ${chunk}, ${source}, ${sourceUrl ?? null}, ${vectorStr}::vector, NOW())
+            INSERT INTO "Knowledge" (id, "userId", title, content, source, "sourceUrl", "documentId", embedding, "createdAt")
+            VALUES (${id}, ${userId}, ${chunkTitle}, ${chunk}, ${source}, ${sourceUrl ?? null}, ${documentId}, ${vectorStr}::vector, NOW())
           `
         } else {
           await db.knowledge.create({
-            data: { id, userId, title: chunkTitle, content: chunk, source, sourceUrl },
+            data: { id, userId, title: chunkTitle, content: chunk, source, sourceUrl, documentId },
           })
         }
         savedIds.push(id)
@@ -310,12 +369,12 @@ export async function POST(req: NextRequest) {
 
           if (summaryEmbedding) {
             await db.$executeRaw`
-              INSERT INTO "Knowledge" (id, "userId", title, content, source, "sourceUrl", embedding, "createdAt")
-              VALUES (${summaryId}, ${userId}, ${title!}, ${summaryContent}, 'summary', NULL, ${summaryEmbedding}::vector, NOW())
+              INSERT INTO "Knowledge" (id, "userId", title, content, source, "sourceUrl", "documentId", embedding, "createdAt")
+              VALUES (${summaryId}, ${userId}, ${title!}, ${summaryContent}, 'summary', NULL, ${documentId}, ${summaryEmbedding}::vector, NOW())
             `
           } else {
             await db.knowledge.create({
-              data: { id: summaryId, userId, title: title!, content: summaryContent, source: 'summary' },
+              data: { id: summaryId, userId, title: title!, content: summaryContent, source: 'summary', documentId },
             })
           }
           console.log(`[knowledge.upload] Auto-summary generated for "${title}"`)
@@ -336,6 +395,7 @@ export async function POST(req: NextRequest) {
         chunks: savedIds.length,
         embedded: embeddedCount,
       },
+      truncated,
     })
   } catch (err) {
     console.error('[knowledge.upload]', err)

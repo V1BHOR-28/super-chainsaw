@@ -172,6 +172,7 @@ export async function POST(req: NextRequest) {
     //   2. Text search fallback (ILIKE) — finds by keyword. This ensures fed
     //      knowledge is ALWAYS retrievable even if embeddings aren't generated.
     let knowledgeContext: string | undefined
+    let knowledgeFromSemanticSearch = false
     try {
       const { generateEmbedding, embeddingToPgVector } = await import('@/lib/embeddings')
       const queryEmbedding = await generateEmbedding(actualContent)
@@ -190,13 +191,20 @@ export async function POST(req: NextRequest) {
           where: { userId },
           select: { title: true },
           distinct: ['title'],
+          orderBy: { title: 'asc' },   // deterministic result order
         })
-        const matchingTitle = allTitles.find(t =>
-          t.title.toLowerCase().startsWith(bookName) ||
-          t.title.toLowerCase().replace(/\s+—\s+part\s+\d+\/\d+$/, '').includes(bookName)
-        )
+
+        const baseTitles = allTitles.map(t => ({
+          original: t.title,
+          base: t.title.toLowerCase().replace(/\s+—\s+part\s+\d+\/\d+$/, ''),
+        }))
+
+        const matchingTitle =
+          baseTitles.find(t => t.base === bookName) ??
+          baseTitles.find(t => t.base.startsWith(bookName)) ??
+          baseTitles.find(t => t.base.includes(bookName))
         if (matchingTitle) {
-          const baseTitle = matchingTitle.title.replace(/\s+—\s+Part\s+\d+\/\d+$/, '')
+          const baseTitle = matchingTitle.original.replace(/\s+—\s+Part\s+\d+\/\d+$/, '')
           bookFilter = baseTitle
         }
       }
@@ -254,6 +262,14 @@ export async function POST(req: NextRequest) {
             `
           }
         }
+      }
+
+      // Flag: did the hit come from real semantic similarity search (pgvector)?
+      // Set here — AFTER the semantic block but BEFORE the keyword fallback —
+      // so only genuine semantic results get to cancel web search later.
+      // The keyword ILIKE fallback below does NOT set this flag.
+      if (queryEmbedding && knowledgeResults.length > 0) {
+        knowledgeFromSemanticSearch = true
       }
 
       // Fallback: if no embedding results (key not configured, or knowledge
@@ -333,11 +349,13 @@ export async function POST(req: NextRequest) {
     }
 
     // === KNOWLEDGE PRIORITY ===
-    // If the user's fed knowledge covers this question, SKIP web search entirely.
-    // ARIA answers from the PDF/doc the user fed her — that's the whole point of
-    // the digital library USP. Web search only runs when knowledge doesn't apply.
-    if (knowledgeContext && tool === 'web_search') {
-      console.log('[chat.knowledge_priority] Knowledge found — skipping web search. ARIA will answer from fed documents.')
+    // If the user's fed knowledge covers this question AND the hit came from
+    // real semantic similarity search (not the keyword ILIKE fallback), SKIP
+    // web search entirely. A weak keyword-only match doesn't warrant blocking
+    // live search — the user may be asking about something the library only
+    // tangentially mentions.
+    if (knowledgeContext && knowledgeFromSemanticSearch && tool === 'web_search') {
+      console.log('[chat.knowledge_priority] Semantic knowledge match — skipping web search.')
       tool = null // cancel the web search; knowledgeContext is already in the prompt
     }
 
