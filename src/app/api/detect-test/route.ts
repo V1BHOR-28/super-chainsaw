@@ -1,49 +1,84 @@
 import { NextResponse } from 'next/server'
+import { extractObviousCandidates } from '@/app/api/memory/detect/route'
 
 export const dynamic = 'force-dynamic'
 export const maxDuration = 60
 
-// Temporary diagnostic: exercises /api/memory/detect with two test cases
-// to verify the hardening works end-to-end on Vercel production.
-// Case 1: "my favorite movie is Vanilla Sky" (tests deterministic fallback)
-// Case 2: "honestly I've always had a soft spot for Blade Runner" (tests LLM path)
+// Temporary diagnostic: verifies memory detection hardening on Vercel production.
+// Case 1: deterministic fallback (extractObviousCandidates) — no LLM call needed.
+// Case 2: LLM path with response_format: json_object — tests structured output.
 // Will be removed after verification.
 export async function GET() {
-  const cases = [
-    {
-      label: 'Case 1 — deterministic fallback (pattern match)',
-      userMessage: 'ummm my favorite movie is vanilla sky',
-      ariaReply: 'Vanilla Sky! That\'s a fascinating pick — Cameron Crowe\'s most divisive film. The way it blurs reality and dreams still holds up.',
-    },
-    {
-      label: 'Case 2 — LLM path with structured output',
-      userMessage: 'honestly I\'ve always had a soft spot for Blade Runner',
-      ariaReply: 'Blade Runner is a masterpiece of atmosphere. The rain-soaked neon LA is one of the most influential worlds ever built on film.',
-    },
-  ]
+  const results: Array<{
+    label: string
+    userMessage: string
+    obviousCandidates?: Array<{ text: string; category: string; confidence: string }>
+    llmCandidates?: unknown
+    openRouterStatus?: number
+    openRouterError?: string
+  }> = []
 
-  const results = []
-  for (const c of cases) {
+  // === Case 1: deterministic fallback ===
+  const case1Msg = 'ummm my favorite movie is vanilla sky'
+  const obvious = extractObviousCandidates(case1Msg)
+  results.push({
+    label: 'Case 1 — deterministic fallback (pattern match)',
+    userMessage: case1Msg,
+    obviousCandidates: obvious,
+  })
+
+  // === Case 2: LLM path with structured output ===
+  const case2Msg = "honestly I've always had a soft spot for Blade Runner"
+  const prompt = `You are ARIA's memory curator. Read the exchange and extract 0-2 memory candidates.
+
+USER SAID: "${case2Msg}"
+ARIA REPLIED: "Blade Runner is a masterpiece of atmosphere."
+
+RULES:
+- SAVE: permanent facts, stable preferences, identities, goals, relationships
+- SKIP: transient states, temporary emotions, small talk
+- "high" = clear fact (auto-save), "medium" = borderline (ask user)
+
+Respond with ONLY JSON: {"candidates":[{"text":"...","category":"personal|preference|goal|fact|general","confidence":"high|medium"}]}`
+
+  try {
+    const res = await fetch('https://openrouter.ai/api/v1/chat/completions', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'Authorization': `Bearer ${process.env.OPENROUTER_API_KEY}`,
+        'HTTP-Referer': 'https://ariav2-seven.vercel.app',
+        'X-Title': 'ARIA',
+      },
+      body: JSON.stringify({
+        model: 'deepseek/deepseek-chat',
+        messages: [{ role: 'user', content: prompt }],
+        response_format: { type: 'json_object' },
+      }),
+      signal: AbortSignal.timeout(25000),
+    })
+    const data = await res.json()
+    const raw = data.choices?.[0]?.message?.content ?? ''
+    let parsed: { candidates?: Array<{ text: string; category: string; confidence: string }> } = { candidates: [] }
     try {
-      const res = await fetch('https://ariav2-seven.vercel.app/api/memory/detect', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ userMessage: c.userMessage, ariaReply: c.ariaReply }),
-      })
-      const data = await res.json()
-      results.push({
-        label: c.label,
-        userMessage: c.userMessage,
-        httpStatus: res.status,
-        candidates: data.candidates || [],
-      })
-    } catch (err) {
-      results.push({
-        label: c.label,
-        userMessage: c.userMessage,
-        error: err instanceof Error ? err.message : 'unknown',
-      })
+      const jsonMatch = raw.match(/\{[\s\S]*\}/)
+      if (jsonMatch) parsed = JSON.parse(jsonMatch[0])
+    } catch {
+      // keep empty
     }
+    results.push({
+      label: 'Case 2 — LLM path with structured output',
+      userMessage: case2Msg,
+      llmCandidates: parsed.candidates || [],
+      openRouterStatus: res.status,
+      ...(res.ok ? {} : { openRouterError: JSON.stringify(data.error || data).slice(0, 200) }),
+    })
+  } catch (err) {
+    results.push({
+      label: 'Case 2 — LLM path with structured output',
+      userMessage: case2Msg,
+      openRouterError: err instanceof Error ? err.message : 'unknown',
+    })
   }
 
   return NextResponse.json({ ok: true, results })

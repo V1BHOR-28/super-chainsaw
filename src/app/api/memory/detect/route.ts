@@ -28,7 +28,7 @@ const OBVIOUS_PATTERNS: Array<{ regex: RegExp; category: string }> = [
   { regex: /\bmy name is ([^.!?]{2,60})/i, category: 'personal' },
 ]
 
-function extractObviousCandidates(userMessage: string): Array<{ text: string; category: string; confidence: string }> {
+export function extractObviousCandidates(userMessage: string): Array<{ text: string; category: string; confidence: string }> {
   const found: Array<{ text: string; category: string; confidence: string }> = []
   for (const { regex, category } of OBVIOUS_PATTERNS) {
     const match = userMessage.match(regex)
