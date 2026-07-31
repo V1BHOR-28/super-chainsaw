@@ -54,9 +54,27 @@ export async function generateWithFallback(prompt: string): Promise<string | nul
     return content.trim()
   }
 
+  // Pollinations — keyless backstop (same as the chat route's callPollinations).
+  // Always available, no API key needed, no rate limits. The safety net.
+  const callPollinations = async (): Promise<string> => {
+    const res = await fetch('https://text.pollinations.ai/openai', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ model: 'openai', messages, max_tokens: 800 }),
+      signal: AbortSignal.timeout(25000),
+    })
+    if (!res.ok) throw new Error(`Pollinations ${res.status}`)
+    const data = await res.json()
+    const content = data.choices?.[0]?.message?.content ?? ''
+    if (!content?.trim()) throw new Error('Pollinations empty')
+    return content.trim()
+  }
+
   const providers: Array<() => Promise<string>> = []
+  // Groq is the fastest + cheapest — primary path (works from Vercel/production).
   if (process.env.GROQ_API_KEY) providers.push(callGroq)
-  providers.push(() => callOpenRouter('meta-llama/llama-3.3-70b-instruct:free'))
+  // Pollinations is the keyless backstop — always available, no key needed.
+  providers.push(callPollinations)
 
   if (providers.length === 0) return null
 
