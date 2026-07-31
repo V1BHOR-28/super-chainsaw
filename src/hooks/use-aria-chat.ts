@@ -37,7 +37,7 @@ async function detectMemory(userMessage: string, ariaReply: string) {
         const saveRes = await fetch('/api/memory', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ content: c.text, category: c.category }),
+          body: JSON.stringify({ content: c.text, category: c.category, source: 'auto' }),
         })
         if (saveRes.status === 409) {
           // Already exists — log as a skip (user effectively already has it)

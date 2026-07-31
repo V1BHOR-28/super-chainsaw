@@ -5,17 +5,30 @@ import { getAuthenticatedUserId } from '@/lib/user'
 import { generateEmbedding } from '@/lib/embeddings'
 
 /**
- * GET /api/memory — list all memories
+ * GET /api/memory — list memories (cursor-based pagination, 50 per page).
+ * Pinned memories always come first (orderBy), then by updatedAt desc.
  */
-export async function GET() {
+export async function GET(req: NextRequest) {
   try {
     const userId = await getAuthenticatedUserId()
     if (!userId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+
+    const { searchParams } = new URL(req.url)
+    const cursor = searchParams.get('cursor') || undefined
+    const limit = Math.min(parseInt(searchParams.get('limit') || '50', 10), 100)
+
     const memories = await db.memory.findMany({
       where: { userId },
       orderBy: [{ pinned: 'desc' }, { updatedAt: 'desc' }],
+      take: limit + 1, // fetch one extra to know if there's a next page
+      ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
     })
-    return NextResponse.json({ memories })
+
+    const hasMore = memories.length > limit
+    const page = hasMore ? memories.slice(0, limit) : memories
+    const nextCursor = hasMore ? page[page.length - 1].id : null
+
+    return NextResponse.json({ memories: page, nextCursor })
   } catch (err) {
     console.error('[memory.list]', err)
     return NextResponse.json({ error: 'Failed to load memories' }, { status: 500 })
@@ -24,10 +37,11 @@ export async function GET() {
 
 /**
  * POST /api/memory — create a memory
- * Body: { content: string, category?: string, pinned?: boolean }
+ * Body: { content: string, category?: string, pinned?: boolean, source?: 'auto'|'manual' }
  *
- * Now generates an embedding for semantic search.
- * Deduplication: if a memory with >70% word overlap exists, returns 409.
+ * Generates the embedding FIRST so it can be used for dedup, not just storage.
+ * Deduplication: literal word-overlap (>0.7) OR semantic cosine distance (<0.1).
+ * Returns 409 { error: 'duplicate', existing } when a dup is found.
  */
 export async function POST(req: NextRequest) {
   try {
@@ -37,33 +51,46 @@ export async function POST(req: NextRequest) {
     const content = (body.content as string)?.trim()
     if (!content) return NextResponse.json({ error: 'content required' }, { status: 400 })
 
-    // Dedup check against existing memories
+    // Generate embedding FIRST so it can be used for dedup, not just storage.
+    const embedding = await generateEmbedding(content)
+
+    // Literal word-overlap check (cheap, catches near-identical phrasing)
     const existing = await db.memory.findMany({
       where: { userId },
       select: { id: true, content: true, category: true },
     })
-    const dup = existing.find((m) => wordOverlap(m.content, content) > 0.7)
-    if (dup) {
-      return NextResponse.json(
-        { error: 'duplicate', existing: dup },
-        { status: 409 }
-      )
+    let dup = existing.find((m) => wordOverlap(m.content, content) > 0.7)
+
+    // Semantic check (catches same fact, different words) — only if embedding succeeded
+    if (!dup && embedding) {
+      const vectorStr = `[${embedding.join(',')}]`
+      const semanticDup = await db.$queryRaw<Array<{ id: string; content: string; category: string; distance: number }>>`
+        SELECT id, content, category, embedding <=> ${vectorStr}::vector AS distance
+        FROM "Memory"
+        WHERE "userId" = ${userId} AND embedding IS NOT NULL
+        ORDER BY embedding <=> ${vectorStr}::vector
+        LIMIT 1
+      `
+      // Cosine distance < 0.1 ≈ near-identical meaning.
+      if (semanticDup[0] && semanticDup[0].distance < 0.1) {
+        dup = { id: semanticDup[0].id, content: semanticDup[0].content, category: semanticDup[0].category }
+      }
     }
 
-    // Generate embedding for semantic search
-    const embedding = await generateEmbedding(content)
+    if (dup) {
+      return NextResponse.json({ error: 'duplicate', existing: dup }, { status: 409 })
+    }
 
-    // Save memory with embedding (using raw SQL for pgvector)
     const memory = await db.memory.create({
       data: {
         userId,
         content: content.slice(0, 1000),
         category: (body.category as string)?.slice(0, 40) || 'general',
         pinned: !!body.pinned,
+        source: (body.source === 'auto' ? 'auto' : 'manual'),
       },
     })
 
-    // If we got an embedding, store it via raw SQL
     if (embedding) {
       await db.$executeRaw`
         UPDATE "Memory"

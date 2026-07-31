@@ -34,6 +34,7 @@ export type Memory = {
   content: string
   category: string
   pinned: boolean
+  source: string
   createdAt: string
   updatedAt: string
 }

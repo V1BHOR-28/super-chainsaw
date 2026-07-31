@@ -168,6 +168,10 @@ function MemoryPanel() {
   const [content, setContent] = useState('')
   const [creating, setCreating] = useState(false)
   const [loaded, setLoaded] = useState(false)
+  const [nextCursor, setNextCursor] = useState<string | null>(null)
+  const [loadingMore, setLoadingMore] = useState(false)
+  const [editingId, setEditingId] = useState<string | null>(null)
+  const [editValue, setEditValue] = useState('')
   const inputRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
@@ -176,9 +180,10 @@ function MemoryPanel() {
       try {
         const res = await fetch('/api/memory')
         if (!res.ok) throw new Error('fetch failed')
-        const data = (await res.json()) as { memories?: Memory[] }
+        const data = (await res.json()) as { memories?: Memory[]; nextCursor?: string | null }
         if (cancelled) return
         if (data.memories) setMemories(data.memories)
+        setNextCursor(data.nextCursor ?? null)
       } catch {
         if (!cancelled) toast.error('Could not load memories')
       } finally {
@@ -190,6 +195,21 @@ function MemoryPanel() {
     }
   }, [setMemories])
 
+  const handleLoadMore = async () => {
+    if (!nextCursor) return
+    setLoadingMore(true)
+    try {
+      const res = await fetch(`/api/memory?cursor=${nextCursor}`)
+      const data = await res.json()
+      if (data.memories) setMemories([...memories, ...data.memories])
+      setNextCursor(data.nextCursor ?? null)
+    } catch {
+      toast.error('Could not load more memories')
+    } finally {
+      setLoadingMore(false)
+    }
+  }
+
   const handleAdd = async () => {
     const trimmed = content.trim()
     if (!trimmed) return
@@ -200,6 +220,17 @@ function MemoryPanel() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ content: trimmed, category: 'general' }),
       })
+
+      if (res.status === 409) {
+        const data = await res.json().catch(() => ({}))
+        toast(
+          data.existing?.content
+            ? `ARIA already knows this: "${data.existing.content}"`
+            : 'ARIA already remembers something like this.'
+        )
+        return
+      }
+
       if (!res.ok) throw new Error('create failed')
       const data = (await res.json()) as { memory: Memory }
       upsertMemory(data.memory)
@@ -210,6 +241,34 @@ function MemoryPanel() {
       toast.error('Could not save memory')
     } finally {
       setCreating(false)
+    }
+  }
+
+  const startEdit = (m: Memory) => {
+    setEditingId(m.id)
+    setEditValue(m.content)
+  }
+
+  const handleSaveEdit = async (m: Memory) => {
+    const trimmed = editValue.trim()
+    if (!trimmed || trimmed === m.content) {
+      setEditingId(null)
+      return
+    }
+    const prev = m
+    upsertMemory({ ...m, content: trimmed })
+    setEditingId(null)
+    try {
+      const res = await fetch(`/api/memory/${m.id}`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ content: trimmed }),
+      })
+      if (!res.ok) throw new Error('edit failed')
+      toast.success('Memory updated')
+    } catch {
+      upsertMemory(prev)
+      toast.error('Could not update memory')
     }
   }
 
@@ -282,6 +341,7 @@ function MemoryPanel() {
             ARIA doesn&apos;t know you yet. Add something she should remember.
           </EmptyState>
         ) : (
+          <>
           <ul className="m-0 flex list-none flex-col gap-2 p-0">
             {memories.map((m) => (
               <li
@@ -293,13 +353,52 @@ function MemoryPanel() {
                 }}
               >
                 <div className="flex items-start justify-between gap-2">
-                  <p
-                    className="m-0 text-[13px] leading-relaxed"
-                    style={{ color: 'var(--aria-fg)' }}
-                  >
-                    {m.content}
-                  </p>
+                  {editingId === m.id ? (
+                    <textarea
+                      autoFocus
+                      value={editValue}
+                      onChange={(e) => setEditValue(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' && !e.shiftKey) {
+                          e.preventDefault()
+                          handleSaveEdit(m)
+                        } else if (e.key === 'Escape') {
+                          setEditingId(null)
+                        }
+                      }}
+                      rows={2}
+                      className="m-0 w-full resize-none rounded-md p-2 text-[13px] leading-relaxed outline-none"
+                      style={{
+                        color: 'var(--aria-fg)',
+                        background: 'var(--aria-bg-panel)',
+                        border: '1px solid var(--aria-accent)',
+                      }}
+                    />
+                  ) : (
+                    <p
+                      className="m-0 text-[13px] leading-relaxed"
+                      style={{ color: 'var(--aria-fg)' }}
+                    >
+                      {m.content}
+                    </p>
+                  )}
                   <div className="flex shrink-0 items-center gap-0.5">
+                    {editingId === m.id ? (
+                      <IconButton
+                        onClick={() => handleSaveEdit(m)}
+                        title="Save"
+                        active
+                      >
+                        <Check size={14} />
+                      </IconButton>
+                    ) : (
+                      <IconButton
+                        onClick={() => startEdit(m)}
+                        title="Edit"
+                      >
+                        <Pencil size={14} />
+                      </IconButton>
+                    )}
                     <IconButton
                       onClick={() => handlePin(m)}
                       title={m.pinned ? 'Unpin' : 'Pin'}
@@ -338,10 +437,39 @@ function MemoryPanel() {
                       · pinned
                     </span>
                   )}
+                  {m.source === 'auto' && (
+                    <span
+                      className="text-[10px]"
+                      style={{ color: 'var(--aria-fg-dim)' }}
+                    >
+                      · auto-detected
+                    </span>
+                  )}
                 </div>
               </li>
             ))}
           </ul>
+          {nextCursor && (
+            <button
+              onClick={handleLoadMore}
+              disabled={loadingMore}
+              className="mt-3 w-full rounded-lg py-2 text-[12px] transition-colors"
+              style={{
+                color: 'var(--aria-fg-muted)',
+                background: 'var(--aria-card)',
+                border: '1px solid var(--aria-border)',
+              }}
+            >
+              {loadingMore ? (
+                <span className="flex items-center justify-center gap-2">
+                  <Loader2 size={13} className="animate-spin" /> Loading...
+                </span>
+              ) : (
+                'Load more'
+              )}
+            </button>
+          )}
+          </>
         )}
       </div>
     </div>

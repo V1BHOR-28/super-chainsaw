@@ -76,6 +76,7 @@ model Memory {
   content   String
   category  String   @default("general")
   pinned    Boolean  @default(false)
+  source    String   @default("manual") // "manual" | "auto" — set by client, not user-editable after creation
   embedding Unsupported("vector(768)")? // Gemini text-embedding-004 dimension
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt

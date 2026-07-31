@@ -118,6 +118,48 @@ async function checkDeleteByDocumentId() {
   results.push({ name: 'delete-by-documentId', pass, detail: pass ? 'Deletes scoped to documentId, not title string.' : 'Still matching deletes by title string.' })
 }
 
+// ─── MEMORY PANEL FIX CHECKS ─────────────────────────────────────────────
+// These verify the 6 memory-panel fixes landed on main. Some read source
+// from GitHub raw (so they only pass AFTER a push); others query the DB.
+
+async function checkMemoryListPaginated() {
+  const src = await fetch('https://raw.githubusercontent.com/V1BHOR-28/super-chainsaw/main/src/app/api/memory/route.ts').then(r => r.text()).catch(() => '')
+  const pass = /nextCursor/.test(src) && /take:\s*limit/.test(src)
+  results.push({ name: 'memory-list-paginated', pass, detail: pass ? 'Cursor pagination found.' : 'No pagination — GET still fetches everything.' })
+}
+
+async function checkSemanticDedup() {
+  const src = await fetch('https://raw.githubusercontent.com/V1BHOR-28/super-chainsaw/main/src/app/api/memory/route.ts').then(r => r.text()).catch(() => '')
+  const pass = /embedding <=>/.test(src) && /distance < 0\.\d+/.test(src)
+  results.push({ name: 'semantic-dedup-present', pass, detail: pass ? 'Semantic dedup query found.' : 'Dedup still word-overlap only.' })
+}
+
+async function checkDuplicateErrorHandledInUi() {
+  const src = await fetch('https://raw.githubusercontent.com/V1BHOR-28/super-chainsaw/main/src/components/aria/side-panels.tsx').then(r => r.text()).catch(() => '')
+  const pass = /status === 409/.test(src)
+  results.push({ name: 'duplicate-error-surfaced', pass, detail: pass ? '409 handled distinctly in UI.' : 'Still a generic error on duplicate.' })
+}
+
+async function checkEditInPlace() {
+  const src = await fetch('https://raw.githubusercontent.com/V1BHOR-28/super-chainsaw/main/src/components/aria/side-panels.tsx').then(r => r.text()).catch(() => '')
+  const pass = /editingId/.test(src)
+  results.push({ name: 'edit-in-place-present', pass, detail: pass ? 'Inline edit state found.' : 'No edit UI found.' })
+}
+
+async function checkPatchRegeneratesEmbedding() {
+  const src = await fetch('https://raw.githubusercontent.com/V1BHOR-28/super-chainsaw/main/src/app/api/memory/%5Bid%5D/route.ts').then(r => r.text()).catch(() => '')
+  const pass = /generateEmbedding/.test(src)
+  results.push({ name: 'patch-regenerates-embedding', pass, detail: pass ? 'Embedding regeneration found in PATCH.' : 'PATCH still leaves stale embeddings on content edit.' })
+}
+
+async function checkSourceColumnExists() {
+  const rows = await db.$queryRaw<Array<{ column_name: string }>>`
+    SELECT column_name FROM information_schema.columns
+    WHERE table_name = 'Memory' AND column_name = 'source'
+  `
+  results.push({ name: 'memory-source-column-exists', pass: rows.length > 0, detail: rows.length > 0 ? 'Column present.' : 'source column missing from Memory table.' })
+}
+
 async function main() {
   await checkConversationOrdering()
   await checkPersonalConfidenceNotDowngraded()
@@ -133,6 +175,13 @@ async function main() {
   await checkInBookOrderingDeterministic()
   await checkKnowledgePriorityGated()
   await checkDeleteByDocumentId()
+  // Memory panel fixes
+  await checkMemoryListPaginated()
+  await checkSemanticDedup()
+  await checkDuplicateErrorHandledInUi()
+  await checkEditInPlace()
+  await checkPatchRegeneratesEmbedding()
+  await checkSourceColumnExists()
 
   console.table(results.map((r) => ({ Check: r.name, Result: r.pass ? 'PASS' : 'FAIL', Detail: r.detail })))
   const anyFail = results.some((r) => !r.pass)

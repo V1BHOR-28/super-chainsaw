@@ -2,9 +2,11 @@ import { NextRequest, NextResponse } from 'next/server'
 export const runtime = "nodejs"
 import { db } from '@/lib/db'
 import { getAuthenticatedUserId } from '@/lib/user'
+import { generateEmbedding } from '@/lib/embeddings'
 
 /**
- * PATCH /api/memory/[id] — update content/category/pinned
+ * PATCH /api/memory/[id] — update content/category/pinned.
+ * When content changes, the old embedding is stale — regenerate it.
  */
 export async function PATCH(
   req: NextRequest,
@@ -23,6 +25,18 @@ export async function PATCH(
 
     const result = await db.memory.updateMany({ where: { id, userId }, data })
     if (result.count === 0) return NextResponse.json({ error: 'Not found' }, { status: 404 })
+
+    // Content changed — the old embedding is now stale, regenerate it.
+    if (data.content) {
+      const embedding = await generateEmbedding(data.content)
+      if (embedding) {
+        const vectorStr = `[${embedding.join(',')}]`
+        await db.$executeRaw`
+          UPDATE "Memory" SET embedding = ${vectorStr}::vector WHERE id = ${id} AND "userId" = ${userId}
+        `
+      }
+    }
+
     return NextResponse.json({ ok: true })
   } catch (err) {
     console.error('[memory.patch]', err)
