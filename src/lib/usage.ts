@@ -13,13 +13,13 @@ export const DEFAULT_DAILY_LIMIT = 100_000
 
 /**
  * Admin email allowlist — these users bypass the daily token limit entirely.
- * Set via ADMIN_EMAILS env var (comma-separated) on Vercel, with a hardcoded
- * fallback for the project creator so it works without any env config.
+ * Set via the ADMIN_EMAILS env var (comma-separated) in the Vercel dashboard.
  *
- * The creator (vstalove@gmail.com) trains/tests ARIA heavily and shouldn't
- * be blocked by the daily limit while iterating.
+ * There is intentionally NO hardcoded fallback — admin emails must be
+ * configured via environment variables so they never leak into source.
+ * If ADMIN_EMAILS is unset, no user receives the admin bypass.
  */
-const ADMIN_EMAILS_FALLBACK = ['vstalove@gmail.com']
+const ADMIN_EMAILS_FALLBACK: string[] = []
 
 function getAdminEmails(): Set<string> {
   const env = process.env.ADMIN_EMAILS

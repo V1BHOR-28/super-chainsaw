@@ -1,7 +1,7 @@
 import nodemailer from 'nodemailer'
 
 // Gmail credentials — set these in Vercel dashboard
-// GMAIL_USER: your Gmail address (e.g. vstalove@gmail.com)
+// GMAIL_USER: your Gmail address (e.g. you@gmail.com)
 // GMAIL_APP_PASSWORD: a 16-char app password from Google (NOT your regular password)
 //   Create at: https://myaccount.google.com/apppasswords
 const GMAIL_USER = process.env.GMAIL_USER || ''
