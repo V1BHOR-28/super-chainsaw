@@ -76,9 +76,10 @@ Respond with ONLY JSON: {"title": "...", "author": "...", "why": "one sentence, 
       // Check Archive.org availability
       const archiveResult = await checkArchiveOrgAvailability(title, author)
       if (archiveResult.available) {
+        console.log(`[surprise] "${title}" by ${author} → matched Archive.org item "${archiveResult.matchedTitle}"`)
         return NextResponse.json({
           suggestion: {
-            title: archiveResult.matchedTitle ?? title,
+            title,
             author,
             why: parsed.why ?? 'Been meaning to suggest this one.',
             canAddFullText: true,
