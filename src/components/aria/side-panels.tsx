@@ -20,6 +20,7 @@ import {
 } from 'lucide-react'
 import { toast } from 'sonner'
 import { useAriaStore } from '@/lib/store'
+import { clusterMemories } from '@/lib/cluster-memories'
 import type { Memory, Mood, Reminder } from '@/lib/types'
 
 /* ============================================================
@@ -342,113 +343,113 @@ function MemoryPanel() {
           </EmptyState>
         ) : (
           <>
-          <ul className="m-0 flex list-none flex-col gap-2 p-0">
-            {memories.map((m) => (
-              <li
-                key={m.id}
-                className="rounded-xl p-3"
-                style={{
-                  background: 'var(--aria-card)',
-                  border: '1px solid var(--aria-border)',
-                }}
+          {Object.entries(clusterMemories(memories)).map(([category, items]) => (
+            <div key={category} className="mb-4">
+              <h4
+                className="mb-2 text-[11px] uppercase tracking-wider"
+                style={{ color: 'var(--aria-fg-dim)' }}
               >
-                <div className="flex items-start justify-between gap-2">
-                  {editingId === m.id ? (
-                    <textarea
-                      autoFocus
-                      value={editValue}
-                      onChange={(e) => setEditValue(e.target.value)}
-                      onKeyDown={(e) => {
-                        if (e.key === 'Enter' && !e.shiftKey) {
-                          e.preventDefault()
-                          handleSaveEdit(m)
-                        } else if (e.key === 'Escape') {
-                          setEditingId(null)
-                        }
-                      }}
-                      rows={2}
-                      className="m-0 w-full resize-none rounded-md p-2 text-[13px] leading-relaxed outline-none"
-                      style={{
-                        color: 'var(--aria-fg)',
-                        background: 'var(--aria-bg-panel)',
-                        border: '1px solid var(--aria-accent)',
-                      }}
-                    />
-                  ) : (
-                    <p
-                      className="m-0 text-[13px] leading-relaxed"
-                      style={{ color: 'var(--aria-fg)' }}
-                    >
-                      {m.content}
-                    </p>
-                  )}
-                  <div className="flex shrink-0 items-center gap-0.5">
-                    {editingId === m.id ? (
-                      <IconButton
-                        onClick={() => handleSaveEdit(m)}
-                        title="Save"
-                        active
-                      >
-                        <Check size={14} />
-                      </IconButton>
-                    ) : (
-                      <IconButton
-                        onClick={() => startEdit(m)}
-                        title="Edit"
-                      >
-                        <Pencil size={14} />
-                      </IconButton>
-                    )}
-                    <IconButton
-                      onClick={() => handlePin(m)}
-                      title={m.pinned ? 'Unpin' : 'Pin'}
-                      active={m.pinned}
-                    >
-                      <Star
-                        size={14}
-                        fill={m.pinned ? 'currentColor' : 'none'}
-                      />
-                    </IconButton>
-                    <IconButton
-                      onClick={() => handleDelete(m.id)}
-                      title="Delete"
-                      danger
-                    >
-                      <Trash2 size={14} />
-                    </IconButton>
-                  </div>
-                </div>
-                <div className="mt-2 flex items-center gap-2">
-                  <span
-                    className="rounded-full px-2 py-0.5 text-[10px] uppercase tracking-wider"
+                {category} ({items.length})
+              </h4>
+              <ul className="m-0 flex list-none flex-col gap-2 p-0">
+                {items.map((m) => (
+                  <li
+                    key={m.id}
+                    className="rounded-xl p-3"
                     style={{
-                      color: 'var(--aria-accent-glow)',
+                      background: 'var(--aria-card)',
                       border: '1px solid var(--aria-border)',
-                      background: 'rgba(245, 158, 11, 0.04)',
                     }}
                   >
-                    {m.category}
-                  </span>
-                  {m.pinned && (
-                    <span
-                      className="text-[10px]"
-                      style={{ color: 'var(--aria-fg-dim)' }}
-                    >
-                      · pinned
-                    </span>
-                  )}
-                  {m.source === 'auto' && (
-                    <span
-                      className="text-[10px]"
-                      style={{ color: 'var(--aria-fg-dim)' }}
-                    >
-                      · auto-detected
-                    </span>
-                  )}
-                </div>
-              </li>
-            ))}
-          </ul>
+                    <div className="flex items-start justify-between gap-2">
+                      {editingId === m.id ? (
+                        <textarea
+                          autoFocus
+                          value={editValue}
+                          onChange={(e) => setEditValue(e.target.value)}
+                          onKeyDown={(e) => {
+                            if (e.key === 'Enter' && !e.shiftKey) {
+                              e.preventDefault()
+                              handleSaveEdit(m)
+                            } else if (e.key === 'Escape') {
+                              setEditingId(null)
+                            }
+                          }}
+                          rows={2}
+                          className="m-0 w-full resize-none rounded-md p-2 text-[13px] leading-relaxed outline-none"
+                          style={{
+                            color: 'var(--aria-fg)',
+                            background: 'var(--aria-bg-panel)',
+                            border: '1px solid var(--aria-accent)',
+                          }}
+                        />
+                      ) : (
+                        <p
+                          className="m-0 text-[13px] leading-relaxed"
+                          style={{ color: 'var(--aria-fg)' }}
+                        >
+                          {m.content}
+                        </p>
+                      )}
+                      <div className="flex shrink-0 items-center gap-0.5">
+                        {editingId === m.id ? (
+                          <IconButton
+                            onClick={() => handleSaveEdit(m)}
+                            title="Save"
+                            active
+                          >
+                            <Check size={14} />
+                          </IconButton>
+                        ) : (
+                          <IconButton
+                            onClick={() => startEdit(m)}
+                            title="Edit"
+                          >
+                            <Pencil size={14} />
+                          </IconButton>
+                        )}
+                        <IconButton
+                          onClick={() => handlePin(m)}
+                          title={m.pinned ? 'Unpin' : 'Pin'}
+                          active={m.pinned}
+                        >
+                          <Star
+                            size={14}
+                            fill={m.pinned ? 'currentColor' : 'none'}
+                          />
+                        </IconButton>
+                        <IconButton
+                          onClick={() => handleDelete(m.id)}
+                          title="Delete"
+                          danger
+                        >
+                          <Trash2 size={14} />
+                        </IconButton>
+                      </div>
+                    </div>
+                    <div className="mt-2 flex items-center gap-2">
+                      {m.pinned && (
+                        <span
+                          className="text-[10px]"
+                          style={{ color: 'var(--aria-fg-dim)' }}
+                        >
+                          · pinned
+                        </span>
+                      )}
+                      {m.source === 'auto' && (
+                        <span
+                          className="text-[10px]"
+                          style={{ color: 'var(--aria-fg-dim)' }}
+                        >
+                          · auto-detected
+                        </span>
+                      )}
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ))}
           {nextCursor && (
             <button
               onClick={handleLoadMore}

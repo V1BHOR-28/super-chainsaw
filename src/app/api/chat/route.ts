@@ -4,6 +4,7 @@ import { db } from '@/lib/db'
 import { getAuthenticatedUserId } from '@/lib/user'
 import { buildAriaSystemPrompt } from '@/lib/aria'
 import { updateConversationSummary } from '@/lib/conversation-summary'
+import { embedMessageAsync } from '@/lib/embed-message'
 import { recordUsage, estimateTokens, hasHitDailyLimit } from '@/lib/usage'
 
 /** Hard cap on user message length — protects against abuse / accidental huge pastes. */
@@ -134,7 +135,7 @@ export async function POST(req: NextRequest) {
     }
 
     // Persist the user message immediately
-    await db.message.create({
+    const userMessage = await db.message.create({
       data: {
         conversationId,
         role: 'user',
@@ -142,6 +143,8 @@ export async function POST(req: NextRequest) {
         attachmentsJson: attachments ? JSON.stringify(attachments) : null,
       },
     })
+    // Fire-and-forget: embed the user message for semantic search
+    embedMessageAsync(userMessage.id, actualContent).catch((err) => console.error('[embed-message] user msg failed:', err))
     // Touch conversation for sort order
     await db.conversation.update({ where: { id: conversationId }, data: { updatedAt: new Date() } })
 
@@ -1084,6 +1087,8 @@ No hedging, no disclaimers. Give your raw, unvarnished interpretation. Engage wi
               attachmentsJson: null,
             },
           })
+          // Fire-and-forget: embed ARIA's reply for semantic search
+          embedMessageAsync(saved.id, fullText).catch((err) => console.error('[embed-message] assistant msg failed:', err))
 
           // Auto-title the conversation on first exchange
           if (recentMessages.length <= 1) {

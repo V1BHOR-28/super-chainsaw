@@ -2,6 +2,7 @@ import { NextRequest, NextResponse } from 'next/server'
 export const runtime = "nodejs"
 import { db } from '@/lib/db'
 import { getAuthenticatedUserId } from '@/lib/user'
+import { generateEmbedding } from '@/lib/embeddings'
 
 /**
  * GET /api/conversations/search?q=<query>
@@ -24,6 +25,29 @@ export async function GET(req: NextRequest) {
 
     // Truncate query to prevent abuse
     const query = q.slice(0, 200)
+
+    // === SEMANTIC SEARCH PASS ===
+    // Find messages by MEANING, not just literal substrings. Embeds the query
+    // and finds nearest messages via pgvector cosine distance. Only keeps
+    // genuinely relevant matches (distance < 0.35). This is additive — the
+    // keyword pass below still runs for exact-name/quote matching.
+    const queryEmbedding = await generateEmbedding(query).catch(() => null)
+
+    let semanticMatches: Array<{ conversationId: string; content: string; role: string; distance: number }> = []
+    if (queryEmbedding) {
+      const vectorStr = `[${queryEmbedding.join(',')}]`
+      semanticMatches = await db.$queryRaw<Array<{ conversationId: string; content: string; role: string; distance: number }>>`
+        SELECT m."conversationId", m.content, m.role, m.embedding <=> ${vectorStr}::vector AS distance
+        FROM "Message" m
+        JOIN "Conversation" c ON c.id = m."conversationId"
+        WHERE c."userId" = ${userId} AND m.embedding IS NOT NULL
+        ORDER BY m.embedding <=> ${vectorStr}::vector
+        LIMIT 15
+      `
+      // Only keep genuinely relevant matches — cosine distance < 0.35 is a
+      // starting threshold, not gospel; tune against real queries once shipped.
+      semanticMatches = semanticMatches.filter((m) => m.distance < 0.35)
+    }
 
     // Find conversations owned by this user whose title matches
     const titleMatches = await db.conversation.findMany({
@@ -78,6 +102,7 @@ export async function GET(req: NextRequest) {
         matchSnippet: string
         matchRole: string
         matchCount: number
+        matchedIn: 'message' | 'semantic'
       }
     >()
 
@@ -92,6 +117,28 @@ export async function GET(req: NextRequest) {
           matchSnippet: buildSnippet(m.content, query),
           matchRole: m.role,
           matchCount: 1,
+          matchedIn: 'message' as const,
+        })
+      } else {
+        existing.matchCount += 1
+      }
+    }
+
+    // Merge semantic matches into the same byConv map. These are tagged
+    // matchedIn: 'semantic' so the UI can optionally distinguish "found by
+    // meaning" from "found by exact words."
+    for (const m of semanticMatches) {
+      const existing = byConv.get(m.conversationId)
+      if (!existing) {
+        byConv.set(m.conversationId, {
+          id: m.conversationId,
+          title: '', // filled from conversation lookup below if not already in titleMatches
+          pinned: false,
+          updatedAt: new Date().toISOString(),
+          matchSnippet: buildSnippet(m.content, query),
+          matchRole: m.role,
+          matchCount: 1,
+          matchedIn: 'semantic' as const,
         })
       } else {
         existing.matchCount += 1
@@ -110,7 +157,7 @@ export async function GET(req: NextRequest) {
       matchSnippet?: string
       matchRole?: string
       matchCount?: number
-      matchedIn: 'title' | 'message' | 'both'
+      matchedIn: 'title' | 'message' | 'both' | 'semantic'
     }> = []
 
     for (const c of titleMatches) {
@@ -132,17 +179,34 @@ export async function GET(req: NextRequest) {
 
     for (const [, m] of byConv) {
       if (!seen.has(m.id)) {
+        // For semantic-only matches, look up the conversation to get title/pinned/etc
+        let title = m.title
+        let pinned = m.pinned
+        let updatedAt = m.updatedAt
+        let messageCount = 0
+        if (!title && m.matchedIn === 'semantic') {
+          const convo = await db.conversation.findUnique({
+            where: { id: m.id },
+            select: { title: true, pinned: true, updatedAt: true, _count: { select: { messages: true } } },
+          })
+          if (convo) {
+            title = convo.title
+            pinned = convo.pinned
+            updatedAt = convo.updatedAt.toISOString()
+            messageCount = convo._count.messages
+          }
+        }
         results.push({
           id: m.id,
-          title: m.title,
-          pinned: m.pinned,
-          updatedAt: m.updatedAt,
-          messageCount: 0,
+          title,
+          pinned,
+          updatedAt,
+          messageCount,
           preview: '',
           matchSnippet: m.matchSnippet,
           matchRole: m.matchRole,
           matchCount: m.matchCount,
-          matchedIn: 'message',
+          matchedIn: m.matchedIn,
         })
       }
     }

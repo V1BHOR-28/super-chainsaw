@@ -365,7 +365,7 @@ type SearchResult = {
   matchSnippet?: string
   matchRole?: string
   matchCount?: number
-  matchedIn: 'title' | 'message' | 'both'
+  matchedIn: 'title' | 'message' | 'both' | 'semantic'
 }
 
 function ConversationList({

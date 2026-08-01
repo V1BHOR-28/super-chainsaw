@@ -290,6 +290,44 @@ async function checkPatternListWidened() {
   results.push({ name: 'pattern-list-widened', pass: count >= 8, detail: `Found ${count} patterns, expected >= 8.` })
 }
 
+// ─── FREE UPGRADES CHECKS ─────────────────────────────────────────────────
+// These verify the 3 free-upgrade features (semantic search, daily digest,
+// memory clustering) landed on main.
+
+async function checkMessageEmbeddingColumnExists() {
+  const rows = await db.$queryRaw<Array<{ column_name: string }>>`
+    SELECT column_name FROM information_schema.columns
+    WHERE table_name = 'Message' AND column_name = 'embedding'
+  `
+  results.push({ name: 'message-embedding-column-exists', pass: rows.length > 0, detail: rows.length > 0 ? 'Column present.' : 'Message.embedding missing.' })
+}
+
+async function checkSemanticSearchWired() {
+  const src = await getFileContent('src/app/api/conversations/search/route.ts')
+  const pass = /embedding <=>/.test(src)
+  results.push({ name: 'semantic-search-wired', pass, detail: pass ? 'Semantic query found in conversations/search.' : 'Still keyword-only.' })
+}
+
+async function checkDailyDigestColumnExists() {
+  const rows = await db.$queryRaw<Array<{ column_name: string }>>`
+    SELECT column_name FROM information_schema.columns
+    WHERE table_name = 'DailyDigest'
+  `
+  results.push({ name: 'daily-digest-table-exists', pass: rows.length > 0, detail: rows.length > 0 ? 'Table present.' : 'DailyDigest table missing.' })
+}
+
+async function checkCronConfigExists() {
+  const content = await getFileContent('vercel.json')
+  const pass = /daily-digest/.test(content)
+  results.push({ name: 'cron-config-exists', pass, detail: pass ? 'vercel.json references the cron.' : 'No cron config found.' })
+}
+
+async function checkMemoryClusteringPresent() {
+  const src = await getFileContent('src/components/aria/side-panels.tsx')
+  const pass = /clusterMemories/.test(src)
+  results.push({ name: 'memory-clustering-present', pass, detail: pass ? 'Clustering wired into MemoryPanel.' : 'Still a flat list.' })
+}
+
 async function main() {
   await checkConversationOrdering()
   await checkPersonalConfidenceNotDowngraded()
@@ -329,6 +367,12 @@ async function main() {
   await checkGeminiFallbackForDetection()
   await checkSpecificityRuleInPrompt()
   await checkPatternListWidened()
+  // Free upgrades
+  await checkMessageEmbeddingColumnExists()
+  await checkSemanticSearchWired()
+  await checkDailyDigestColumnExists()
+  await checkCronConfigExists()
+  await checkMemoryClusteringPresent()
 
   console.table(results.map((r) => ({ Check: r.name, Result: r.pass ? 'PASS' : 'FAIL', Detail: r.detail })))
   const anyFail = results.some((r) => !r.pass)
