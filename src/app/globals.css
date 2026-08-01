@@ -198,6 +198,13 @@
 }
 .aria-msg-enter { animation: aria-msg-appear 0.5s ease forwards; }
 
+/* AI bubble "settle" on stream completion */
+@keyframes aria-settle {
+  from { transform: scale(0.98); opacity: 0.85; }
+  to { transform: scale(1); opacity: 1; }
+}
+.aria-bubble-settle { animation: aria-settle 0.22s ease-out; }
+
 /* Greeting gradient text */
 .aria-greeting-grad {
   background: linear-gradient(135deg, #f59e0b 0%, #fcd34d 50%, #fbbf24 100%);
@@ -217,8 +224,8 @@
 
 /* Streaming caret */
 @keyframes aria-caret-blink {
-  0%, 50% { opacity: 1; }
-  51%, 100% { opacity: 0; }
+  0%, 50% { opacity: 1; box-shadow: 0 0 4px rgba(245, 158, 11, 0.6); }
+  51%, 100% { opacity: 0; box-shadow: none; }
 }
 .aria-caret {
   display: inline-block;
@@ -358,6 +365,21 @@
   to { opacity: 1; transform: translateY(0); }
 }
 .aria-fade-slide { animation: aria-fade-slide 0.35s ease forwards; }
+
+/* Send button "ready" pulse */
+@keyframes aria-btn-ready-pulse {
+  0% { transform: scale(1); }
+  50% { transform: scale(1.05); }
+  100% { transform: scale(1); }
+}
+.aria-btn-ready { animation: aria-btn-ready-pulse 0.2s ease-out; }
+
+/* Chip entrance */
+@keyframes aria-chip-fade-in {
+  from { opacity: 0; transform: translateY(6px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+.aria-chip-enter { animation: aria-chip-fade-in 0.3s ease-out forwards; }
 
 /* Mood selector pulse on hover */
 .aria-mood-chip {

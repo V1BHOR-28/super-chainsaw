@@ -23,7 +23,17 @@ export function Markdown({ content }: { content: string }) {
             const isBlock = String(children).includes('\n')
             if (!isBlock) {
               return (
-                <code className={className} {...props}>
+                <code
+                  className={className}
+                  style={{
+                    background: 'var(--aria-card)',
+                    border: '1px solid var(--aria-border)',
+                    borderRadius: '4px',
+                    padding: '1px 5px',
+                    fontSize: '0.9em',
+                  }}
+                  {...props}
+                >
                   {children}
                 </code>
               )
@@ -69,27 +79,49 @@ function CodeBlock({ language, value }: { language: string; value: string }) {
     }
   }
   return (
-    <div className="relative group my-3">
-      <button
-        onClick={copy}
-        className="absolute top-2 right-2 z-10 opacity-0 group-hover:opacity-100 transition-opacity flex items-center gap-1 text-xs px-2 py-1 rounded-md"
+    <div
+      className="my-3"
+      style={{
+        border: '1px solid var(--aria-border)',
+        borderRadius: '12px',
+        overflow: 'hidden',
+      }}
+    >
+      <div
+        className="flex items-center justify-between"
         style={{
-          background: 'rgba(245,158,11,0.1)',
-          color: 'var(--aria-accent-glow)',
-          border: '1px solid var(--aria-border)',
+          background: 'var(--aria-bg-panel)',
+          borderBottom: '1px solid var(--aria-border)',
+          padding: '6px 12px',
+          borderRadius: '12px 12px 0 0',
         }}
-        aria-label="Copy code"
       >
-        {copied ? <Check size={12} /> : <Copy size={12} />}
-        {copied ? 'Copied' : 'Copy'}
-      </button>
+        <span
+          className="text-xs uppercase tracking-wide"
+          style={{ color: 'var(--aria-fg-dim)' }}
+        >
+          {language}
+        </span>
+        <button
+          onClick={copy}
+          className="flex items-center gap-1 text-xs px-2 py-1 rounded-md"
+          style={{
+            background: 'rgba(245,158,11,0.1)',
+            color: 'var(--aria-accent-glow)',
+            border: '1px solid var(--aria-border)',
+          }}
+          aria-label="Copy code"
+        >
+          {copied ? <Check size={12} /> : <Copy size={12} />}
+          {copied ? 'Copied' : 'Copy'}
+        </button>
+      </div>
       <SyntaxHighlighter
         language={language}
         style={vscDarkPlus}
         customStyle={{
           background: 'var(--aria-bg-panel)',
-          border: '1px solid var(--aria-border)',
-          borderRadius: '12px',
+          borderRadius: '0 0 12px 12px',
           fontSize: '13px',
           margin: 0,
         }}

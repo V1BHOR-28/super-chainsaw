@@ -13,6 +13,7 @@ import {
   Menu,
   Download,
   Loader2,
+  Check,
 } from 'lucide-react'
 import { useAriaStore } from '@/lib/store'
 import { useAriaChat } from '@/hooks/use-aria-chat'
@@ -52,6 +53,13 @@ export function ChatArea() {
   const isNearBottomRef = useRef(true)
   const [greeting, setGreeting] = useState('')
   const [isUploading, setIsUploading] = useState(false)
+  // === VISUAL POLISH STATE (CHATEAREA-POLISH) ===
+  // Item 7: send-button "ready" pulse — briefly applies aria-btn-ready
+  // when canSend transitions false → true.
+  const [pulseReady, setPulseReady] = useState(false)
+  // Item 8: attachment thumbnail "just landed" indices — drives the
+  // brief checkmark badge that fades out ~1.2s after a thumbnail appears.
+  const [attachJustLanded, setAttachJustLanded] = useState<number[]>([])
 
   // === KEYBOARD SHORTCUTS (Phase 4.3) ===
   useEffect(() => {
@@ -124,6 +132,18 @@ export function ChatArea() {
     ta.style.height = 'auto'
     ta.style.height = Math.min(ta.scrollHeight, 140) + 'px'
   }, [input])
+
+  // Item 8: attachment thumbnail "just landed" tracker. When attachments
+  // are added, mark all current indices as just-landed for ~1.2s so each
+  // thumbnail can show a brief checkmark badge confirming upload-complete.
+  useEffect(() => {
+    if (pendingAttachments.length > 0) {
+      const newIndices = pendingAttachments.map((_, i) => i)
+      setAttachJustLanded(newIndices)
+      const t = setTimeout(() => setAttachJustLanded([]), 1200)
+      return () => clearTimeout(t)
+    }
+  }, [pendingAttachments.length])
 
   // If no active conversation, auto-create one on first send
   const ensureConversation = async (): Promise<string | null> => {
@@ -228,6 +248,19 @@ export function ChatArea() {
 
   const hasMessages = messages.length > 0
   const canSend = input.trim().length > 0 && !isStreaming
+
+  // Item 7: send-button "ready" pulse. When canSend flips to true (user
+  // typed something while not streaming), flash the aria-btn-ready class
+  // for ~200ms so the button visibly "wakes up". Declared AFTER canSend so
+  // the dependency-array reference is in scope (canSend is a const below
+  // the prior useEffects, so this effect must live here).
+  useEffect(() => {
+    if (canSend) {
+      setPulseReady(true)
+      const t = setTimeout(() => setPulseReady(false), 200)
+      return () => clearTimeout(t)
+    }
+  }, [canSend])
 
   const chips = [
     { label: 'Remind me to...', icon: Clock, action: () => setInput('Remind me to ') },
@@ -352,6 +385,17 @@ export function ChatArea() {
                   >
                     <X size={10} />
                   </button>
+                  {attachJustLanded.includes(i) && (
+                    <div
+                      className="absolute bottom-0.5 left-0.5 w-4 h-4 rounded-full flex items-center justify-center transition-opacity"
+                      style={{
+                        background: 'rgba(245,158,11,0.8)',
+                        color: 'var(--aria-bg)',
+                      }}
+                    >
+                      <Check size={10} strokeWidth={3} />
+                    </div>
+                  )}
                 </div>
               ))}
             </div>
@@ -418,7 +462,7 @@ export function ChatArea() {
               <button
                 onClick={handleSend}
                 disabled={!canSend}
-                className="w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0 transition-all"
+                className={`w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0 transition-all ${pulseReady ? 'aria-btn-ready' : ''}`}
                 style={{
                   background: canSend ? 'var(--aria-accent)' : 'var(--aria-fg-dim)',
                   color: 'var(--aria-bg)',
@@ -435,14 +479,15 @@ export function ChatArea() {
           {/* Feature chips */}
           {!hasMessages && (
             <div className="flex justify-center gap-2 mt-3 flex-wrap">
-              {chips.map((c) => {
+              {chips.map((c, i) => {
                 const Icon = c.icon
                 return (
                   <button
                     key={c.label}
                     onClick={c.action}
-                    className="text-xs px-3.5 py-1.5 rounded-full flex items-center gap-1.5 transition-colors"
+                    className="text-xs px-3.5 py-1.5 rounded-full flex items-center gap-1.5 transition-colors aria-chip-enter"
                     style={{
+                      animationDelay: `${i * 40}ms`,
                       background: 'var(--aria-card)',
                       border: '1px solid var(--aria-border)',
                       color: 'var(--aria-fg-muted)',

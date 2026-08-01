@@ -1,6 +1,6 @@
 'use client'
 
-import { useState } from 'react'
+import { useState, useEffect } from 'react'
 import { Volume2, Square, Globe, Image as ImageIcon, Eye, Copy, Check, Brain, Heart } from 'lucide-react'
 import { Markdown } from './markdown'
 import type { ChatMessage } from '@/lib/types'
@@ -22,6 +22,20 @@ export function MessageBubble({ message }: { message: ChatMessage }) {
   const user = useAriaStore((s) => s.user)
   const [playing, setPlaying] = useState(false)
   const [copied, setCopied] = useState(false)
+  // Briefly apply a "settle" animation to AI bubbles when streaming ends,
+  // giving the bubble a soft landing cue. Fires once per message.
+  const [settled, setSettled] = useState(false)
+  useEffect(() => {
+    if (!message.streaming && !settled) {
+      // The `!settled` guard ensures only one re-render fires, so the
+      // cascading-render concern behind react-hooks/set-state-in-effect
+      // doesn't apply here — this is a deliberate one-shot settle cue.
+      // eslint-disable-next-line react-hooks/set-state-in-effect
+      setSettled(true)
+      const t = setTimeout(() => setSettled(false), 250)
+      return () => clearTimeout(t)
+    }
+  }, [message.streaming, settled])
 
   // User's avatar initial — derived from their actual name, not hardcoded.
   // Falls back to "U" (User) if no name is set. This fixes the bug where the
@@ -92,6 +106,7 @@ export function MessageBubble({ message }: { message: ChatMessage }) {
           background: 'rgba(245,158,11,0.08)',
           color: 'var(--aria-accent-glow)',
           border: '1px solid var(--aria-border)',
+          boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.04)',
         }}
       >
         <Icon size={10} />
@@ -133,6 +148,7 @@ export function MessageBubble({ message }: { message: ChatMessage }) {
                   background: 'rgba(168, 152, 136, 0.06)',
                   color: 'var(--aria-fg-muted)',
                   border: '1px solid var(--aria-border)',
+                  boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.04)',
                 }}
                 title={`ARIA is holding ${message.memoriesUsed} memories about you in context for this reply.`}
               >
@@ -147,6 +163,7 @@ export function MessageBubble({ message }: { message: ChatMessage }) {
                   background: 'rgba(168, 152, 136, 0.06)',
                   color: 'var(--aria-fg-muted)',
                   border: '1px solid var(--aria-border)',
+                  boxShadow: 'inset 0 1px 0 rgba(255,255,255,0.04)',
                 }}
                 title={`ARIA is aware your last mood was "${message.moodContext}".`}
               >
@@ -178,7 +195,7 @@ export function MessageBubble({ message }: { message: ChatMessage }) {
         )}
 
         <div
-          className="px-4 py-3 rounded-2xl max-w-full"
+          className={`px-4 py-3 rounded-2xl max-w-full ${!isUser && settled ? 'aria-bubble-settle' : ''}`}
           style={
             isUser
               ? {
@@ -233,7 +250,7 @@ export function MessageBubble({ message }: { message: ChatMessage }) {
                   href={src.url}
                   target="_blank"
                   rel="noopener noreferrer"
-                  className="flex items-center gap-1.5 rounded-full px-2 py-1 transition-all hover:scale-105"
+                  className="flex items-center gap-1.5 rounded-full px-2 py-1 transition-all hover:-translate-y-0.5"
                   style={{
                     background: 'var(--aria-card)',
                     border: '1px solid var(--aria-border)',
