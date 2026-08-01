@@ -6,15 +6,15 @@ import { getAuthenticatedUserId } from '@/lib/user'
 import { generateWithFallback } from '@/lib/llm-fallback'
 
 /**
- * POST /api/knowledge/[documentId]/finish — mark all chunks of a document as finished,
+ * POST /api/knowledge/[id]/finish — mark all chunks of a document as finished,
  * then best-effort: ARIA writes a closing reflection as a journal memory entry.
  */
 export async function POST(
   _req: NextRequest,
-  { params }: { params: Promise<{ documentId: string }> }
+  { params }: { params: Promise<{ id: string }> }
 ) {
   try {
-    const { documentId } = await params
+    const { id: documentId } = await params
     const userId = await getAuthenticatedUserId()
     if (!userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
