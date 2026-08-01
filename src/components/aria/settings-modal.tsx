@@ -13,17 +13,20 @@ import {
   Info,
   ChevronDown,
   Check,
+  Brain,
 } from 'lucide-react'
 import { toast } from 'sonner'
 import { useAriaStore } from '@/lib/store'
 import type { AriaSettings, User as AriaUser } from '@/lib/types'
 import { Popover, PopoverTrigger, PopoverContent } from '@/components/ui/popover'
+import { MemoryPanel } from '@/components/aria/side-panels'
 
-type TabId = 'general' | 'account' | 'privacy' | 'customize'
+type TabId = 'general' | 'account' | 'privacy' | 'customize' | 'memory'
 
 const TABS: { id: TabId; label: string; icon: typeof SettingsIcon }[] = [
   { id: 'general', label: 'General', icon: SettingsIcon },
   { id: 'account', label: 'Account', icon: UserIcon },
+  { id: 'memory', label: 'Memory', icon: Brain },
   { id: 'privacy', label: 'Privacy', icon: Shield },
   { id: 'customize', label: 'Customize', icon: SlidersHorizontal },
 ]
@@ -733,6 +736,12 @@ export function SettingsModal() {
                   actionLabel="Browse"
                   onAction={() => toast.info('Coming soon')}
                 />
+              </section>
+            )}
+
+            {activeTab === 'memory' && (
+              <section className="aria-fade-slide" style={{ minHeight: '420px' }}>
+                <MemoryPanel />
               </section>
             )}
           </div>

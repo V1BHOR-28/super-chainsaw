@@ -3,7 +3,6 @@
 import { useEffect, useState, useRef } from 'react'
 import {
   MessageSquare,
-  Brain,
   Heart,
   Clock,
   Plus,
@@ -29,7 +28,6 @@ import type { Conversation } from '@/lib/types'
 
 const TABS = [
   { id: 'conversations' as const, label: 'Conversations', icon: MessageSquare },
-  { id: 'memory' as const, label: 'Memory', icon: Brain },
   { id: 'mood' as const, label: 'Mood', icon: Heart },
   { id: 'reminders' as const, label: 'Reminders', icon: Clock },
 ]

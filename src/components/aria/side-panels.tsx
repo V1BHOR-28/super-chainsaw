@@ -1,7 +1,7 @@
 'use client'
 
 import { useEffect, useRef, useState } from 'react'
-import { formatDistanceToNow, isPast, differenceInCalendarDays } from 'date-fns'
+import { isPast, differenceInCalendarDays } from 'date-fns'
 import {
   Plus,
   Star,
@@ -13,7 +13,6 @@ import {
   CloudRain,
   CheckCircle2,
   Circle,
-  X,
   Loader2,
   Pencil,
   Check,
@@ -167,7 +166,7 @@ function IconButton({
    MEMORY PANEL
    ============================================================ */
 
-function MemoryPanel() {
+export function MemoryPanel() {
   const memories = useAriaStore((s) => s.memories)
   const setMemories = useAriaStore((s) => s.setMemories)
   const upsertMemory = useAriaStore((s) => s.upsertMemory)
@@ -561,15 +560,9 @@ function MoodPanel() {
   const moods = useAriaStore((s) => s.moods)
   const setMoods = useAriaStore((s) => s.setMoods)
   const prependMood = useAriaStore((s) => s.prependMood)
-  const removeMood = useAriaStore((s) => s.removeMood)
   const user = useAriaStore((s) => s.user)
 
   const [savingKey, setSavingKey] = useState<MoodKey | null>(null)
-  const [loaded, setLoaded] = useState(false)
-  const [noteEditingId, setNoteEditingId] = useState<string | null>(null)
-  const [noteDraft, setNoteDraft] = useState('')
-  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null)
-  const confirmTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -579,11 +572,9 @@ function MoodPanel() {
         if (!res.ok) throw new Error('fetch failed')
         const data = (await res.json()) as { moods?: Mood[] }
         if (cancelled) return
-        if (data.moods) setMoods(data.moods.slice(0, 30))
+        if (data.moods) setMoods(data.moods.slice(0, 1))
       } catch {
-        if (!cancelled) toast.error('Could not load mood history')
-      } finally {
-        if (!cancelled) setLoaded(true)
+        /* silent — this is just for the active-chip highlight, not critical */
       }
     })()
     return () => {
@@ -611,78 +602,6 @@ function MoodPanel() {
       setSavingKey(null)
     }
   }
-
-  const handleSaveNote = async (id: string) => {
-    const trimmed = noteDraft.trim()
-    const prev = moods
-    // Optimistic update
-    setMoods(moods.map((m) => (m.id === id ? { ...m, note: trimmed || null } : m)))
-    setNoteEditingId(null)
-    setNoteDraft('')
-    try {
-      const res = await fetch(`/api/mood/${id}`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ note: trimmed || null }),
-      })
-      if (!res.ok) throw new Error('patch failed')
-    } catch {
-      setMoods(prev) // Rollback
-      toast.error('Could not save note')
-    }
-  }
-
-  const handleDelete = async (id: string) => {
-    const prev = moods
-    removeMood(id)
-    try {
-      const res = await fetch(`/api/mood/${id}`, { method: 'DELETE' })
-      if (!res.ok) throw new Error('delete failed')
-      toast.success('Mood entry removed')
-    } catch {
-      setMoods(prev)
-      toast.error('Could not delete mood entry')
-    }
-  }
-
-  // Two-step delete confirmation: first click arms the trash icon into a
-  // red "Confirm?" state; the second click fires the actual delete.
-  // Auto-resets after 3s, or on any click outside the confirming button.
-  const requestDelete = (id: string) => {
-    setConfirmDeleteId(id)
-    if (confirmTimerRef.current) clearTimeout(confirmTimerRef.current)
-    confirmTimerRef.current = setTimeout(() => setConfirmDeleteId(null), 3000)
-  }
-
-  const confirmDelete = (id: string) => {
-    if (confirmTimerRef.current) {
-      clearTimeout(confirmTimerRef.current)
-      confirmTimerRef.current = null
-    }
-    setConfirmDeleteId(null)
-    void handleDelete(id)
-  }
-
-  useEffect(() => {
-    if (!confirmDeleteId) return
-    const onMouseDown = (e: MouseEvent) => {
-      const target = e.target as HTMLElement | null
-      if (target?.closest?.('[data-confirm-trash]')) return
-      if (confirmTimerRef.current) {
-        clearTimeout(confirmTimerRef.current)
-        confirmTimerRef.current = null
-      }
-      setConfirmDeleteId(null)
-    }
-    document.addEventListener('mousedown', onMouseDown)
-    return () => document.removeEventListener('mousedown', onMouseDown)
-  }, [confirmDeleteId])
-
-  useEffect(() => {
-    return () => {
-      if (confirmTimerRef.current) clearTimeout(confirmTimerRef.current)
-    }
-  }, [])
 
   const name = user?.name || 'friend'
   const latestMood = moods[0]?.mood
@@ -731,165 +650,8 @@ function MoodPanel() {
         className="m-0 mb-3 px-1 text-[11px] leading-relaxed"
         style={{ color: 'var(--aria-fg-dim)' }}
       >
-        Tap a mood — ARIA reads it instantly. Notes are optional.
+        Tap a mood — ARIA reads it instantly.
       </p>
-
-      <div className="min-h-0 flex-1 overflow-y-auto px-1">
-        {!loaded ? (
-          <div className="flex items-center justify-center py-10">
-            <Loader2 size={18} className="animate-spin" style={{ color: 'var(--aria-fg-dim)' }} />
-          </div>
-        ) : moods.length === 0 ? (
-          <EmptyState>No mood logs yet. ARIA will adapt to how you feel.</EmptyState>
-        ) : (
-          <ul className="m-0 flex list-none flex-col gap-2 p-0">
-            {moods.map((m) => {
-              const def = MOODS.find((x) => x.key === m.mood)
-              const Icon = def?.icon ?? Meh
-              const isEditingNote = noteEditingId === m.id
-              return (
-                <li
-                  key={m.id}
-                  className="rounded-xl p-3"
-                  style={{
-                    background: 'var(--aria-card)',
-                    border: '1px solid var(--aria-border)',
-                  }}
-                >
-                  <div className="flex items-start gap-3">
-                    <div
-                      className="mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-full"
-                      style={{
-                        background: 'var(--aria-bg-panel)',
-                        color: def?.color ?? 'var(--aria-fg-muted)',
-                      }}
-                    >
-                      <Icon size={14} strokeWidth={1.5} />
-                    </div>
-                    <div className="min-w-0 flex-1">
-                      <div className="flex items-center justify-between gap-2">
-                        <span
-                          className="text-[13px] capitalize"
-                          style={{ color: 'var(--aria-fg)' }}
-                        >
-                          {m.mood}
-                        </span>
-                        <span
-                          className="text-[11px]"
-                          style={{ color: 'var(--aria-fg-dim)' }}
-                        >
-                          {formatDistanceToNow(new Date(m.createdAt), {
-                            addSuffix: true,
-                          })}
-                        </span>
-                      </div>
-                      {m.note && !isEditingNote && (
-                        <p
-                          className="m-0 mt-1 text-[12px] leading-relaxed"
-                          style={{ color: 'var(--aria-fg-muted)' }}
-                        >
-                          {m.note}
-                        </p>
-                      )}
-                    </div>
-                    <div className="flex shrink-0 items-center gap-0.5">
-                      {!m.note && !isEditingNote && (
-                        <IconButton
-                          onClick={() => {
-                            setNoteEditingId(m.id)
-                            setNoteDraft('')
-                          }}
-                          title="Add a note"
-                        >
-                          <Plus size={13} />
-                        </IconButton>
-                      )}
-                      {m.note && !isEditingNote && (
-                        <IconButton
-                          onClick={() => {
-                            setNoteEditingId(m.id)
-                            setNoteDraft(m.note || '')
-                          }}
-                          title="Edit note"
-                        >
-                          <Pencil size={12} />
-                        </IconButton>
-                      )}
-                      {confirmDeleteId === m.id ? (
-                        <span className="contents" data-confirm-trash>
-                          <IconButton
-                            onClick={() => confirmDelete(m.id)}
-                            title="Confirm delete?"
-                            danger
-                            confirming
-                          >
-                            <Check size={13} />
-                          </IconButton>
-                        </span>
-                      ) : (
-                        <IconButton
-                          onClick={() => requestDelete(m.id)}
-                          title="Delete"
-                          danger
-                        >
-                          <Trash2 size={13} />
-                        </IconButton>
-                      )}
-                    </div>
-                  </div>
-                  {/* Inline note editor */}
-                  {isEditingNote && (
-                    <div className="mt-2.5 flex gap-2 pl-10">
-                      <textarea
-                        value={noteDraft}
-                        onChange={(e) => setNoteDraft(e.target.value)}
-                        onKeyDown={(e) => {
-                          if (e.key === 'Enter' && (e.metaKey || e.ctrlKey)) {
-                            e.preventDefault()
-                            handleSaveNote(m.id)
-                          }
-                        }}
-                        placeholder="What's behind it? (optional)"
-                        rows={2}
-                        autoFocus
-                        className="flex-1 resize-none rounded-lg px-3 py-2 text-[12px] outline-none transition-colors placeholder:text-[var(--aria-fg-dim)] focus:border-[rgba(245,158,11,0.45)]"
-                        style={{
-                          background: 'var(--aria-bg-panel)',
-                          border: '1px solid var(--aria-border)',
-                          color: 'var(--aria-fg)',
-                          fontFamily: 'inherit',
-                          minWidth: 0,
-                        }}
-                      />
-                      <div className="flex shrink-0 flex-col gap-1">
-                        <button
-                          onClick={() => handleSaveNote(m.id)}
-                          className="flex h-7 w-full items-center justify-center rounded-md text-[var(--aria-bg)] transition-colors"
-                          style={{ background: 'var(--aria-accent)', border: '1px solid var(--aria-accent)' }}
-                          title="Save note"
-                        >
-                          <Check size={14} />
-                        </button>
-                        <button
-                          onClick={() => {
-                            setNoteEditingId(null)
-                            setNoteDraft('')
-                          }}
-                          aria-label="Cancel"
-                          className="flex h-7 w-full items-center justify-center rounded-md text-[var(--aria-fg-dim)] transition-colors hover:text-[var(--aria-fg)]"
-                          style={{ border: '1px solid var(--aria-border)' }}
-                        >
-                          <X size={14} />
-                        </button>
-                      </div>
-                    </div>
-                  )}
-                </li>
-              )
-            })}
-          </ul>
-        )}
-      </div>
     </div>
   )
 }
@@ -1179,7 +941,6 @@ export function SidePanels() {
   const activePanel = useAriaStore((s) => s.activePanel)
 
   if (activePanel === 'conversations') return null
-  if (activePanel === 'memory') return <MemoryPanel />
   if (activePanel === 'mood') return <MoodPanel />
   if (activePanel === 'reminders') return <RemindersPanel />
   return null
