@@ -1,6 +1,7 @@
-import { NextResponse } from 'next/server'
+import { NextRequest, NextResponse } from 'next/server'
 import { getAuthenticatedUserId } from '@/lib/user'
 import { generateWithFallback } from '@/lib/llm-fallback'
+import { checkArchiveOrgAvailability } from '@/lib/archive-org'
 import { db } from '@/lib/db'
 import { CURATED_CLASSICS } from '@/lib/archive-org-classics'
 
@@ -9,15 +10,22 @@ export const maxDuration = 30
 
 /**
  * POST /api/library-suggest/surprise — user-initiated "Surprise me" book suggestion.
- * Uses a curated list of pre-verified Archive.org classics (no live search).
- * The LLM picks from the known-good list based on the user's context; if the LLM
- * call fails entirely, a random fallback from the list is used — this route never
- * dead-ends the user with "couldn't find a match."
+ *
+ * The LLM suggests ANY real book from its own knowledge (not a fixed list), then we
+ * verify it's actually available on Internet Archive live. If verification fails, we
+ * retry with a different suggestion (up to 3 attempts total). If all attempts fail,
+ * we fall back to the curated list of pre-verified classics — this route never
+ * dead-ends the user with a null suggestion.
+ *
+ * The curated list is a last-resort safety net, not the suggestion pool.
  */
-export async function POST() {
+export async function POST(req: NextRequest) {
   try {
     const userId = await getAuthenticatedUserId()
     if (!userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+
+    const body = await req.json().catch(() => ({}))
+    const excludeTitles: string[] = (body.excludeTitles as string[]) || []
 
     const [existingBooks, memories] = await Promise.all([
       db.knowledge.findMany({ where: { userId }, distinct: ['documentId'], select: { title: true }, take: 20 }),
@@ -25,51 +33,84 @@ export async function POST() {
     ])
 
     const alreadyFedTitles = new Set(existingBooks.map(b => b.title.toLowerCase()))
-    const candidates = CURATED_CLASSICS.filter(c => !alreadyFedTitles.has(c.title.toLowerCase()))
+    const excludeSet = new Set(excludeTitles.map(t => t.toLowerCase()))
+
+    const startTime = Date.now()
+    const failedTitles: string[] = []
+
+    // === LIVE SUGGESTION + VERIFICATION (up to 3 attempts) ===
+    for (let attempt = 0; attempt < 3; attempt++) {
+      // Elapsed-time guard: don't start a 3rd attempt if we're already past 20s
+      if (Date.now() - startTime > 20000) break
+
+      const prompt = `You're a well-read friend recommending ONE specific real book to this reader — not from a fixed list, from your own knowledge of literature. Prioritize public-domain works (originally published before 1929) since those are the ones we can source full text for, but a great match matters more than a technicality — if you genuinely believe something published after 1929 fits far better, suggest it anyway, and we'll offer it as an interest even if we can't source the full text.
+
+Already read/fed: ${existingBooks.map(b => b.title).join(', ') || 'nothing yet'}
+Interested in: ${memories.map(m => m.content).join('; ') || 'unknown — pick something widely loved and accessible'}
+Already suggested this session, don't repeat: ${excludeTitles.length ? excludeTitles.join(', ') : 'none'}
+${failedTitles.length ? `Not available on Archive.org, don't suggest again: ${failedTitles.join(', ')}` : ''}
+
+Respond with ONLY JSON: {"title": "...", "author": "...", "why": "one sentence, casual, said like a friend recommending it — not a book-jacket blurb"}`
+
+      const raw = await generateWithFallback(prompt, { model: 'llama-3.3-70b-versatile' })
+      if (!raw) continue
+
+      let parsed: { title?: string; author?: string; why?: string } = {}
+      try {
+        const match = raw.match(/\{[\s\S]*\}/)
+        if (match) parsed = JSON.parse(match[0])
+      } catch {
+        continue
+      }
+      if (!parsed.title || !parsed.author) {
+        console.log(`[surprise] attempt ${attempt}: LLM response did not parse to a valid title/author. Raw: ${raw?.slice(0, 200)}`)
+        continue
+      }
+
+      const title = parsed.title
+      const author = parsed.author
+
+      // Skip if this was already suggested/excluded this session
+      if (excludeSet.has(title.toLowerCase()) || alreadyFedTitles.has(title.toLowerCase())) continue
+
+      // Check Archive.org availability
+      const archiveResult = await checkArchiveOrgAvailability(title, author)
+      if (archiveResult.available) {
+        return NextResponse.json({
+          suggestion: {
+            title: archiveResult.matchedTitle ?? title,
+            author,
+            why: parsed.why ?? 'Been meaning to suggest this one.',
+            canAddFullText: true,
+            sourceUrl: archiveResult.downloadUrl!,
+          },
+        })
+      }
+
+      // Not available — record and retry
+      failedTitles.push(`"${title}" by ${author}`)
+    }
+
+    // === FALLBACK: curated list (last resort) ===
+    console.log(`[library-suggest.surprise] fell back to curated list after ${failedTitles.length} failed live attempts`)
+
+    const candidates = CURATED_CLASSICS.filter(c =>
+      !alreadyFedTitles.has(c.title.toLowerCase()) &&
+      !excludeSet.has(c.title.toLowerCase())
+    )
 
     if (candidates.length === 0) {
-      // User has already been fed every curated classic — rare, but handle it.
+      // Extremely rare: user has been fed every curated classic AND every live suggestion failed
       return NextResponse.json({ suggestion: null })
     }
 
-    const prompt = `Pick ONE book from this list that best fits this reader, based on what they've engaged with. If you have no signal either way, pick a widely-loved, accessible one over a dense/difficult one.
-
-LIST (respond with the exact title from this list, nothing else):
-${candidates.map(c => `- "${c.title}" by ${c.author} [${c.tags.join(', ')}]`).join('\n')}
-
-Already read/fed: ${existingBooks.map(b => b.title).join(', ') || 'nothing yet'}
-Interested in: ${memories.map(m => m.content).join('; ') || 'unknown'}
-
-Respond with ONLY JSON: {"title": "...", "why": "one sentence, casual, said like a friend recommending it — not a book-jacket blurb"}`
-
-    const raw = await generateWithFallback(prompt)
-    let picked = candidates[Math.floor(Math.random() * candidates.length)] // safe fallback if LLM call fails entirely
-    let why = "Been meaning to suggest this one."
-
-    if (raw) {
-      try {
-        const match = raw.match(/\{[\s\S]*\}/)
-        if (match) {
-          const parsed = JSON.parse(match[0]) as { title?: string; why?: string }
-          const found = candidates.find(c => c.title.toLowerCase() === parsed.title?.toLowerCase())
-          if (found) {
-            picked = found
-            why = parsed.why ?? why
-          }
-          // If the LLM's returned title doesn't exactly match a candidate,
-          // we keep the random fallback picked above rather than failing —
-          // this is the whole point of this rewrite: never dead-end the user.
-        }
-      } catch {
-        // keep the random fallback
-      }
-    }
-
+    const picked = candidates[Math.floor(Math.random() * candidates.length)]
     return NextResponse.json({
       suggestion: {
         title: picked.title,
         author: picked.author,
-        why,
+        why: 'A classic worth revisiting.',
+        canAddFullText: true,
         sourceUrl: picked.textUrl,
       },
     })

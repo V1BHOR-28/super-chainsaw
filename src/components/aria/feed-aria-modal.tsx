@@ -770,19 +770,23 @@ function QuotesTab() {
 
 function SurpriseButton() {
   const [loading, setLoading] = useState(false)
-  const [suggestion, setSuggestion] = useState<{ title: string; author: string; why: string; sourceUrl: string } | null>(null)
+  const [suggestion, setSuggestion] = useState<{ title: string; author: string; why: string; sourceUrl: string | null; canAddFullText: boolean } | null>(null)
   const [adding, setAdding] = useState(false)
+  const [excludeTitles, setExcludeTitles] = useState<string[]>([])
 
   const handleSurprise = async () => {
     setLoading(true)
     setSuggestion(null)
     try {
-      const res = await fetch('/api/library-suggest/surprise', { method: 'POST' })
+      const res = await fetch('/api/library-suggest/surprise', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ excludeTitles }),
+      })
       const data = await res.json()
       if (data.suggestion) {
         setSuggestion(data.suggestion)
-      } else if (data.retry) {
-        toast.info('Couldn\'t find a public-domain match — try again?')
+        setExcludeTitles(prev => [...prev, data.suggestion.title])
       } else {
         toast.error('Could not generate a suggestion right now')
       }
@@ -812,6 +816,28 @@ function SurpriseButton() {
     }
   }
 
+  const handleAddInterest = async () => {
+    if (!suggestion) return
+    setAdding(true)
+    try {
+      const res = await fetch('/api/memory', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          content: `Interested in reading "${suggestion.title}" by ${suggestion.author}`,
+          category: 'reading-list',
+        }),
+      })
+      if (!res.ok && res.status !== 409) throw new Error('failed')
+      toast.success('Added to your reading interests')
+      setSuggestion(null)
+    } catch {
+      toast.error('Could not save — try again')
+    } finally {
+      setAdding(false)
+    }
+  }
+
   if (suggestion) {
     return (
       <div className="mt-4 rounded-xl p-4 text-left" style={{ background: 'var(--aria-card)', border: '1px solid rgba(245,158,11,0.25)' }}>
@@ -825,14 +851,25 @@ function SurpriseButton() {
         {suggestion.why && (
           <p className="text-[12px] m-0 mb-3 italic" style={{ color: 'var(--aria-fg-muted)' }}>{suggestion.why}</p>
         )}
-        <div className="flex gap-2">
+        <div className="flex flex-wrap gap-2">
+          {suggestion.canAddFullText && suggestion.sourceUrl && (
+            <button
+              onClick={handleAdd}
+              disabled={adding}
+              className="text-xs px-3 py-1.5 rounded-lg transition-colors"
+              style={{ background: 'var(--aria-accent)', color: 'var(--aria-bg)' }}
+            >
+              {adding ? <Loader2 size={12} className="animate-spin" /> : 'Add to my library'}
+            </button>
+          )}
           <button
-            onClick={handleAdd}
+            onClick={handleAddInterest}
             disabled={adding}
             className="text-xs px-3 py-1.5 rounded-lg transition-colors"
-            style={{ background: 'var(--aria-accent)', color: 'var(--aria-bg)' }}
+            style={{ border: '1px solid var(--aria-border)', color: 'var(--aria-fg)' }}
           >
-            {adding ? <Loader2 size={12} className="animate-spin" /> : 'Add to my library'}
+            {adding ? <Loader2 size={12} className="animate-spin" /> : null}
+            Save as interest
           </button>
           <button
             onClick={() => { setSuggestion(null); handleSurprise() }}
@@ -843,6 +880,11 @@ function SurpriseButton() {
             Not for me, try again
           </button>
         </div>
+        {!suggestion.canAddFullText && (
+          <p className="text-[11px] mt-2 m-0" style={{ color: 'var(--aria-fg-dim)' }}>
+            This one isn&apos;t available as free full text, but you can save it as a reading interest.
+          </p>
+        )}
       </div>
     )
   }
