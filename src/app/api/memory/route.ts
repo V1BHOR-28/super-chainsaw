@@ -2,7 +2,8 @@ import { NextRequest, NextResponse } from 'next/server'
 export const runtime = "nodejs"
 import { db } from '@/lib/db'
 import { getAuthenticatedUserId } from '@/lib/user'
-import { generateEmbedding } from '@/lib/embeddings'
+import { generateEmbedding, MAX_RELEVANCE_DISTANCE } from '@/lib/embeddings'
+import { hasHitUploadLimit, recordUpload } from '@/lib/usage'
 
 /**
  * GET /api/memory — list memories (cursor-based pagination, 50 per page).
@@ -47,6 +48,16 @@ export async function POST(req: NextRequest) {
   try {
     const userId = await getAuthenticatedUserId()
     if (!userId) return NextResponse.json({ error: "Unauthorized" }, { status: 401 })
+
+    // Rate limit: 100 memory writes/day for non-admin tiers
+    const uploadLimit = await hasHitUploadLimit(userId, 'memory')
+    if (uploadLimit.limited) {
+      return NextResponse.json(
+        { error: `Daily memory write limit reached (${uploadLimit.limit}). Resets at ${uploadLimit.resetsAt}.` },
+        { status: 429 }
+      )
+    }
+
     const body = await req.json().catch(() => ({}))
     const content = (body.content as string)?.trim()
     if (!content) return NextResponse.json({ error: 'content required' }, { status: 400 })
@@ -55,9 +66,15 @@ export async function POST(req: NextRequest) {
     const embedding = await generateEmbedding(content)
 
     // Literal word-overlap check (cheap, catches near-identical phrasing)
+    // Limited to 200 most recent — only needs to catch recently-created
+    // near-duplicates, not compare against a user's entire multi-year history.
+    // The semantic dedup check below (LIMIT 1 via pgvector) is the primary
+    // catch-all for older duplicates expressed in different words.
     const existing = await db.memory.findMany({
       where: { userId },
       select: { id: true, content: true, category: true },
+      take: 200,
+      orderBy: { updatedAt: 'desc' },
     })
     let dup = existing.find((m) => wordOverlap(m.content, content) > 0.7)
 
@@ -99,6 +116,9 @@ export async function POST(req: NextRequest) {
       `
     }
 
+    // Record the write for rate limiting
+    await recordUpload(userId, 'memory').catch(() => {})
+
     return NextResponse.json({ memory })
   } catch (err) {
     console.error('[memory.create]', err)
@@ -130,6 +150,8 @@ export async function semanticMemorySearch(userId: string, query: string, limit:
   })
 
   // Semantic search for non-pinned memories
+  // Pinned memories are NOT filtered by distance — they're explicitly user-curated
+  // and always included regardless of relevance to the current query.
   const vectorStr = `[${embedding.join(',')}]`
   const semanticResults = await db.$queryRaw<Array<{ content: string; category: string; pinned: boolean }>>`
     SELECT content, category, pinned
@@ -137,6 +159,7 @@ export async function semanticMemorySearch(userId: string, query: string, limit:
     WHERE "userId" = ${userId}
       AND pinned = false
       AND embedding IS NOT NULL
+      AND embedding <=> ${vectorStr}::vector < ${MAX_RELEVANCE_DISTANCE}
     ORDER BY embedding <=> ${vectorStr}::vector
     LIMIT ${limit}
   `

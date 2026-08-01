@@ -16,6 +16,15 @@ const GEMINI_API_KEY = process.env.GEMINI_API_KEY || ''
 const EMBEDDING_DIMENSIONS = 768
 
 /**
+ * Maximum cosine distance (via pgvector `<=>`) for a semantic search result to
+ * be considered a genuine match. Lower = more similar. Results above this
+ * threshold are filtered out so the model doesn't receive loosely-related
+ * chunks as if they were relevant context. Tunable — start at 0.5 and adjust
+ * based on real query quality.
+ */
+export const MAX_RELEVANCE_DISTANCE = 0.5
+
+/**
  * Generate an embedding vector for a piece of text using Gemini.
  * Returns a number[] of length 768 (or null if API key not configured).
  */

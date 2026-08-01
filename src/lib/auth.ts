@@ -7,7 +7,13 @@ import bcrypt from 'bcryptjs'
 // All secrets read from environment variables — set these in Vercel dashboard
 const GOOGLE_CLIENT_ID = process.env.GOOGLE_CLIENT_ID || ''
 const GOOGLE_CLIENT_SECRET = process.env.GOOGLE_CLIENT_SECRET || ''
-const NEXTAUTH_SECRET = process.env.NEXTAUTH_SECRET || 'fallback-dev-secret-change-in-production'
+// No hardcoded fallback — deploying to production without NEXTAUTH_SECRET
+// must fail loudly, not silently sign sessions with a known string.
+const NEXTAUTH_SECRET = process.env.NEXTAUTH_SECRET
+if (!NEXTAUTH_SECRET && process.env.NODE_ENV === 'production') {
+  throw new Error('NEXTAUTH_SECRET must be set in production')
+}
+const EFFECTIVE_SECRET = NEXTAUTH_SECRET || 'dev-only-not-for-production'
 
 /**
  * NextAuth configuration — ARIA's authentication system.
@@ -203,6 +209,6 @@ export const authOptions: NextAuthOptions = {
   // trustHost: true tells NextAuth to use the request's Host header to
   // determine the URL. This works on z.ai preview domains, localhost, and
   // production without any NEXTAUTH_URL config.
-  secret: NEXTAUTH_SECRET,
+  secret: EFFECTIVE_SECRET,
   trustHost: true,
 }

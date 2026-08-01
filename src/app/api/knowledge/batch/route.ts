@@ -4,6 +4,7 @@ export const maxDuration = 30
 import { db } from '@/lib/db'
 import { getAuthenticatedUserId } from '@/lib/user'
 import { generateEmbedding, embeddingToPgVector } from '@/lib/embeddings'
+import { hasHitUploadLimit, recordUpload } from '@/lib/usage'
 
 /**
  * POST /api/knowledge/batch
@@ -34,6 +35,15 @@ export async function POST(req: NextRequest) {
     const userId = await getAuthenticatedUserId()
     if (!userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
+    // Rate limit: 20 knowledge uploads/day for non-admin tiers
+    const uploadLimit = await hasHitUploadLimit(userId, 'knowledge')
+    if (uploadLimit.limited) {
+      return NextResponse.json(
+        { error: `Daily knowledge upload limit reached (${uploadLimit.limit}). Resets at ${uploadLimit.resetsAt}.` },
+        { status: 429 }
+      )
+    }
+
     const body = await req.json()
     const {
       documentId,
@@ -55,6 +65,36 @@ export async function POST(req: NextRequest) {
 
     if (!chunks || !Array.isArray(chunks) || chunks.length === 0) {
       return NextResponse.json({ error: 'No chunks provided' }, { status: 400 })
+    }
+
+    // === INPUT SIZE VALIDATION ===
+    // Reject oversized payloads BEFORE any embedding calls or DB writes happen.
+    const MAX_CHUNKS_PER_REQUEST = 50
+    const MAX_CHUNK_LENGTH = 4500
+    const MAX_TOTAL_SIZE = 150_000
+
+    if (chunks.length > MAX_CHUNKS_PER_REQUEST) {
+      return NextResponse.json(
+        { error: `Too many chunks: ${chunks.length} (maximum ${MAX_CHUNKS_PER_REQUEST} per request)` },
+        { status: 400 }
+      )
+    }
+
+    for (let i = 0; i < chunks.length; i++) {
+      if (typeof chunks[i] !== 'string' || chunks[i].length > MAX_CHUNK_LENGTH) {
+        return NextResponse.json(
+          { error: `Chunk ${i} exceeds maximum size of ${MAX_CHUNK_LENGTH} characters` },
+          { status: 400 }
+        )
+      }
+    }
+
+    const totalSize = chunks.reduce((sum, c) => sum + c.length, 0)
+    if (totalSize > MAX_TOTAL_SIZE) {
+      return NextResponse.json(
+        { error: `Total chunk size ${totalSize} exceeds maximum of ${MAX_TOTAL_SIZE} characters per request` },
+        { status: 400 }
+      )
     }
 
     // Generate embeddings for all chunks in this batch in parallel.
@@ -105,6 +145,9 @@ export async function POST(req: NextRequest) {
         // Continue — partial storage is better than total failure
       }
     }
+
+    // Record the upload for rate limiting
+    await recordUpload(userId, 'knowledge').catch(() => {})
 
     return NextResponse.json({
       ok: true,

@@ -11,6 +11,11 @@ export const DAILY_LIMITS: Record<string, number> = {
 
 export const DEFAULT_DAILY_LIMIT = 100_000
 
+// Per-UTC-day upload limits for non-admin tiers.
+// Admin bypasses these entirely (mirrors hasHitDailyLimit's admin check).
+const DAILY_KNOWLEDGE_UPLOAD_LIMIT = 20
+const DAILY_MEMORY_WRITE_LIMIT = 100
+
 /**
  * Admin email allowlist — these users bypass the daily token limit entirely.
  * Set via the ADMIN_EMAILS env var (comma-separated) in the Vercel dashboard.
@@ -141,4 +146,52 @@ export async function hasHitDailyLimit(): Promise<{ limited: boolean; tokensUsed
  */
 export function estimateTokens(text: string): number {
   return Math.ceil(text.length / 4)
+}
+
+/**
+ * Increment today's upload count for a user. Called after a successful
+ * knowledge upload or memory write. Uses the same Usage row as token tracking
+ * (smallest schema change — one table, one unique constraint, two new fields).
+ */
+export async function recordUpload(userId: string, type: 'knowledge' | 'memory'): Promise<void> {
+  const today = midnightUTC()
+  const field = type === 'knowledge' ? 'knowledgeUploadCount' : 'memoryWriteCount'
+  await db.usage.upsert({
+    where: { userId_date: { userId, date: today } },
+    create: { userId, date: today, [field]: 1 },
+    update: { [field]: { increment: 1 } },
+  })
+}
+
+/**
+ * Check if a user has hit their daily upload limit for knowledge or memory.
+ * Admins bypass entirely. Returns { limited, limit, count, resetsAt } so the
+ * 429 response can include the limit and reset time.
+ */
+export async function hasHitUploadLimit(
+  userId: string,
+  type: 'knowledge' | 'memory'
+): Promise<{ limited: boolean; limit: number; count: number; resetsAt: string }> {
+  // Admin bypass
+  const user = await db.user.findUnique({ where: { id: userId }, select: { email: true, tier: true } })
+  if (user?.tier === 'Admin' || (user?.email && getAdminEmails().has(user.email.toLowerCase()))) {
+    return { limited: false, limit: Number.MAX_SAFE_INTEGER, count: 0, resetsAt: nextMidnightUTC().toISOString() }
+  }
+
+  const today = midnightUTC()
+  const limit = type === 'knowledge' ? DAILY_KNOWLEDGE_UPLOAD_LIMIT : DAILY_MEMORY_WRITE_LIMIT
+  const field = type === 'knowledge' ? 'knowledgeUploadCount' : 'memoryWriteCount'
+
+  const row = await db.usage.findUnique({
+    where: { userId_date: { userId, date: today } },
+    select: { [field]: true },
+  })
+  const count = row?.[field] != null ? Number(row[field]) : 0
+
+  return {
+    limited: count >= limit,
+    limit,
+    count,
+    resetsAt: nextMidnightUTC().toISOString(),
+  }
 }

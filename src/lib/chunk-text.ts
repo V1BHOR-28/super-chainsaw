@@ -50,3 +50,34 @@ export function chunkText(text: string, targetSize = TARGET_CHUNK_SIZE, overlap 
 
   return finalChunks.length > 0 ? finalChunks : [text.slice(0, targetSize)]
 }
+
+const STOPWORDS = new Set([
+  'what', 'how', 'when', 'where', 'which', 'think', 'about', 'does', 'will',
+  'would', 'could', 'should', 'there', 'their', 'the', 'and', 'for', 'are',
+  'was', 'were', 'has', 'have', 'his', 'her', 'its', 'from', 'this', 'that',
+  'with', 'but', 'not', 'you', 'all', 'can', 'had', 'one', 'our', 'out', 'day',
+  'get', 'him', 'may', 'new', 'now', 'old', 'see', 'way', 'who', 'did', 'let',
+  'say', 'she', 'too', 'use', 'the', 'over', 'last', 'past', 'been', 'feeling',
+  'year', 'years', 'old', 'male', 'female', 'patient', 'history', 'present',
+  'illness', 'chief', 'complaint', 'vital', 'signs', 'general', 'exam',
+  'physical', 'notes', 'requires', 'noted', 'also', 'two', 'three', 'mild',
+  'moderate', 'severe', 'right', 'left', 'bilateral', 'without', 'upon',
+  'reported', 'denies', 'month', 'months', 'week', 'weeks', 'following',
+])
+
+/**
+ * Extract distinctive keywords from a text string, filtering out common English
+ * stop words + medical filler. Shared between the keyword-fallback search and
+ * the knowledge-context truncation logic so they use the same definition of
+ * "what words matter in this query."
+ *
+ * Returns up to 8 lowercased keywords, each longer than 2 characters.
+ */
+export function extractKeywords(text: string): string[] {
+  return text
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, ' ')
+    .split(/\s+/)
+    .filter((w) => w.length > 2 && !STOPWORDS.has(w))
+    .slice(0, 8)
+}

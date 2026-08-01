@@ -669,12 +669,11 @@ export function SettingsModal() {
                     training policies.
                   </p>
                 </div>
-                <SettingRow
-                  title="Local-First Encryption"
-                  desc="All conversations are encrypted on-device before syncing."
-                >
-                  <AriaToggle checked disabled />
-                </SettingRow>
+                {/* "Local-First Encryption" toggle removed (Option A): no client-side
+                    encryption is implemented — Message.content is stored as plaintext.
+                    Shipping a toggle claiming otherwise would be dishonest. If real
+                    client-side encryption is added later (WebCrypto AES-GCM, per-user
+                    key in IndexedDB), the toggle can be restored with real behavior. */}
                 <SettingRow
                   title="Training Data Opt-In"
                   desc="Allow anonymized snippets to improve ARIA's reasoning. (Off by default)"

@@ -175,6 +175,8 @@ model Usage {
   date         DateTime
   tokensUsed   Int      @default(0)
   requestCount Int      @default(0)
+  knowledgeUploadCount Int @default(0) // per-UTC-day count of knowledge upload requests
+  memoryWriteCount     Int @default(0) // per-UTC-day count of memory create requests
   createdAt    DateTime @default(now())
   updatedAt    DateTime @updatedAt
 

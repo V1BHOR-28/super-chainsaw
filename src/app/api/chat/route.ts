@@ -6,9 +6,44 @@ import { buildAriaSystemPrompt } from '@/lib/aria'
 import { updateConversationSummary } from '@/lib/conversation-summary'
 import { embedMessageAsync } from '@/lib/embed-message'
 import { recordUsage, estimateTokens, hasHitDailyLimit } from '@/lib/usage'
+import { extractKeywords } from '@/lib/chunk-text'
 
 /** Hard cap on user message length — protects against abuse / accidental huge pastes. */
 const MAX_MESSAGE_LENGTH = 12_000
+
+/**
+ * Extract a window of `maxChars` from `content`, centered on the first position
+ * where any of `keywords` appears. Falls back to slicing from the start if no
+ * keyword is found (e.g. pure semantic matches on paraphrased content).
+ */
+function centerOnKeyword(content: string, keywords: string[], maxChars: number): string {
+  if (content.length <= maxChars) return content
+  if (keywords.length === 0) return content.slice(0, maxChars)
+
+  const lowerContent = content.toLowerCase()
+  let bestPos = -1
+  for (const kw of keywords) {
+    const idx = lowerContent.indexOf(kw)
+    if (idx !== -1) {
+      bestPos = idx
+      break
+    }
+  }
+  if (bestPos === -1) return content.slice(0, maxChars)
+
+  // Center the window on the keyword position, clamped to chunk bounds
+  const half = Math.floor(maxChars / 2)
+  let start = bestPos - half
+  if (start < 0) start = 0
+  let end = start + maxChars
+  if (end > content.length) {
+    end = content.length
+    start = Math.max(0, end - maxChars)
+  }
+  const prefix = start > 0 ? '…' : ''
+  const suffix = end < content.length ? '…' : ''
+  return prefix + content.slice(start, end) + suffix
+}
 
 /**
  * POST /api/chat — streaming chat completion (SSE)
@@ -185,7 +220,7 @@ export async function POST(req: NextRequest) {
     let knowledgeContext: string | undefined
     let knowledgeFromSemanticSearch = false
     try {
-      const { generateEmbedding, embeddingToPgVector } = await import('@/lib/embeddings')
+      const { generateEmbedding, embeddingToPgVector, MAX_RELEVANCE_DISTANCE } = await import('@/lib/embeddings')
       const queryEmbedding = await generateEmbedding(actualContent)
       let knowledgeResults: Array<{ title: string; content: string }> = []
 
@@ -227,10 +262,15 @@ export async function POST(req: NextRequest) {
         // === IN-BOOK FILTERED SEARCH ===
         if (bookFilter) {
           // Restrict to chunks from this specific book
-          knowledgeResults = await db.$queryRawUnsafe<Array<{ title: string; content: string }>>(
-            `SELECT title, content FROM "Knowledge" WHERE "userId" = $1 AND embedding IS NOT NULL AND (title = $2 OR title LIKE $3) ORDER BY embedding <=> $4::vector LIMIT 5`,
-            userId, bookFilter, `${bookFilter} — Part%`, vectorStr
-          )
+          knowledgeResults = await db.$queryRaw<Array<{ title: string; content: string }>>`
+            SELECT title, content FROM "Knowledge"
+            WHERE "userId" = ${userId}
+              AND embedding IS NOT NULL
+              AND (title = ${bookFilter} OR title LIKE ${`${bookFilter} — Part%`})
+              AND embedding <=> ${vectorStr}::vector < ${MAX_RELEVANCE_DISTANCE}
+            ORDER BY embedding <=> ${vectorStr}::vector
+            LIMIT 5
+          `
         } else {
           // === MULTI-BOOK COMPARISON ===
           // Detect if the user is asking a comparison question (e.g. "compare Marcus
@@ -247,6 +287,7 @@ export async function POST(req: NextRequest) {
               FROM "Knowledge"
               WHERE "userId" = ${userId}
                 AND embedding IS NOT NULL
+                AND embedding <=> ${vectorStr}::vector < ${MAX_RELEVANCE_DISTANCE}
               ORDER BY embedding <=> ${vectorStr}::vector
               LIMIT 8
             `
@@ -268,6 +309,7 @@ export async function POST(req: NextRequest) {
               FROM "Knowledge"
               WHERE "userId" = ${userId}
                 AND embedding IS NOT NULL
+                AND embedding <=> ${vectorStr}::vector < ${MAX_RELEVANCE_DISTANCE}
               ORDER BY embedding <=> ${vectorStr}::vector
               LIMIT 5
             `
@@ -288,39 +330,22 @@ export async function POST(req: NextRequest) {
       // most distinctive words from the user's message and matches them.
       // Includes numbers (e.g. "chapter 8") so chapter-specific questions work.
       if (knowledgeResults.length === 0) {
-        // Extract keywords — filter out common English words + medical filler
-        // so the search focuses on DISTINCTIVE terms (disease names, body parts,
-        // specific symptoms like "myeloma", "protein", "electrophoresis").
-        const keywords = actualContent
-          .toLowerCase()
-          .replace(/[^a-z0-9\s]/g, ' ')
-          .split(/\s+/)
-          .filter((w) => w.length > 2 && ![
-            'what', 'how', 'when', 'where', 'which', 'think', 'about', 'does', 'will',
-            'would', 'could', 'should', 'there', 'their', 'the', 'and', 'for', 'are',
-            'was', 'were', 'has', 'have', 'his', 'her', 'its', 'from', 'this', 'that',
-            'with', 'but', 'not', 'you', 'all', 'can', 'had', 'one', 'our', 'out', 'day',
-            'get', 'him', 'may', 'new', 'now', 'old', 'see', 'way', 'who', 'did', 'let',
-            'say', 'she', 'too', 'use', 'the', 'over', 'last', 'past', 'been', 'feeling',
-            'year', 'years', 'old', 'male', 'female', 'patient', 'history', 'present',
-            'illness', 'chief', 'complaint', 'vital', 'signs', 'general', 'exam',
-            'physical', 'notes', 'requires', 'noted', 'also', 'two', 'three', 'mild',
-            'moderate', 'severe', 'right', 'left', 'bilateral', 'without', 'upon',
-            'reported', 'denies', 'month', 'months', 'week', 'weeks', 'following',
-          ].includes(w))
-          .slice(0, 8)
+        const keywords = extractKeywords(actualContent)
         if (keywords.length > 0) {
           // Search using OR — any keyword match returns the chunk.
           // Rank by number of keyword matches (chunks matching more keywords
           // are more relevant). This helps medical cases where the user lists
           // multiple symptoms that should all point to the same diagnosis.
-          const conditions = keywords
-            .map((kw) => `LOWER(content) LIKE '%${kw.replace(/'/g, "''")}%' OR LOWER(title) LIKE '%${kw.replace(/'/g, "''")}%'`)
-            .join(' OR ')
-          knowledgeResults = await db.$queryRawUnsafe<Array<{ title: string; content: string }>>(
-            `SELECT title, content FROM "Knowledge" WHERE "userId" = $1 AND (${conditions}) ORDER BY "createdAt" DESC LIMIT 5`,
-            userId
-          )
+          const patterns = keywords.map((kw) => `%${kw}%`)
+          knowledgeResults = await db.$queryRaw<Array<{ title: string; content: string }>>`
+            SELECT title, content FROM "Knowledge"
+            WHERE "userId" = ${userId}
+              AND (
+                LOWER(content) LIKE ANY(${patterns}::text[])
+                OR LOWER(title) LIKE ANY(${patterns}::text[])
+              )
+            ORDER BY "createdAt" DESC LIMIT 5
+          `
         }
       }
 
@@ -347,8 +372,15 @@ export async function POST(req: NextRequest) {
           maxCharsPerChunk = 800
         }
         const chunksToShow = knowledgeResults.slice(0, maxChunks)
+        // Extract keywords from the user's query to find the most relevant
+        // position within each chunk, so truncation centers on the relevant
+        // sentence rather than always slicing from the start.
+        const truncationKeywords = extractKeywords(actualContent)
         knowledgeContext = chunksToShow
-          .map((k, i) => `--- LIBRARY ${i + 1}: ${k.title} ---\n${k.content.slice(0, maxCharsPerChunk)}`)
+          .map((k, i) => {
+            const snippet = centerOnKeyword(k.content, truncationKeywords, maxCharsPerChunk)
+            return `--- LIBRARY ${i + 1}: ${k.title} ---\n${snippet}`
+          })
           .join('\n\n')
         // ARIA's CORE IDENTITY: her digital library is her PRIMARY knowledge.
         // She thinks from the book, cites it, and forms opinions from it.

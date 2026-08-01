@@ -13,6 +13,7 @@
     "db:migrate": "prisma migrate dev",
     "db:reset": "prisma migrate reset",
     "verify:memory": "tsx scripts/verify-memory.ts",
+    "db:indexes": "tsx scripts/add-vector-indexes.ts",
     "backfill:memory": "tsx scripts/backfill-memory-embeddings.ts"
   },
   "dependencies": {

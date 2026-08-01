@@ -4,6 +4,7 @@ export const maxDuration = 60
 import { db } from '@/lib/db'
 import { getAuthenticatedUserId } from '@/lib/user'
 import { generateEmbedding, embeddingToPgVector } from '@/lib/embeddings'
+import { hasHitUploadLimit, recordUpload } from '@/lib/usage'
 import { chunkText } from '@/lib/chunk-text'
 
 /**
@@ -184,6 +185,15 @@ export async function POST(req: NextRequest) {
   try {
     const userId = await getAuthenticatedUserId()
     if (!userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
+
+    // Rate limit: 20 knowledge uploads/day for non-admin tiers
+    const uploadLimit = await hasHitUploadLimit(userId, 'knowledge')
+    if (uploadLimit.limited) {
+      return NextResponse.json(
+        { error: `Daily knowledge upload limit reached (${uploadLimit.limit}). Resets at ${uploadLimit.resetsAt}.` },
+        { status: 429 }
+      )
+    }
 
     let title: string | undefined
     let content: string
@@ -383,6 +393,9 @@ export async function POST(req: NextRequest) {
     } catch (e) {
       console.warn('[knowledge.upload] Auto-summary failed (non-blocking):', e instanceof Error ? e.message : String(e))
     }
+
+    // Record the upload for rate limiting
+    await recordUpload(userId, 'knowledge').catch(() => {})
 
     return NextResponse.json({
       ok: true,
