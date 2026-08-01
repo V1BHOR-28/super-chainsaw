@@ -410,270 +410,10 @@ export async function POST(req: NextRequest) {
 
     if (tool === 'web_search') {
       try {
-        const results: string[] = []
-        const lowerContent = actualContent.toLowerCase()
-        const now = new Date()
-        const dateStr = now.toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })
-        const yearStr = String(now.getFullYear())
-        let webProviderHit = false // true once Tavily OR Serper returns usable results
-
-        // === SEARCH QUERY REFORMULATION ===
-        // Opinion phrasings ("what do you think about X vs Y?") do NOT surface the
-        // actual match RESULT — search engines return previews & opinion pieces.
-        // When we detect a sports matchup, ALSO run factual companion queries
-        // ("X vs Y result score winner {year}") so we pull the real outcome.
-        const queries = new Set<string>([actualContent])
-        const matchup = actualContent.match(
-          /\b([A-Za-z][\w.'-]*(?:\s+[A-Za-z][\w.'-]*)?)\s+(?:vs?\.?|versus|v\.?)\s+([A-Za-z][\w.'-]*(?:\s+[A-Za-z][\w.'-]*)?)/i
-        )
-        if (matchup) {
-          const teamA = matchup[1].trim()
-          const teamB = matchup[2].trim()
-          queries.add(`${teamA} vs ${teamB} result score winner ${yearStr}`)
-          queries.add(`${teamA} ${teamB} match ${yearStr}`)
-        }
-
-        // Detect current-events / sports queries → bias search toward recent news
-        const sportsKeywords = ['match', 'matches', 'score', 'scores', 'game', 'games', 'fixture',
-          'world cup', 'fifa', 'premier league', 'la liga', 'serie a', 'bundesliga',
-          'champions league', 'nba', 'nfl', 'nhl', 'cricket', 'ipl', 'tennis',
-          'football', 'soccer', 'basketball', 'happening today', 'playing today',
-          'result today', 'kickoff', 'standings', 'tournament', 'vs', 'versus']
-        const newsKeywords = ['news today', 'latest news', 'current events', 'what happened today',
-          'today news', 'breaking', 'just happened', 'recent update', 'recently', 'last night']
-        const isCurrentEvent =
-          sportsKeywords.some((kw) => lowerContent.includes(kw)) ||
-          newsKeywords.some((kw) => lowerContent.includes(kw)) ||
-          isGreenApple
-
-        // === TAVILY SEARCH (primary) — run all reformulated queries in parallel ===
-        const tavilyPromises = Array.from(queries)
-          .slice(0, 3)
-          .map(async (q) => {
-            try {
-              const body: Record<string, unknown> = {
-                api_key: process.env.TAVILY_API_KEY,
-                query: q,
-                max_results: 5,
-                include_answer: true,
-                include_raw_content: false,
-                search_depth: isGreenApple ? 'advanced' : 'basic',
-              }
-              // For current events, restrict to recent news so we get the actual
-              // outcome instead of stale preview articles.
-              if (isCurrentEvent) {
-                body.topic = 'news'
-                body.days = 14
-              }
-              const r = await fetch('https://api.tavily.com/search', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(body),
-                signal: AbortSignal.timeout(8000),
-              })
-              if (!r.ok) return null
-              return await r.json()
-            } catch {
-              return null
-            }
-          })
-
-        const tavilyDatas = (await Promise.all(tavilyPromises)).filter(
-          (d): d is Record<string, unknown> => d !== null
-        )
-
-        for (const tavilyData of tavilyDatas) {
-          if (tavilyData.answer) {
-            results.push(`Direct Answer: ${tavilyData.answer}`)
-            webProviderHit = true
-          }
-          const res = tavilyData.results
-          if (Array.isArray(res)) {
-            for (const r of res.slice(0, 3)) {
-              const item = r as { title?: string; content?: string; url?: string; published_date?: string }
-              if (item.title && item.content) {
-                const datePart = item.published_date
-                  ? ` [published ${String(item.published_date).slice(0, 10)}]`
-                  : ''
-                results.push(`${item.title}${datePart}\n   ${item.content.slice(0, 200)}\n   URL: ${item.url || ''}`)
-                webProviderHit = true
-                // Collect source for the UI source bar
-                if (item.url && webSources.length < 6) {
-                  try {
-                    webSources.push({
-                      title: item.title.slice(0, 60),
-                      url: item.url,
-                      host: new URL(item.url).hostname.replace(/^www\./, ''),
-                    })
-                  } catch {}
-                }
-              }
-            }
-          }
-        }
-
-        // === SERPER FALLBACK (only if Tavily returned nothing) ===
-        if (results.length === 0) {
-          try {
-            const serperResponse = await fetch('https://google.serper.dev/search', {
-              method: 'POST',
-              headers: {
-                'X-API-KEY': process.env.SERPER_API_KEY || '',
-                'Content-Type': 'application/json',
-              },
-              // tbs=qdr:w → restrict to past week for current events
-              body: JSON.stringify({ q: actualContent, num: 6, tbs: isCurrentEvent ? 'qdr:w' : undefined }),
-              signal: AbortSignal.timeout(8000),
-            })
-
-            if (serperResponse.ok) {
-              const serperData = await serperResponse.json()
-
-              // Knowledge graph (if available)
-              if (serperData.knowledgeGraph?.description) {
-                results.push(`${serperData.knowledgeGraph.title || 'Knowledge Graph'}: ${serperData.knowledgeGraph.description.slice(0, 300)}`)
-                webProviderHit = true
-              }
-
-              // Organic results
-              if (serperData.organic && Array.isArray(serperData.organic)) {
-                for (const r of serperData.organic.slice(0, 5)) {
-                  if (r.title) {
-                    results.push(`${r.title}\n   ${r.snippet || ''}\n   URL: ${r.link || ''}`)
-                    webProviderHit = true
-                    // Collect source for the UI source bar
-                    if (r.link && webSources.length < 6) {
-                      try {
-                        webSources.push({
-                          title: r.title.slice(0, 60),
-                          url: r.link,
-                          host: new URL(r.link).hostname.replace(/^www\./, ''),
-                        })
-                      } catch {}
-                    }
-                  }
-                }
-              }
-            }
-          } catch (e2) {
-            console.error('[chat.web_search] Serper also failed:', e2)
-          }
-        }
-
-        // === ESPN live + recent scores (for sports queries) ===
-        // ESPN's default scoreboard only shows TODAY. We expand to the last 3 days
-        // so recently-FINISHED matches surface alongside live/scheduled ones, and
-        // we cover more leagues so friendlies / Nations League aren't missed.
-        if (isCurrentEvent && sportsKeywords.some((kw) => lowerContent.includes(kw))) {
-          const espnDateRange = (() => {
-            const fmt = (d: Date) =>
-              `${d.getFullYear()}${String(d.getMonth() + 1).padStart(2, '0')}${String(d.getDate()).padStart(2, '0')}`
-            const end = new Date()
-            const start = new Date()
-            start.setDate(start.getDate() - 3)
-            return `${fmt(start)}-${fmt(end)}`
-          })()
-
-          const espnLeagues: Array<{ name: string; url: string }> = []
-          if (lowerContent.includes('fifa') || lowerContent.includes('world cup')) {
-            espnLeagues.push({ name: 'FIFA World Cup', url: `https://site.api.espn.com/apis/site/v2/sports/soccer/fifa.world/scoreboard?dates=${espnDateRange}` })
-          }
-          if (lowerContent.includes('nba') || lowerContent.includes('basketball')) {
-            espnLeagues.push({ name: 'NBA', url: `https://site.api.espn.com/apis/site/v2/sports/basketball/nba/scoreboard?dates=${espnDateRange}` })
-          }
-          if (lowerContent.includes('nfl')) {
-            espnLeagues.push({ name: 'NFL', url: `https://site.api.espn.com/apis/site/v2/sports/football/nfl/scoreboard?dates=${espnDateRange}` })
-          }
-          if (lowerContent.includes('premier league') || lowerContent.includes('epl')) {
-            espnLeagues.push({ name: 'Premier League', url: `https://site.api.espn.com/apis/site/v2/sports/soccer/eng.1/scoreboard?dates=${espnDateRange}` })
-          }
-          if (lowerContent.includes('la liga')) {
-            espnLeagues.push({ name: 'La Liga', url: `https://site.api.espn.com/apis/site/v2/sports/soccer/esp.1/scoreboard?dates=${espnDateRange}` })
-          }
-          if (lowerContent.includes('serie a')) {
-            espnLeagues.push({ name: 'Serie A', url: `https://site.api.espn.com/apis/site/v2/sports/soccer/ita.1/scoreboard?dates=${espnDateRange}` })
-          }
-          if (lowerContent.includes('bundesliga')) {
-            espnLeagues.push({ name: 'Bundesliga', url: `https://site.api.espn.com/apis/site/v2/sports/soccer/ger.1/scoreboard?dates=${espnDateRange}` })
-          }
-          if (lowerContent.includes('champions league')) {
-            espnLeagues.push({ name: 'Champions League', url: `https://site.api.espn.com/apis/site/v2/sports/soccer/uefa.champions/scoreboard?dates=${espnDateRange}` })
-          }
-          // Generic soccer/football fallback — try international friendlies + World Cup
-          // so non-league national-team matches (e.g. France vs Morocco) are covered.
-          if (
-            espnLeagues.length === 0 &&
-            (lowerContent.includes('soccer') ||
-              lowerContent.includes('football') ||
-              lowerContent.includes('match') ||
-              !!matchup)
-          ) {
-            espnLeagues.push({ name: 'International Friendlies', url: `https://site.api.espn.com/apis/site/v2/sports/soccer/fifa.friendly/scoreboard?dates=${espnDateRange}` })
-            espnLeagues.push({ name: 'FIFA World Cup', url: `https://site.api.espn.com/apis/site/v2/sports/soccer/fifa.world/scoreboard?dates=${espnDateRange}` })
-          }
-
-          const espnPromises = espnLeagues.map(async (league) => {
-            try {
-              const response = await fetch(league.url, { signal: AbortSignal.timeout(5000) })
-              if (!response.ok) return null
-              const data = await response.json()
-              const events = data.events || []
-              if (!Array.isArray(events) || events.length === 0) return null
-              const matchLines = events
-                .slice(0, 8)
-                .map(
-                  (e: {
-                    name?: string
-                    date?: string
-                    status?: { type?: { description?: string; completed?: boolean } }
-                    competitions?: Array<{
-                      competitors?: Array<{ team?: { displayName?: string }; score?: string; homeAway?: string }>
-                    }>
-                  }) => {
-                    const status = e.status?.type?.description || 'Scheduled'
-                    const comps = e.competitions?.[0]?.competitors || []
-                    // ESPN lists home/away in arbitrary order — sort for consistent display
-                    const sorted = [...comps].sort((a, b) =>
-                      (a.homeAway === 'home' ? 0 : 1) - (b.homeAway === 'home' ? 0 : 1)
-                    )
-                    const a = sorted[0]
-                    const b = sorted[1]
-                    const aName = a?.team?.displayName || ''
-                    const bName = b?.team?.displayName || ''
-                    const aScore = a?.score ?? '0'
-                    const bScore = b?.score ?? '0'
-                    return `  ${aName} ${aScore} - ${bScore} ${bName} (${status})`
-                  }
-                )
-              if (matchLines.length === 0) return null
-              return `${league.name} (ESPN, last 3 days):\n${matchLines.join('\n')}`
-            } catch {
-              return null
-            }
-          })
-
-          const espnResults = await Promise.all(espnPromises)
-          for (const result of espnResults) {
-            if (result) results.push(result)
-          }
-        }
-
-        if (results.length > 0) {
-          // If BOTH Tavily and Serper failed/unconfigured, only ESPN live-score data
-          // survived. That's a degraded search — ARIA must be HONEST about it instead
-          // of presenting ESPN-only data as comprehensive truth (which is what causes
-          // her to confidently treat a finished match as upcoming).
-          const degradationWarning = !webProviderHit
-            ? `\n\n⚠ DEGRADED SEARCH NOTICE: Both primary web search providers (Tavily + Serper) are unconfigured or failed. Only ESPN live-score data was retrieved — this is incomplete and may miss non-scheduled or recently-finished matches. You MUST tell the user your web search was limited to live scores only and you could not fully verify current information. Do NOT present this as a comprehensive web search.\n`
-            : ''
-          if (!webProviderHit) {
-            console.warn('[chat.web_search] DEGRADED: Tavily + Serper both failed/unconfigured. Check TAVILY_API_KEY and SERPER_API_KEY in .env. Only ESPN data available.')
-          }
-          toolContext = `[Internal note: the following is what a web search just returned for "${actualContent}" — today is ${dateStr}.${degradationWarning}]\n${results.join('\n\n')}\n\nUse this information naturally in your reply. Never repeat this note or a heading like it.`
-        } else {
-          console.warn('[chat.web_search] No results from ANY provider (Tavily/Serper/ESPN all empty or failed). Check API keys in .env.')
-          toolContext = `Web search returned no results for "${actualContent}" (today is ${dateStr}). The search providers appear to be unconfigured. Answer from your own knowledge, but explicitly tell the user you could not verify current information online and that web search may be unavailable.`
-        }
+        const { performWebSearch } = await import('@/lib/web-search')
+        const searchResult = await performWebSearch(actualContent, { isGreenApple })
+        toolContext = searchResult.resultsText
+        webSources = searchResult.sources
       } catch (e) {
         console.error('[chat.web_search]', e)
         toolContext = 'Web search was attempted but failed. Answer from your own knowledge.'
@@ -818,9 +558,12 @@ No hedging, no disclaimers. Give your raw, unvarnished interpretation. Engage wi
             const isDeepThinking = knowledgeContext !== undefined ||
               deepThinkingKeywords.some(kw => actualContent.toLowerCase().includes(kw))
 
-            // The "selectedModel" for the fallback chain — if deep thinking, prefer 70B
+            // The "selectedModel" for the fallback chain — if deep thinking, prefer
+            // the largest-context free model (Qwen3 Next 80B, 262K context) for
+            // multi-book comparison headroom. If the user has explicitly chosen a
+            // different model in settings, respect their choice.
             const effectiveSelectedModel = isDeepThinking
-              ? 'meta-llama/llama-3.3-70b-instruct:free'
+              ? 'qwen/qwen3-next-80b-a3b-instruct:free'
               : selectedModel
 
             // === REAL STREAMING ===
@@ -1053,19 +796,32 @@ No hedging, no disclaimers. Give your raw, unvarnished interpretation. Engage wi
               : 'meta-llama/llama-3.3-70b-instruct:free'
             providers.push({ name: freeFallback, fn: () => callOpenRouter(freeFallback) })
 
-            // Pollinations keyless backstop
-            providers.push({ name: 'pollinations', fn: () => callPollinations() })
-
-            // Groq — the reliable primary path (if GROQ_API_KEY is configured).
-            if (process.env.GROQ_API_KEY) {
-              providers.push({ name: 'groq/llama-3.1-8b', fn: () => callGroq() })
-            }
-
             // Gemini — 2nd reliable free provider (if GEMINI_API_KEY is configured).
             // Different infrastructure from Groq — with both, ARIA has two independent
             // generous free paths. This is what makes ARIA actually reliable.
             if (process.env.GEMINI_API_KEY) {
               providers.push({ name: 'gemini-2.0-flash', fn: () => callGemini() })
+            }
+
+            // === CONDITIONAL RACING ===
+            // For deep-thinking requests (philosophy, books, knowledge context), gate
+            // Groq 8B and Pollinations OUT of the primary race — they're less reliable
+            // at following the detailed system prompt under context pressure, and racing
+            // them against 70B/120B/Gemini Flash means whichever responds first wins,
+            // which can silently defeat the routing logic. They're kept as a genuine
+            // last-resort below — only used if every deep-thinking-eligible provider fails.
+            //
+            // For non-deep-thinking (casual/greeting-tier), keep the full 5-provider race
+            // unchanged — speed is the right priority there and persona-fidelity risk is
+            // lower for short/casual replies.
+            if (!isDeepThinking) {
+              // Pollinations keyless backstop
+              providers.push({ name: 'pollinations', fn: () => callPollinations() })
+
+              // Groq — the reliable primary path (if GROQ_API_KEY is configured).
+              if (process.env.GROQ_API_KEY) {
+                providers.push({ name: 'groq/llama-3.1-8b', fn: () => callGroq() })
+              }
             }
 
             try {
@@ -1079,16 +835,60 @@ No hedging, no disclaimers. Give your raw, unvarnished interpretation. Engage wi
               providerUsed = result.name
               if (result.name !== effectiveSelectedModel) {
                 fallbackHappened = true
-                console.log(`[chat.llm] Fallback — using: ${result.name} (selected was ${selectedModel})`)
+                console.log(`[chat.llm] ${isDeepThinking ? 'Deep-thinking' : 'Casual'} tier winner: ${result.name} (selected was ${selectedModel})`)
+              } else {
+                console.log(`[chat.llm] ${isDeepThinking ? 'Deep-thinking' : 'Casual'} tier winner: ${result.name}`)
               }
             } catch (aggErr) {
-              // AggregateError — ALL parallel providers failed.
-              const providerNames = providers.map(p => p.name).join(', ')
-              const errors = aggErr instanceof AggregateError
-                ? aggErr.errors.map((e, i) => `${providers[i]?.name}: ${e?.message?.slice(0, 150)}`).join(' | ')
-                : 'unknown error'
-              console.error(`[chat.llm] ALL PROVIDERS FAILED. Tried [${providerNames}]:`, errors)
-              throw new Error(`All providers failed (${providers.length} tried: ${providerNames}). ${errors}`)
+              // For deep-thinking requests: if all eligible providers failed, fall through
+              // to the reliability tier (Groq 8B + Pollinations) before giving up entirely.
+              // ARIA should never go fully offline — she just doesn't race a weak model
+              // against a strong one when both are live and healthy.
+              if (isDeepThinking) {
+                const reliabilityProviders: Array<{ name: string; fn: () => Promise<string> }> = []
+                if (process.env.GROQ_API_KEY) {
+                  reliabilityProviders.push({ name: 'groq/llama-3.1-8b', fn: () => callGroq() })
+                }
+                reliabilityProviders.push({ name: 'pollinations', fn: () => callPollinations() })
+
+                if (reliabilityProviders.length > 0) {
+                  console.warn(`[chat.llm] Deep-thinking tier all failed — falling through to reliability tier: ${reliabilityProviders.map(p => p.name).join(', ')}`)
+                  try {
+                    const result = await Promise.any(
+                      reliabilityProviders.map(async (p) => {
+                        const result = await p.fn()
+                        return { name: p.name, text: result }
+                      })
+                    )
+                    text = result.text
+                    providerUsed = result.name
+                    fallbackHappened = true
+                    console.log(`[chat.llm] Fell through to reliability tier: ${result.name}`)
+                  } catch (aggErr2) {
+                    const providerNames = [...providers.map(p => p.name), ...reliabilityProviders.map(p => p.name)].join(', ')
+                    const errors = aggErr2 instanceof AggregateError
+                      ? aggErr2.errors.map((e, i) => `${reliabilityProviders[i]?.name}: ${e?.message?.slice(0, 150)}`).join(' | ')
+                      : 'unknown error'
+                    console.error(`[chat.llm] ALL PROVIDERS FAILED (deep-thinking + reliability tiers). Tried [${providerNames}]:`, errors)
+                    throw new Error(`All providers failed (${providers.length + reliabilityProviders.length} tried: ${providerNames}). ${errors}`)
+                  }
+                } else {
+                  const providerNames = providers.map(p => p.name).join(', ')
+                  const errors = aggErr instanceof AggregateError
+                    ? aggErr.errors.map((e, i) => `${providers[i]?.name}: ${e?.message?.slice(0, 150)}`).join(' | ')
+                    : 'unknown error'
+                  console.error(`[chat.llm] ALL PROVIDERS FAILED. Tried [${providerNames}]:`, errors)
+                  throw new Error(`All providers failed (${providers.length} tried: ${providerNames}). ${errors}`)
+                }
+              } else {
+                // Non-deep-thinking: no reliability tier needed (already in the primary race)
+                const providerNames = providers.map(p => p.name).join(', ')
+                const errors = aggErr instanceof AggregateError
+                  ? aggErr.errors.map((e, i) => `${providers[i]?.name}: ${e?.message?.slice(0, 150)}`).join(' | ')
+                  : 'unknown error'
+                console.error(`[chat.llm] ALL PROVIDERS FAILED. Tried [${providerNames}]:`, errors)
+                throw new Error(`All providers failed (${providers.length} tried: ${providerNames}). ${errors}`)
+              }
             }
 
             fullText = text

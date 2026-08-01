@@ -84,23 +84,23 @@ export function embeddingToPgVector(embedding: number[]): string {
  */
 export const AVAILABLE_MODELS = [
   {
+    id: 'qwen/qwen3-next-80b-a3b-instruct:free',
+    name: 'Qwen3 Next 80B',
+    description: 'Multilingual, 262K context. Genuinely free.',
+    badge: 'Default',
+    tier: 'free' as const,
+  },
+  {
     id: 'meta-llama/llama-3.3-70b-instruct:free',
     name: 'Llama 3.3 70B',
     description: 'Raw, unfiltered, free forever. Tuned for honest conversation.',
-    badge: 'Default',
+    badge: 'Free',
     tier: 'free' as const,
   },
   {
     id: 'openai/gpt-oss-120b:free',
     name: 'GPT-OSS 120B',
     description: 'Largest free model, 117B MoE. Great reasoning.',
-    badge: 'Free',
-    tier: 'free' as const,
-  },
-  {
-    id: 'qwen/qwen3-next-80b-a3b-instruct:free',
-    name: 'Qwen3 Next 80B',
-    description: 'Multilingual, 262K context. Genuinely free.',
     badge: 'Free',
     tier: 'free' as const,
   },
@@ -117,7 +117,7 @@ export const AVAILABLE_MODELS = [
  * Get the model ID from user settings, with fallback to default.
  */
 export function getModelFromSettings(modelPreference: string | null | undefined): string {
-  if (!modelPreference) return 'meta-llama/llama-3.3-70b-instruct:free'
+  if (!modelPreference) return 'qwen/qwen3-next-80b-a3b-instruct:free'
   const isValid = AVAILABLE_MODELS.some(m => m.id === modelPreference)
-  return isValid ? modelPreference : 'meta-llama/llama-3.3-70b-instruct:free'
+  return isValid ? modelPreference : 'qwen/qwen3-next-80b-a3b-instruct:free'
 }
