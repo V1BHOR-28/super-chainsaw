@@ -42,10 +42,23 @@ export function BookSuggestionCard({ suggestion }: { suggestion: BookSuggestion 
           title: `${suggestion.title} by ${suggestion.author}`,
         }),
       })
-      if (!res.ok && res.status !== 409) throw new Error('failed')
+      if (!res.ok && res.status !== 409) {
+        // Surface the route's specific error message (e.g. a timeout on a huge
+        // book vs. a 404 vs. an extraction failure) instead of a one-size-fits-all
+        // generic string, so the user knows whether a retry is likely to help.
+        let detail = ''
+        try {
+          const body = await res.json()
+          detail = body?.error ?? body?.message ?? ''
+        } catch {}
+        throw new Error(detail || 'failed')
+      }
       toast.success(`Added "${suggestion.title}" to your library — ARIA can now reference the real text`)
-    } catch {
-      toast.error('Could not fetch the full text — try again')
+    } catch (err) {
+      const detail = err instanceof Error && err.message && err.message !== 'failed'
+        ? err.message
+        : 'Could not fetch the full text — try again'
+      toast.error(detail)
     } finally {
       setPendingBookSuggestion(null)
     }

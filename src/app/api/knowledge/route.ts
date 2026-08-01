@@ -142,10 +142,32 @@ async function fetchUrlContent(url: string): Promise<{ title: string; content: s
     && parsedUrl.pathname.endsWith('_djvu.txt')
 
   if (isArchiveOrgText) {
-    const res = await fetch(url, {
-      signal: AbortSignal.timeout(15000),
-      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; ARIA/1.0)' },
-    })
+    // Archive.org _djvu.txt files are full OCR'd book texts, commonly 500KB–2MB+,
+    // and archive.org can be slow to first byte. The route has maxDuration = 60s;
+    // budget 45s for the download, leaving ~15s for the rest of the POST handler:
+    //   - chunkText() — CPU, instant
+    //   - embeddings in batches of 10 (external API calls) — typically 3-5s
+    //   - sequential DB INSERTs per chunk — typically 3-4s
+    //   - auto-summary (Pollinations, has its own 15s timeout) — typically 2-5s
+    // The non-Archive.org HTML branch below keeps the tighter 15s timeout since
+    // ordinary web pages are small and don't need the extra budget.
+    let res: Response
+    try {
+      res = await fetch(url, {
+        signal: AbortSignal.timeout(45000),
+        headers: { 'User-Agent': 'Mozilla/5.0 (compatible; ARIA/1.0)' },
+      })
+    } catch (err) {
+      // AbortSignal.timeout() rejects with a DOMException whose name is
+      // 'AbortError' (undici/Node) or 'TimeoutError' (some environments).
+      // Distinguish a timeout from other network failures so the frontend can
+      // tell the user a retry might help vs. something being genuinely broken.
+      const name = err instanceof Error ? err.name : ''
+      if (name === 'AbortError' || name === 'TimeoutError') {
+        throw new Error("This book's file is unusually large and timed out downloading — try again, it sometimes succeeds on a retry.")
+      }
+      throw err
+    }
     if (!res.ok) throw new Error(`Failed to fetch URL (HTTP ${res.status})`)
     const rawText = await res.text()
     // Strip leading/trailing whitespace-only lines — Archive.org _djvu.txt files
