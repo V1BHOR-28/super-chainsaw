@@ -48,6 +48,17 @@ export function extractObviousCandidates(userMessage: string): Array<{ text: str
   return found
 }
 
+/** Word-overlap ratio between two strings (0-1). Duplicated from memory/route.ts
+ *  (not exported there) to avoid cross-file coupling — same exact logic. */
+function wordOverlap(a: string, b: string): number {
+  const wordsA = new Set(a.toLowerCase().split(/\W+/).filter(Boolean))
+  const wordsB = new Set(b.toLowerCase().split(/\W+/).filter(Boolean))
+  if (wordsA.size === 0 || wordsB.size === 0) return 0
+  let shared = 0
+  for (const w of wordsA) if (wordsB.has(w)) shared++
+  return shared / Math.min(wordsA.size, wordsB.size)
+}
+
 export async function POST(req: NextRequest) {
   try {
     const userId = await getAuthenticatedUserId()
@@ -140,9 +151,13 @@ Respond with ONLY JSON: {"candidates":[{"text":"...","category":"personal|prefer
     if (!raw) {
       // Both Groq and Gemini failed — llm-fallback.ts already logged the
       // per-provider reasons. Return the deterministic floor (re-derived
-      // fresh so it doesn't depend on any earlier variable state).
+      // fresh so it doesn't depend on any earlier variable state), filtered
+      // against recently-declined candidates so we don't re-ask.
       console.error(`[memory.detect] Both Groq and Gemini extraction failed — using deterministic patterns only. Message: "${userMessage.slice(0, 80)}"`)
-      const floorCandidates = extractObviousCandidates(userMessage)
+      const declinedTexts = decisions.filter((d) => !d.accepted).map((d) => d.candidateText)
+      const isRecentlyDeclined = (candidateText: string): boolean =>
+        declinedTexts.some((declined) => wordOverlap(declined, candidateText) > 0.6)
+      const floorCandidates = extractObviousCandidates(userMessage).filter((c) => !isRecentlyDeclined(c.text))
       if (floorCandidates.length > 0) {
         console.log(`[memory.detect] Returning ${floorCandidates.length} obvious candidate(s) despite LLM failure.`)
       }
@@ -173,7 +188,17 @@ Respond with ONLY JSON: {"candidates":[{"text":"...","category":"personal|prefer
       if (!isDupe) merged.push(c)
     }
 
-    const candidates = merged.slice(0, 2)
+    // Hard-filter against recently-declined candidates. The in-context hint
+    // in the prompt (past decisions list) is a suggestion the model can ignore;
+    // this is an enforced filter so "Not now" is actually respected for the
+    // near term. Scoped to the last 8 decisions (the existing query limit) —
+    // not a permanent block-list, so a fact declined once out of context can
+    // still be saved later via the Memory panel's Add box if you change your mind.
+    const declinedTexts = decisions.filter((d) => !d.accepted).map((d) => d.candidateText)
+    const isRecentlyDeclined = (candidateText: string): boolean =>
+      declinedTexts.some((declined) => wordOverlap(declined, candidateText) > 0.6)
+
+    const candidates = merged.filter((c) => !isRecentlyDeclined(c.text)).slice(0, 2)
 
     if (candidates.length === 0) {
       console.log(`[memory.detect] Zero candidates for message: "${userMessage.slice(0, 80)}"`)

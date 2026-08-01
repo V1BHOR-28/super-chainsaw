@@ -350,6 +350,15 @@ async function checkPerConversationExportUntouched() {
   results.push({ name: 'per-conversation-export-untouched', pass, detail: pass ? 'Original per-conversation export still intact.' : 'Original export route appears to have been modified or replaced — check for accidental overwrite.' })
 }
 
+// ─── DECLINED-CANDIDATE FILTER CHECK ───────────────────────────────────────
+// Verifies the hard filter against recently-declined memory candidates.
+
+async function checkDeclinedCandidatesFiltered() {
+  const src = await getFileContent('src/app/api/memory/detect/route.ts')
+  const pass = /isRecentlyDeclined/.test(src)
+  results.push({ name: 'declined-candidates-filtered', pass, detail: pass ? 'Hard filter against recent declines found.' : 'Still relying only on soft in-context hint.' })
+}
+
 async function main() {
   await checkConversationOrdering()
   await checkPersonalConfidenceNotDowngraded()
@@ -399,6 +408,8 @@ async function main() {
   await checkFullExportRouteExists()
   await checkFullExportUiWired()
   await checkPerConversationExportUntouched()
+  // Declined-candidate filter
+  await checkDeclinedCandidatesFiltered()
 
   console.table(results.map((r) => ({ Check: r.name, Result: r.pass ? 'PASS' : 'FAIL', Detail: r.detail })))
   const anyFail = results.some((r) => !r.pass)
