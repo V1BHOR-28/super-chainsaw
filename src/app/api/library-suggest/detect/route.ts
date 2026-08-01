@@ -1,7 +1,7 @@
 import { NextRequest, NextResponse } from 'next/server'
 import { getAuthenticatedUserId } from '@/lib/user'
 import { generateWithFallback } from '@/lib/llm-fallback'
-import { checkGutenbergAvailability } from '@/lib/gutenberg'
+import { checkArchiveOrgAvailability } from '@/lib/archive-org'
 import { db } from '@/lib/db'
 
 export const runtime = 'nodejs'
@@ -56,14 +56,14 @@ Respond with ONLY JSON: {"book": {"title": "...", "author": "..."} } or {"book":
     ])
     if (existingMemory || existingKnowledge) return NextResponse.json({ suggestion: null })
 
-    const gutenberg = await checkGutenbergAvailability(title, author)
+    const archiveResult = await checkArchiveOrgAvailability(title, author)
 
     return NextResponse.json({
       suggestion: {
         title,
         author,
-        canAddFullText: gutenberg.available,
-        gutenbergUrl: gutenberg.downloadUrl ?? null,
+        canAddFullText: archiveResult.available,
+        sourceUrl: archiveResult.downloadUrl ?? null,
       },
     })
   } catch (err) {

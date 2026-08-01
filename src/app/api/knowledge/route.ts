@@ -135,6 +135,27 @@ async function fetchUrlContent(url: string): Promise<{ title: string; content: s
   if (!isUrlSafe(url)) {
     throw new Error('This URL cannot be fetched (blocked for security reasons).')
   }
+
+  // Archive.org _djvu.txt files are plain text — skip the HTML/cheerio path entirely.
+  const parsedUrl = new URL(url)
+  const isArchiveOrgText = (parsedUrl.hostname === 'archive.org' || parsedUrl.hostname === 'www.archive.org')
+    && parsedUrl.pathname.endsWith('_djvu.txt')
+
+  if (isArchiveOrgText) {
+    const res = await fetch(url, {
+      signal: AbortSignal.timeout(15000),
+      headers: { 'User-Agent': 'Mozilla/5.0 (compatible; ARIA/1.0)' },
+    })
+    if (!res.ok) throw new Error(`Failed to fetch URL (HTTP ${res.status})`)
+    const rawText = await res.text()
+    // Strip leading/trailing whitespace-only lines — Archive.org _djvu.txt files
+    // sometimes have a few blank lines at the start before the actual text begins.
+    const cleaned = rawText.replace(/^\s+/, '').replace(/\s+$/, '')
+    const { text: content, truncated } = refineText(cleaned)
+    if (!content || content.length < 50) throw new Error('Could not extract meaningful text from the page.')
+    return { title: titleFromUrl(url), content, truncated }
+  }
+
   const res = await fetch(url, {
     signal: AbortSignal.timeout(15000),
     headers: { 'User-Agent': 'Mozilla/5.0 (compatible; ARIA/1.0)' },

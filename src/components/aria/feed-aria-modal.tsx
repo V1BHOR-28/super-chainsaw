@@ -770,7 +770,7 @@ function QuotesTab() {
 
 function SurpriseButton() {
   const [loading, setLoading] = useState(false)
-  const [suggestion, setSuggestion] = useState<{ title: string; author: string; why: string; gutenbergUrl: string } | null>(null)
+  const [suggestion, setSuggestion] = useState<{ title: string; author: string; why: string; sourceUrl: string } | null>(null)
   const [adding, setAdding] = useState(false)
 
   const handleSurprise = async () => {
@@ -794,13 +794,13 @@ function SurpriseButton() {
   }
 
   const handleAdd = async () => {
-    if (!suggestion?.gutenbergUrl) return
+    if (!suggestion?.sourceUrl) return
     setAdding(true)
     try {
       const res = await fetch('/api/knowledge', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url: suggestion.gutenbergUrl, title: `${suggestion.title} by ${suggestion.author}` }),
+        body: JSON.stringify({ url: suggestion.sourceUrl, title: `${suggestion.title} by ${suggestion.author}` }),
       })
       if (!res.ok && res.status !== 409) throw new Error('failed')
       toast.success(`Added "${suggestion.title}" to your library`)

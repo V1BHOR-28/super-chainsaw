@@ -31,14 +31,14 @@ export function BookSuggestionCard({ suggestion }: { suggestion: BookSuggestion 
   }
 
   const handleAddFullText = async () => {
-    if (!suggestion.gutenbergUrl) return
+    if (!suggestion.sourceUrl) return
     setBusy('full')
     try {
       const res = await fetch('/api/knowledge', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          url: suggestion.gutenbergUrl,
+          url: suggestion.sourceUrl,
           title: `${suggestion.title} by ${suggestion.author}`,
         }),
       })

@@ -2,14 +2,14 @@ import { NextResponse } from 'next/server'
 import { getAuthenticatedUserId } from '@/lib/user'
 import { generateWithFallback } from '@/lib/llm-fallback'
 import { db } from '@/lib/db'
-import { CURATED_CLASSICS } from '@/lib/gutenberg-classics'
+import { CURATED_CLASSICS } from '@/lib/archive-org-classics'
 
 export const runtime = 'nodejs'
 export const maxDuration = 30
 
 /**
  * POST /api/library-suggest/surprise — user-initiated "Surprise me" book suggestion.
- * Uses a curated list of pre-verified Gutenberg classics (no live Gutendex search).
+ * Uses a curated list of pre-verified Archive.org classics (no live search).
  * The LLM picks from the known-good list based on the user's context; if the LLM
  * call fails entirely, a random fallback from the list is used — this route never
  * dead-ends the user with "couldn't find a match."
@@ -70,7 +70,7 @@ Respond with ONLY JSON: {"title": "...", "why": "one sentence, casual, said like
         title: picked.title,
         author: picked.author,
         why,
-        gutenbergUrl: picked.textUrl,
+        sourceUrl: picked.textUrl,
       },
     })
   } catch (err) {

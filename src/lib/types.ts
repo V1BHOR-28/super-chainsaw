@@ -92,7 +92,7 @@ export type BookSuggestion = {
   title: string
   author: string
   canAddFullText: boolean
-  gutenbergUrl: string | null
+  sourceUrl: string | null
 }
 
 /** A message rendered in the chat UI (DB-backed + ephemeral streaming). */
