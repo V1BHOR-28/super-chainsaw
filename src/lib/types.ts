@@ -63,6 +63,9 @@ export type AriaSettings = {
   trainingOptIn: boolean
   autoDestruct: boolean
   voiceEnabled: boolean
+  currentStreak: number
+  longestStreak: number
+  lastActiveDate: string | null
 }
 
 export type User = {

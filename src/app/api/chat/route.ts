@@ -172,6 +172,38 @@ export async function POST(req: NextRequest) {
     // Touch conversation for sort order
     await db.conversation.update({ where: { id: conversationId }, data: { updatedAt: new Date() } })
 
+    // Best-effort reading streak update — increments once per real calendar day
+    try {
+      const today = new Date(new Date().toDateString())
+      const current = await db.userSettings.findUnique({ where: { userId }, select: { lastActiveDate: true, currentStreak: true, longestStreak: true } })
+      if (current) {
+        const last = current.lastActiveDate ? new Date(current.lastActiveDate.toDateString()) : null
+        const oneDayMs = 24 * 60 * 60 * 1000
+        let newStreak = current.currentStreak
+        if (!last) {
+          newStreak = 1
+        } else if (today.getTime() === last.getTime()) {
+          // already counted today — no-op
+        } else if (today.getTime() - last.getTime() === oneDayMs) {
+          newStreak = current.currentStreak + 1
+        } else {
+          newStreak = 1 // gap of 2+ days — streak resets
+        }
+        if (!last || today.getTime() !== last.getTime()) {
+          await db.userSettings.update({
+            where: { userId },
+            data: {
+              currentStreak: newStreak,
+              longestStreak: Math.max(newStreak, current.longestStreak),
+              lastActiveDate: today,
+            },
+          })
+        }
+      }
+    } catch (e) {
+      console.error('[chat.streak]', e)
+    }
+
     // Load settings, recent mood, recent messages, conversation summary — use semantic memory search
     const [settings, recentMood, recentMessages, conversationSummary] = await Promise.all([
       db.userSettings.findUnique({ where: { userId } }),
@@ -413,7 +445,14 @@ export async function POST(req: NextRequest) {
     if (tool === 'web_search' && !toolContext) {
       toolContext = 'WEB SEARCH ATTEMPTED — no usable results were returned. Tell the user the search did not turn up anything useful rather than answering as if you found something.'
     }
-    const fullToolContext = [toolContext, knowledgeContext].filter(Boolean).join('\n\n')
+    // Pull the user's 5 most recent saved quotes — lightweight, no embedding/vector search
+    // needed for short user-curated snippets. Included alongside knowledge + tool context.
+    const recentQuotes = await db.quote.findMany({ where: { userId }, orderBy: { createdAt: 'desc' }, take: 5 }).catch(() => [])
+    const quoteContext = recentQuotes.length
+      ? `\n\n--- SAVED QUOTES ---\n${recentQuotes.map(q => `"${q.text}"${q.bookTitle ? ` — ${q.bookTitle}${q.author ? ` by ${q.author}` : ''}` : ''}`).join('\n')}`
+      : ''
+
+    const fullToolContext = [toolContext, knowledgeContext, quoteContext].filter(Boolean).join('\n\n')
 
     // === DEEP THINKING DETECTION ===
     // Moved here (before buildAriaSystemPrompt) so the signal can reach the

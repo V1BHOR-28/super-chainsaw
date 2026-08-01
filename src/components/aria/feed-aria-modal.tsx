@@ -1,14 +1,14 @@
 'use client'
 
-import { useState, useRef } from 'react'
+import { useState, useRef, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { BookOpen, Link2, FileText, X, Loader2, Trash2, BookMarked, Upload, FileUp } from 'lucide-react'
+import { BookOpen, Link2, FileText, X, Loader2, Trash2, BookMarked, Upload, FileUp, Quote, Sparkles } from 'lucide-react'
 import { toast } from 'sonner'
 import { useAriaStore } from '@/lib/store'
 import { parsePdfInBrowser, type PdfParseProgress } from '@/lib/client-pdf'
 import { chunkText } from '@/lib/chunk-text'
 
-type FeedTab = 'text' | 'url' | 'file' | 'library'
+type FeedTab = 'text' | 'url' | 'file' | 'library' | 'quotes'
 type FeedState = 'idle' | 'reading' | 'refining' | 'embedding' | 'parsing' | 'indexing' | 'done'
 
 const STATE_LABELS: Record<FeedState, string> = {
@@ -349,6 +349,7 @@ export function FeedAriaModal() {
               { id: 'text' as const, label: 'Paste Text', icon: FileText },
               { id: 'url' as const, label: 'From URL', icon: Link2 },
               { id: 'file' as const, label: 'Upload PDF', icon: FileUp },
+              { id: 'quotes' as const, label: 'Quotes', icon: Quote },
               { id: 'library' as const, label: 'Library', icon: BookMarked },
             ]).map(t => {
               const Icon = t.icon
@@ -581,14 +582,20 @@ export function FeedAriaModal() {
               </div>
             )}
 
+            {/* QUOTES TAB */}
+            {tab === 'quotes' && (
+              <QuotesTab />
+            )}
+
             {/* LIBRARY TAB */}
             {tab === 'library' && (
               <div className="space-y-2 max-h-[350px] overflow-y-auto">
                 {knowledge.length === 0 ? (
-                  <div className="text-center py-12" style={{ color: 'var(--aria-fg-dim)' }}>
+                  <div className="text-center py-8" style={{ color: 'var(--aria-fg-dim)' }}>
                     <BookMarked size={32} strokeWidth={1} className="mx-auto mb-3 opacity-30" />
                     <p className="text-[13px]">Nothing in ARIA's library yet.</p>
                     <p className="text-[12px] mt-1">Feed her some knowledge to get started.</p>
+                    <SurpriseButton />
                   </div>
                 ) : (
                   knowledge.map(k => (
@@ -623,6 +630,233 @@ export function FeedAriaModal() {
         </motion.div>
       </motion.div>
     </AnimatePresence>
+  )
+}
+
+function QuotesTab() {
+  const [quotes, setQuotes] = useState<Array<{ id: string; text: string; bookTitle: string | null; author: string | null; note: string | null }>>([])
+  const [text, setText] = useState('')
+  const [bookTitle, setBookTitle] = useState('')
+  const [author, setAuthor] = useState('')
+  const [saving, setSaving] = useState(false)
+  const [loaded, setLoaded] = useState(false)
+
+  const loadQuotes = async () => {
+    try {
+      const res = await fetch('/api/quotes')
+      if (!res.ok) return
+      const data = await res.json()
+      setQuotes(data.quotes || [])
+    } catch {
+      // silent
+    } finally {
+      setLoaded(true)
+    }
+  }
+
+  useEffect(() => { loadQuotes() }, [])
+
+  const handleSave = async () => {
+    const trimmed = text.trim()
+    if (!trimmed) return
+    setSaving(true)
+    try {
+      const res = await fetch('/api/quotes', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text: trimmed, bookTitle: bookTitle.trim() || undefined, author: author.trim() || undefined }),
+      })
+      if (!res.ok) throw new Error('failed')
+      const data = await res.json()
+      setQuotes(prev => [data.quote, ...prev])
+      setText('')
+      setBookTitle('')
+      setAuthor('')
+      toast.success('Quote saved')
+    } catch {
+      toast.error('Could not save quote')
+    } finally {
+      setSaving(false)
+    }
+  }
+
+  const handleDelete = async (id: string) => {
+    try {
+      const res = await fetch(`/api/quotes/${id}`, { method: 'DELETE' })
+      if (!res.ok) throw new Error('failed')
+      setQuotes(prev => prev.filter(q => q.id !== id))
+      toast.success('Quote removed')
+    } catch {
+      toast.error('Could not delete')
+    }
+  }
+
+  return (
+    <div className="space-y-3">
+      <div className="space-y-2">
+        <textarea
+          value={text}
+          onChange={(e) => setText(e.target.value)}
+          placeholder="Save a quote — paste the passage that stuck with you..."
+          rows={3}
+          className="w-full rounded-xl p-3 text-[14px] outline-none transition-colors resize-none placeholder:text-[var(--aria-fg-dim)] focus:border-[rgba(245,158,11,0.45)]"
+          style={{ background: 'var(--aria-bg-panel)', border: '1px solid var(--aria-border)', color: 'var(--aria-fg)', fontFamily: 'inherit', lineHeight: 1.6 }}
+        />
+        <div className="flex gap-2">
+          <input
+            value={bookTitle}
+            onChange={(e) => setBookTitle(e.target.value)}
+            placeholder="Book (optional)"
+            className="flex-1 rounded-lg px-3 py-2 text-[13px] outline-none transition-colors placeholder:text-[var(--aria-fg-dim)] focus:border-[rgba(245,158,11,0.45)]"
+            style={{ background: 'var(--aria-bg-panel)', border: '1px solid var(--aria-border)', color: 'var(--aria-fg)', fontFamily: 'inherit' }}
+          />
+          <input
+            value={author}
+            onChange={(e) => setAuthor(e.target.value)}
+            placeholder="Author (optional)"
+            className="flex-1 rounded-lg px-3 py-2 text-[13px] outline-none transition-colors placeholder:text-[var(--aria-fg-dim)] focus:border-[rgba(245,158,11,0.45)]"
+            style={{ background: 'var(--aria-bg-panel)', border: '1px solid var(--aria-border)', color: 'var(--aria-fg)', fontFamily: 'inherit' }}
+          />
+        </div>
+        <button
+          onClick={handleSave}
+          disabled={!text.trim() || saving}
+          className="w-full py-2.5 rounded-xl flex items-center justify-center gap-2 text-[14px] font-medium transition-all disabled:opacity-50"
+          style={{ background: text.trim() ? 'var(--aria-accent)' : 'var(--aria-fg-dim)', color: 'var(--aria-bg)', border: 'none', cursor: text.trim() ? 'pointer' : 'not-allowed' }}
+        >
+          {saving ? <Loader2 size={16} className="animate-spin" /> : null}
+          {saving ? 'Saving...' : 'Save Quote'}
+        </button>
+      </div>
+      {!loaded ? (
+        <div className="flex items-center justify-center py-8">
+          <Loader2 size={18} className="animate-spin" style={{ color: 'var(--aria-fg-dim)' }} />
+        </div>
+      ) : quotes.length === 0 ? (
+        <div className="text-center py-8" style={{ color: 'var(--aria-fg-dim)' }}>
+          <Quote size={28} strokeWidth={1} className="mx-auto mb-2 opacity-30" />
+          <p className="text-[13px]">No saved quotes yet.</p>
+        </div>
+      ) : (
+        <div className="space-y-2 max-h-[250px] overflow-y-auto">
+          {quotes.map(q => (
+            <div key={q.id} className="rounded-xl p-3" style={{ background: 'var(--aria-card)', border: '1px solid var(--aria-border)' }}>
+              <div className="flex items-start gap-2">
+                <p className="flex-1 text-[13px] leading-relaxed m-0 italic" style={{ color: 'var(--aria-fg)' }}>
+                  "{q.text}"
+                </p>
+                <button
+                  onClick={() => handleDelete(q.id)}
+                  className="p-1 rounded-md transition-colors shrink-0"
+                  style={{ color: 'var(--aria-fg-dim)' }}
+                  onMouseEnter={(e) => e.currentTarget.style.color = '#ef4444'}
+                  onMouseLeave={(e) => e.currentTarget.style.color = 'var(--aria-fg-dim)'}
+                >
+                  <Trash2 size={13} />
+                </button>
+              </div>
+              {(q.bookTitle || q.author) && (
+                <p className="text-[11px] mt-1 m-0" style={{ color: 'var(--aria-fg-dim)' }}>
+                  {q.bookTitle && `— ${q.bookTitle}`}{q.author && `, ${q.author}`}
+                </p>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+function SurpriseButton() {
+  const [loading, setLoading] = useState(false)
+  const [suggestion, setSuggestion] = useState<{ title: string; author: string; why: string; gutenbergUrl: string } | null>(null)
+  const [adding, setAdding] = useState(false)
+
+  const handleSurprise = async () => {
+    setLoading(true)
+    setSuggestion(null)
+    try {
+      const res = await fetch('/api/library-suggest/surprise', { method: 'POST' })
+      const data = await res.json()
+      if (data.suggestion) {
+        setSuggestion(data.suggestion)
+      } else if (data.retry) {
+        toast.info('Couldn\'t find a public-domain match — try again?')
+      } else {
+        toast.error('Could not generate a suggestion right now')
+      }
+    } catch {
+      toast.error('Something went wrong')
+    } finally {
+      setLoading(false)
+    }
+  }
+
+  const handleAdd = async () => {
+    if (!suggestion?.gutenbergUrl) return
+    setAdding(true)
+    try {
+      const res = await fetch('/api/knowledge', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ url: suggestion.gutenbergUrl, title: `${suggestion.title} by ${suggestion.author}` }),
+      })
+      if (!res.ok && res.status !== 409) throw new Error('failed')
+      toast.success(`Added "${suggestion.title}" to your library`)
+      setSuggestion(null)
+    } catch {
+      toast.error('Could not fetch the full text — try again')
+    } finally {
+      setAdding(false)
+    }
+  }
+
+  if (suggestion) {
+    return (
+      <div className="mt-4 rounded-xl p-4 text-left" style={{ background: 'var(--aria-card)', border: '1px solid rgba(245,158,11,0.25)' }}>
+        <div className="flex items-start gap-2 mb-2">
+          <Sparkles size={14} style={{ color: 'var(--aria-accent-glow)' }} className="mt-0.5 shrink-0" />
+          <div>
+            <p className="text-sm font-medium m-0" style={{ color: 'var(--aria-fg)' }}>{suggestion.title}</p>
+            <p className="text-[12px] m-0" style={{ color: 'var(--aria-fg-muted)' }}>by {suggestion.author}</p>
+          </div>
+        </div>
+        {suggestion.why && (
+          <p className="text-[12px] m-0 mb-3 italic" style={{ color: 'var(--aria-fg-muted)' }}>{suggestion.why}</p>
+        )}
+        <div className="flex gap-2">
+          <button
+            onClick={handleAdd}
+            disabled={adding}
+            className="text-xs px-3 py-1.5 rounded-lg transition-colors"
+            style={{ background: 'var(--aria-accent)', color: 'var(--aria-bg)' }}
+          >
+            {adding ? <Loader2 size={12} className="animate-spin" /> : 'Add to my library'}
+          </button>
+          <button
+            onClick={() => { setSuggestion(null); handleSurprise() }}
+            disabled={loading || adding}
+            className="text-xs px-3 py-1.5 rounded-lg transition-colors"
+            style={{ color: 'var(--aria-fg-dim)' }}
+          >
+            Not for me, try again
+          </button>
+        </div>
+      </div>
+    )
+  }
+
+  return (
+    <button
+      onClick={handleSurprise}
+      disabled={loading}
+      className="mt-4 text-xs px-3 py-2 rounded-lg flex items-center gap-1.5 transition-colors mx-auto"
+      style={{ border: '1px solid var(--aria-border)', color: 'var(--aria-accent-glow)', background: 'transparent' }}
+    >
+      {loading ? <Loader2 size={12} className="animate-spin" /> : <Sparkles size={12} />}
+      {loading ? 'Finding something...' : 'Surprise me with a classic'}
+    </button>
   )
 }
 

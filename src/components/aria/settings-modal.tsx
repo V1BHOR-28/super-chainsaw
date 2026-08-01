@@ -287,6 +287,9 @@ export function SettingsModal() {
         trainingOptIn: false,
         autoDestruct: false,
         voiceEnabled: false,
+        currentStreak: 0,
+        longestStreak: 0,
+        lastActiveDate: null,
       }
       setSettings({ ...fallback, [key]: value })
     } else {

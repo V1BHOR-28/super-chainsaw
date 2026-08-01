@@ -39,6 +39,7 @@ model User {
   settings        UserSettings?
   usage           Usage[]
   dailyDigests    DailyDigest[]
+  quotes          Quote[]
 }
 
 model Conversation {
@@ -100,6 +101,7 @@ model Knowledge {
   source     String   @default("text") // "text" | "url" | "file"
   sourceUrl  String?
   documentId String?                          // groups chunks of one document together
+  finishedAt DateTime?
   embedding  Unsupported("vector(768)")? // Gemini text-embedding-004 dimension
   createdAt  DateTime @default(now())
 
@@ -162,6 +164,9 @@ model UserSettings {
   trainingOptIn    Boolean  @default(false)
   autoDestruct     Boolean  @default(false)
   voiceEnabled     Boolean  @default(true)
+  currentStreak    Int      @default(0)
+  longestStreak    Int      @default(0)
+  lastActiveDate   DateTime?
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
 
@@ -199,4 +204,20 @@ model DailyDigest {
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@unique([userId, date])
+}
+
+// Saved quotes — short, user-curated snippets meant to be referenced directly.
+// Distinct from Knowledge (which is full-document ingestion for RAG).
+model Quote {
+  id        String   @id @default(cuid())
+  userId    String
+  text      String
+  bookTitle String?
+  author    String?
+  note      String?
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
 }
