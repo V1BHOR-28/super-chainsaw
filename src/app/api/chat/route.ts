@@ -930,7 +930,7 @@ No hedging, no disclaimers. Give your raw, unvarnished interpretation. Engage wi
               conversationId,
               role: 'assistant',
               content: fullText,
-              toolUsed: tool ?? (attachments?.length ? 'vision' : null),
+              toolUsed: tool ?? (knowledgeContext ? 'library' : null) ?? (attachments?.length ? 'vision' : null),
               attachmentsJson: null,
             },
           })

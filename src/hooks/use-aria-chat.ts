@@ -54,6 +54,31 @@ async function detectMemory(userMessage: string, ariaReply: string) {
 }
 
 /**
+ * detectBookSuggestion — fire-and-forget, same pattern as detectMemory.
+ * Calls the library-suggest detection endpoint after an assistant reply.
+ * If a specific book was mentioned from training knowledge (not the user's
+ * fed library), surfaces a suggestion card with bookmark + public-domain
+ * full-text options.
+ */
+async function detectBookSuggestion(ariaReply: string) {
+  if (ariaReply.trim().length < 20) return
+  try {
+    const res = await fetch('/api/library-suggest/detect', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ ariaReply }),
+    })
+    if (!res.ok) return
+    const data = await res.json()
+    if (data.suggestion) {
+      useAriaStore.getState().setPendingBookSuggestion(data.suggestion)
+    }
+  } catch (e) {
+    if (process.env.NODE_ENV === 'development') console.warn('[detectBookSuggestion]', e)
+  }
+}
+
+/**
  * useAriaChat — the streaming chat orchestrator.
  * Sends a message to /api/chat, parses the SSE stream, and updates the store.
  */
@@ -255,6 +280,13 @@ export function useAriaChat() {
         if (!skipDetect && accumulated.trim().length > 0) {
           detectMemory(text, accumulated).catch(() => {
             /* silent — detection is best-effort */
+          })
+          // Book suggestion detection — fire-and-forget, same pattern.
+          // The detection endpoint does its own filtering (LLM can tell
+          // when a reply was drawing from the user's fed library vs.
+          // training knowledge, and returns null in the former case).
+          detectBookSuggestion(accumulated).catch(() => {
+            /* silent — best-effort */
           })
         }
       } catch (err) {

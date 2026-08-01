@@ -85,6 +85,13 @@ export type MemoryCandidate = {
   confidence: 'high' | 'medium'
 }
 
+export type BookSuggestion = {
+  title: string
+  author: string
+  canAddFullText: boolean
+  gutenbergUrl: string | null
+}
+
 /** A message rendered in the chat UI (DB-backed + ephemeral streaming). */
 export type ChatMessage = {
   id: string

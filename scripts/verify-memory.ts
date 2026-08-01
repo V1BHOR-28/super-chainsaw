@@ -387,6 +387,26 @@ async function checkHeaderLabelsDefanged() {
   results.push({ name: 'header-labels-defanged', pass, detail: pass ? 'Labels rewritten as internal notes.' : 'Still using mimicable capitalized headers.' })
 }
 
+// ─── BOOK SUGGESTION FEATURE CHECKS ────────────────────────────────────────
+
+async function checkGutenbergHelperExists() {
+  const src = await getFileContent('src/lib/gutenberg.ts')
+  const pass = /checkGutenbergAvailability/.test(src)
+  results.push({ name: 'gutenberg-helper-exists', pass, detail: pass ? 'Public-domain check found.' : 'Missing.' })
+}
+
+async function checkBookDetectionRouteExists() {
+  const src = await getFileContent('src/app/api/library-suggest/detect/route.ts')
+  const pass = src.length > 0 && /canAddFullText/.test(src)
+  results.push({ name: 'book-detection-route-exists', pass, detail: pass ? 'Detection route found.' : 'Missing or incomplete.' })
+}
+
+async function checkToolUsedTracksLibrary() {
+  const src = await getFileContent('src/app/api/chat/route.ts')
+  const pass = /knowledgeContext \? 'library'/.test(src)
+  results.push({ name: 'tool-used-tracks-library', pass, detail: pass ? 'Library usage now tracked.' : 'Cannot distinguish library-sourced replies.' })
+}
+
 async function main() {
   await checkConversationOrdering()
   await checkPersonalConfidenceNotDowngraded()
@@ -443,6 +463,10 @@ async function main() {
   await checkAntiFabricationRulePresent()
   await checkExplicitEmptySearchSignal()
   await checkHeaderLabelsDefanged()
+  // Book suggestion feature
+  await checkGutenbergHelperExists()
+  await checkBookDetectionRouteExists()
+  await checkToolUsedTracksLibrary()
 
   console.table(results.map((r) => ({ Check: r.name, Result: r.pass ? 'PASS' : 'FAIL', Detail: r.detail })))
   const anyFail = results.some((r) => !r.pass)

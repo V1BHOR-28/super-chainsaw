@@ -11,6 +11,7 @@ import type {
   User,
   Usage,
   MemoryCandidate,
+  BookSuggestion,
   Attachment,
 } from '@/lib/types'
 
@@ -93,6 +94,11 @@ type AriaState = {
   pendingMemoryCandidate: MemoryCandidate | null
   pendingMemoryQueue: MemoryCandidate[]
   setPendingMemoryCandidate: (c: MemoryCandidate | null) => void
+
+  // Pending book suggestion from library-suggest detection.
+  // Single-slot (not a queue) — book mentions are rarer than memory candidates.
+  pendingBookSuggestion: BookSuggestion | null
+  setPendingBookSuggestion: (s: BookSuggestion | null) => void
 
   // Auth (real multi-user authentication)
   authState: 'loading' | 'unauthenticated' | 'needs-onboarding' | 'authenticated'
@@ -241,6 +247,9 @@ export const useAriaStore = create<AriaState>((set) => ({
       })
     }
   },
+
+  pendingBookSuggestion: null,
+  setPendingBookSuggestion: (s) => set({ pendingBookSuggestion: s }),
 
   authState: 'loading',
   setAuthState: (s) => set({ authState: s }),

@@ -19,6 +19,7 @@ import { useAriaStore } from '@/lib/store'
 import { useAriaChat } from '@/hooks/use-aria-chat'
 import { MessageBubble } from './message-bubble'
 import { MemoryAskCard } from './memory-ask-card'
+import { BookSuggestionCard } from './book-suggestion-card'
 import { UsageMeter } from './usage-meter'
 import { toast } from 'sonner'
 
@@ -40,6 +41,7 @@ export function ChatArea() {
     conversations,
     pendingMemoryCandidate,
     setPendingMemoryCandidate,
+    pendingBookSuggestion,
   } = useAriaStore()
 
   const { sendMessage } = useAriaChat()
@@ -351,6 +353,9 @@ export function ChatArea() {
                 candidate={pendingMemoryCandidate}
                 onResolved={() => setPendingMemoryCandidate(null)}
               />
+            )}
+            {pendingBookSuggestion && !isStreaming && (
+              <BookSuggestionCard suggestion={pendingBookSuggestion} />
             )}
           </>
         ) : (
