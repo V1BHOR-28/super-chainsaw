@@ -389,10 +389,10 @@ async function checkHeaderLabelsDefanged() {
 
 // ─── BOOK SUGGESTION FEATURE CHECKS ────────────────────────────────────────
 
-async function checkGutenbergHelperExists() {
-  const src = await getFileContent('src/lib/gutenberg.ts')
-  const pass = /checkGutenbergAvailability/.test(src)
-  results.push({ name: 'gutenberg-helper-exists', pass, detail: pass ? 'Public-domain check found.' : 'Missing.' })
+async function checkArchiveOrgHelperExists() {
+  const src = await getFileContent('src/lib/archive-org.ts')
+  const pass = /checkArchiveOrgAvailability/.test(src)
+  results.push({ name: 'archive-org-helper-exists', pass, detail: pass ? 'Archive.org availability check found.' : 'Missing.' })
 }
 
 async function checkBookDetectionRouteExists() {
@@ -464,7 +464,7 @@ async function main() {
   await checkExplicitEmptySearchSignal()
   await checkHeaderLabelsDefanged()
   // Book suggestion feature
-  await checkGutenbergHelperExists()
+  await checkArchiveOrgHelperExists()
   await checkBookDetectionRouteExists()
   await checkToolUsedTracksLibrary()
 
