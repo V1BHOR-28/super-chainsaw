@@ -1,7 +1,7 @@
 'use client'
 
 import { useState, useEffect } from 'react'
-import { Volume2, Square, Globe, Image as ImageIcon, Eye, Copy, Check, Brain, Heart } from 'lucide-react'
+import { Globe, Image as ImageIcon, Eye, Copy, Check, Brain, Heart } from 'lucide-react'
 import { Markdown } from './markdown'
 import type { ChatMessage } from '@/lib/types'
 import { useAriaStore } from '@/lib/store'
@@ -13,14 +13,11 @@ import { useAriaStore } from '@/lib/store'
  * - markdown rendering
  * - attachment thumbnails (images)
  * - tool badges (web_search / image_generation / vision)
- * - voice playback (TTS) button on ARIA messages
  * - copy button on ARIA messages
  */
 export function MessageBubble({ message }: { message: ChatMessage }) {
   const isUser = message.role === 'user'
-  const settings = useAriaStore((s) => s.settings)
   const user = useAriaStore((s) => s.user)
-  const [playing, setPlaying] = useState(false)
   const [copied, setCopied] = useState(false)
   // Briefly apply a "settle" animation to AI bubbles when streaming ends,
   // giving the bubble a soft landing cue. Fires once per message.
@@ -41,43 +38,6 @@ export function MessageBubble({ message }: { message: ChatMessage }) {
   // Falls back to "U" (User) if no name is set. This fixes the bug where the
   // avatar always showed "E" regardless of who was logged in.
   const userInitial = (user?.name?.trim()?.[0] ?? 'U').toUpperCase()
-
-  const speak = () => {
-    if (playing) {
-      window.speechSynthesis.cancel()
-      setPlaying(false)
-      return
-    }
-
-    // Strip markdown for cleaner speech
-    const cleanText = message.content
-      .replace(/```[\s\S]*?```/g, ' (code block) ')
-      .replace(/`([^`]+)`/g, '$1')
-      .replace(/!\[[^\]]*\]\([^)]*\)/g, '')
-      .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
-      .replace(/[#*_>~]/g, '')
-      .replace(/\n+/g, '. ')
-      .slice(0, 1000)
-
-    const utterance = new SpeechSynthesisUtterance(cleanText)
-    utterance.rate = 1.0
-    utterance.pitch = 1.0
-
-    // Try to use a female-sounding voice if available
-    const voices = window.speechSynthesis.getVoices()
-    const preferredVoice = voices.find(v =>
-      v.name.includes('Female') || v.name.includes('Samantha') || v.name.includes('Google US English')
-    )
-    if (preferredVoice) {
-      utterance.voice = preferredVoice
-    }
-
-    utterance.onend = () => setPlaying(false)
-    utterance.onerror = () => setPlaying(false)
-
-    window.speechSynthesis.speak(utterance)
-    setPlaying(true)
-  }
 
   const copyMessage = async () => {
     try {
@@ -288,17 +248,6 @@ export function MessageBubble({ message }: { message: ChatMessage }) {
             >
               {copied ? <Check size={13} /> : <Copy size={13} />}
             </button>
-            {settings?.voiceEnabled && (
-              <button
-                onClick={speak}
-                className="p-1.5 rounded-md hover:bg-white/5 transition-colors"
-                style={{ color: 'var(--aria-fg-muted)' }}
-                aria-label={playing ? 'Stop' : 'Listen'}
-                title={playing ? 'Stop' : 'Listen'}
-              >
-                {playing ? <Square size={13} /> : <Volume2 size={13} />}
-              </button>
-            )}
           </div>
         )}
       </div>

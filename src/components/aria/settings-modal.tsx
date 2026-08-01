@@ -457,24 +457,6 @@ export function SettingsModal() {
                   />
                 </SettingRow>
                 <SettingRow
-                  title="Sound Effects"
-                  desc="Play subtle audio cues when ARIA is thinking or responding."
-                >
-                  <AriaToggle
-                    checked={settings?.soundEffects ?? true}
-                    onChange={(v) => updateField('soundEffects', v)}
-                  />
-                </SettingRow>
-                <SettingRow
-                  title="Voice Responses"
-                  desc="Let ARIA read her replies aloud. Tap the speaker icon on any message to play."
-                >
-                  <AriaToggle
-                    checked={settings?.voiceEnabled ?? false}
-                    onChange={(v) => updateField('voiceEnabled', v)}
-                  />
-                </SettingRow>
-                <SettingRow
                   title="Light Mode"
                   desc="Switch to a light theme. Amber accents stay, background becomes warm white."
                 >

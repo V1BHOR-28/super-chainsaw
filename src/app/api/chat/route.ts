@@ -415,6 +415,33 @@ export async function POST(req: NextRequest) {
     }
     const fullToolContext = [toolContext, knowledgeContext].filter(Boolean).join('\n\n')
 
+    // === DEEP THINKING DETECTION ===
+    // Moved here (before buildAriaSystemPrompt) so the signal can reach the
+    // prompt AND the model routing below. Word-boundary matching prevents
+    // false positives like "I think pizza sounds good" or "let's book a table."
+    const deepThinkingKeywords = [
+      'philosoph', 'book', 'read', 'author', 'chapter', 'novel', 'literat',
+      'marcus', 'aurelius', 'nietzsche', 'camus', 'sartre', 'plato', 'aristotle',
+      'kant', 'hegel', 'kierkegaard', 'stirner', 'rousseau', 'hobbes', 'locke',
+      'machiavelli', 'seneca', 'epictetus', 'stoic', 'existential', 'nihilism',
+      'absurd', 'meaning', 'purpose', 'morality', 'ethics', 'virtue', 'justice',
+      'consciousness', 'reality', 'truth', 'knowledge', 'wisdom', 'contemplat',
+      'meditat', 'argument', 'thesis', 'theory', 'concept', 'idea', 'think',
+      'critique', 'analyze', 'interpret', 'perspective', 'worldview',
+      'dostoevsky', 'tolstoy', 'kafka', 'proust', 'joyce', 'woolf', 'hemingway',
+      'orwell', 'huxley', 'carnegie', 'darwin', 'einstein', 'newton',
+      'meditation', 'moral', 'spiritual', 'soul', 'mind', 'existence',
+      'freedom', 'liberty', 'power', 'authority', 'society', 'individual',
+      'zindagi', 'tattva', 'darshan', 'satya', 'sach', 'dharma', 'karma',
+      'moksha', 'atma', 'paramatma', 'gyan', 'vigyan', 'tark',
+    ]
+    const genericWords = new Set(['think', 'read', 'book', 'idea', 'power', 'moral', 'mind', 'meaning', 'purpose'])
+    const matchedKeywords = deepThinkingKeywords.filter(kw =>
+      new RegExp(`\\b${kw}`, 'i').test(actualContent)
+    )
+    const specificMatches = matchedKeywords.filter(kw => !genericWords.has(kw))
+    const isDeepThinking = knowledgeContext !== undefined || specificMatches.length > 0 || matchedKeywords.length >= 2
+
     let systemPrompt = buildAriaSystemPrompt({
       tone: settings?.tone ?? 'Warm & Honest',
       responseLength: settings?.responseLength ?? 'Balanced',
@@ -428,6 +455,7 @@ export async function POST(req: NextRequest) {
         : null,
       toolContext: fullToolContext || undefined,
       conversationSummary: conversationSummary?.summary ?? null,
+      isDeepThinking,
     })
 
     // Map DB messages to SDK format; include vision content for the latest user message if images attached
@@ -510,28 +538,8 @@ export async function POST(req: NextRequest) {
             // and the fast 8B model for casual chit-chat. This saves Groq TPM budget
             // (8B has 30K TPM, 70B has 6K TPM) while giving quality where it matters.
             //
-            // Detection: if the message mentions philosophical concepts, book titles,
-            // authors, or knowledge from the library → use 70B.
-            // Otherwise (greetings, casual chat, quick questions) → use 8B.
-            const deepThinkingKeywords = [
-              'philosoph', 'book', 'read', 'author', 'chapter', 'novel', 'literat',
-              'marcus', 'aurelius', 'nietzsche', 'camus', 'sartre', 'plato', 'aristotle',
-              'kant', 'hegel', 'kierkegaard', 'stirner', 'rousseau', 'hobbes', 'locke',
-              'machiavelli', 'seneca', 'epictetus', 'stoic', 'existential', 'nihilism',
-              'absurd', 'meaning', 'purpose', 'morality', 'ethics', 'virtue', 'justice',
-              'consciousness', 'reality', 'truth', 'knowledge', 'wisdom', 'contemplat',
-              'meditat', 'argument', 'thesis', 'theory', 'concept', 'idea', 'think',
-              'critique', 'analyze', 'interpret', 'perspective', 'worldview',
-              'dostoevsky', 'tolstoy', 'kafka', 'proust', 'joyce', 'woolf', 'hemingway',
-              'orwell', 'huxley', 'carnegie', 'darwin', 'einstein', 'newton',
-              'meditation', 'moral', 'spiritual', 'soul', 'mind', 'existence',
-              'freedom', 'liberty', 'power', 'authority', 'society', 'individual',
-              // Also Hinglish philosophy keywords
-              'zindagi', 'tattva', 'darshan', 'satya', 'sach', 'dharma', 'karma',
-              'moksha', 'atma', 'paramatma', 'gyan', 'vigyan', 'tark',
-            ]
-            const isDeepThinking = knowledgeContext !== undefined ||
-              deepThinkingKeywords.some(kw => actualContent.toLowerCase().includes(kw))
+            // isDeepThinking was computed earlier (before buildAriaSystemPrompt)
+            // so it could be passed to the prompt. Reused here for model routing.
 
             // The "selectedModel" for the fallback chain — if deep thinking, prefer
             // the largest-context free model (Qwen3 Next 80B, 262K context) for
@@ -953,7 +961,7 @@ export async function POST(req: NextRequest) {
           if (knowledgeContext && fullText.length > 50) {
             try {
               // Only journal if this was a substantive book discussion
-              const isBookDiscussion = deepThinkingKeywords.some(kw => actualContent.toLowerCase().includes(kw)) ||
+              const isBookDiscussion = isDeepThinking ||
                 knowledgeContext !== undefined
 
               if (isBookDiscussion) {
