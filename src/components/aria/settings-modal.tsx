@@ -457,6 +457,15 @@ export function SettingsModal() {
                   />
                 </SettingRow>
                 <SettingRow
+                  title="Voice Responses"
+                  desc="Let ARIA read her replies aloud using your browser's built-in voice. Tap the speaker icon on any message to play. Works offline — no API key needed."
+                >
+                  <AriaToggle
+                    checked={settings?.voiceEnabled ?? false}
+                    onChange={(v) => updateField('voiceEnabled', v)}
+                  />
+                </SettingRow>
+                <SettingRow
                   title="Light Mode"
                   desc="Switch to a light theme. Amber accents stay, background becomes warm white."
                 >
