@@ -804,7 +804,7 @@ function SurpriseButton() {
       const res = await fetch('/api/knowledge', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ url: suggestion.sourceUrl, title: `${suggestion.title} by ${suggestion.author}` }),
+        body: JSON.stringify({ type: 'url', url: suggestion.sourceUrl, title: `${suggestion.title} by ${suggestion.author}` }),
       })
       if (!res.ok && res.status !== 409) {
         // Surface the route's specific error message (e.g. a timeout on a huge

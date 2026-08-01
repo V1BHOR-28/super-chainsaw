@@ -38,6 +38,7 @@ export function BookSuggestionCard({ suggestion }: { suggestion: BookSuggestion 
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
+          type: 'url',
           url: suggestion.sourceUrl,
           title: `${suggestion.title} by ${suggestion.author}`,
         }),

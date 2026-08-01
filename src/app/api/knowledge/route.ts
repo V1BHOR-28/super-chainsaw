@@ -288,8 +288,14 @@ export async function POST(req: NextRequest) {
         title = fetched.title
         source = 'url'
         sourceUrl = url
+      } else if (type === undefined) {
+        // Distinct from an invalid type — this means the caller forgot the field
+        // entirely (a client bug), not that they sent a wrong value. Surfacing
+        // this specifically makes such bugs obvious from the first error toast
+        // instead of looking like a generic server-side validation failure.
+        return NextResponse.json({ error: 'Missing required field: type (expected "text" or "url" for JSON requests, or a multipart file upload).' }, { status: 400 })
       } else {
-        return NextResponse.json({ error: 'Invalid type. Use text, url, or upload a file.' }, { status: 400 })
+        return NextResponse.json({ error: `Invalid type "${type}". Use "text" or "url", or upload a file.` }, { status: 400 })
       }
     }
 
