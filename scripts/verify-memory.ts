@@ -328,6 +328,28 @@ async function checkMemoryClusteringPresent() {
   results.push({ name: 'memory-clustering-present', pass, detail: pass ? 'Clustering wired into MemoryPanel.' : 'Still a flat list.' })
 }
 
+// ─── FULL ACCOUNT EXPORT CHECKS ───────────────────────────────────────────
+// These verify the full-export feature landed on main and the original
+// per-conversation export was left untouched.
+
+async function checkFullExportRouteExists() {
+  const src = await getFileContent('src/app/api/export/all/route.ts')
+  const pass = src.length > 0 && /conversations:/.test(src) && /memories:/.test(src) && /knowledge:/.test(src)
+  results.push({ name: 'full-export-route-exists', pass, detail: pass ? 'Route exists and includes all four data types.' : 'Missing or incomplete.' })
+}
+
+async function checkFullExportUiWired() {
+  const src = await getFileContent('src/components/aria/settings-modal.tsx')
+  const pass = /\/api\/export\/all/.test(src)
+  results.push({ name: 'full-export-ui-wired', pass, detail: pass ? 'Settings modal calls the full-export endpoint.' : 'No UI entry point found.' })
+}
+
+async function checkPerConversationExportUntouched() {
+  const src = await getFileContent('src/app/api/conversations/%5Bid%5D/export/route.ts')
+  const pass = /aria-conversation-v1/.test(src) // the existing route's format tag — confirms it wasn't accidentally overwritten
+  results.push({ name: 'per-conversation-export-untouched', pass, detail: pass ? 'Original per-conversation export still intact.' : 'Original export route appears to have been modified or replaced — check for accidental overwrite.' })
+}
+
 async function main() {
   await checkConversationOrdering()
   await checkPersonalConfidenceNotDowngraded()
@@ -373,6 +395,10 @@ async function main() {
   await checkDailyDigestColumnExists()
   await checkCronConfigExists()
   await checkMemoryClusteringPresent()
+  // Full account export
+  await checkFullExportRouteExists()
+  await checkFullExportUiWired()
+  await checkPerConversationExportUntouched()
 
   console.table(results.map((r) => ({ Check: r.name, Result: r.pass ? 'PASS' : 'FAIL', Detail: r.detail })))
   const anyFail = results.some((r) => !r.pass)

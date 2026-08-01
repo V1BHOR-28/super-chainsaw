@@ -200,6 +200,7 @@ export function SettingsModal() {
   const [activeTab, setActiveTab] = useState<TabId>('general')
   const [lightMode, setLightMode] = useState(false)
   const [displayName, setDisplayName] = useState('Elias')
+  const [exporting, setExporting] = useState(false)
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   /* Load settings/user whenever the modal opens */
@@ -250,6 +251,26 @@ export function SettingsModal() {
         toast.error('Could not save')
       }
     }, 450)
+  }
+
+  const handleFullExport = async (format: 'json' | 'markdown') => {
+    setExporting(true)
+    try {
+      const res = await fetch(`/api/export/all?format=${format}`)
+      if (!res.ok) throw new Error('Export failed')
+      const blob = await res.blob()
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = `aria-full-export-${new Date().toISOString().slice(0, 10)}.${format === 'json' ? 'json' : 'md'}`
+      a.click()
+      URL.revokeObjectURL(url)
+      toast.success('Full export downloaded')
+    } catch {
+      toast.error('Could not complete export — try again')
+    } finally {
+      setExporting(false)
+    }
   }
 
   const updateField = (key: keyof AriaSettings, value: string | boolean) => {
@@ -556,6 +577,53 @@ export function SettingsModal() {
                   >
                     Partner Tier
                   </button>
+                </SettingRow>
+                <SettingRow
+                  title="Export Everything"
+                  desc="Download a full backup of every conversation, memory, fed document, mood entry, and reminder."
+                >
+                  <div className="flex gap-2">
+                    <button
+                      onClick={() => handleFullExport('json')}
+                      disabled={exporting}
+                      className="rounded-lg px-3 py-2 text-[13px] transition-colors"
+                      style={{
+                        color: 'var(--aria-accent-glow)',
+                        border: '1px solid var(--aria-accent-deep)',
+                        background: 'transparent',
+                        cursor: exporting ? 'not-allowed' : 'pointer',
+                        opacity: exporting ? 0.6 : 1,
+                      }}
+                      onMouseEnter={(e) => {
+                        if (!exporting) e.currentTarget.style.background = 'rgba(245, 158, 11, 0.08)'
+                      }}
+                      onMouseLeave={(e) => {
+                        e.currentTarget.style.background = 'transparent'
+                      }}
+                    >
+                      {exporting ? 'Exporting…' : 'JSON'}
+                    </button>
+                    <button
+                      onClick={() => handleFullExport('markdown')}
+                      disabled={exporting}
+                      className="rounded-lg px-3 py-2 text-[13px] transition-colors"
+                      style={{
+                        color: 'var(--aria-accent-glow)',
+                        border: '1px solid var(--aria-accent-deep)',
+                        background: 'transparent',
+                        cursor: exporting ? 'not-allowed' : 'pointer',
+                        opacity: exporting ? 0.6 : 1,
+                      }}
+                      onMouseEnter={(e) => {
+                        if (!exporting) e.currentTarget.style.background = 'rgba(245, 158, 11, 0.08)'
+                      }}
+                      onMouseLeave={(e) => {
+                        e.currentTarget.style.background = 'transparent'
+                      }}
+                    >
+                      {exporting ? 'Exporting…' : 'Markdown'}
+                    </button>
+                  </div>
                 </SettingRow>
               </section>
             )}
