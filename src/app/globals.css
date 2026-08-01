@@ -134,6 +134,13 @@
   ::-webkit-scrollbar-track { background: transparent; }
   ::-webkit-scrollbar-thumb { background: rgba(252, 211, 77, 0.15); border-radius: 3px; }
   ::-webkit-scrollbar-thumb:hover { background: rgba(252, 211, 77, 0.3); }
+
+  /* Visible focus indicator for keyboard navigation (Fix 2.6) */
+  :focus-visible {
+    outline: 2px solid var(--aria-accent);
+    outline-offset: 2px;
+    border-radius: 4px;
+  }
 }
 
 /* ============================================
@@ -491,4 +498,18 @@
 /* Live transcript text */
 .aria-voice-transcript {
   animation: aria-fade-slide 0.3s ease forwards;
+}
+
+/* ============================================
+   Accessibility — prefers-reduced-motion (Fix 2.7)
+   Disables animations/transitions when the OS-level
+   "reduce motion" setting is enabled.
+   ============================================ */
+@media (prefers-reduced-motion: reduce) {
+  *, *::before, *::after {
+    animation-duration: 0.001ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.001ms !important;
+    scroll-behavior: auto !important;
+  }
 }

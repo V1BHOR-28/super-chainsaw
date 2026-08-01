@@ -12,6 +12,7 @@ import {
   Sparkles,
   Menu,
   Download,
+  Loader2,
 } from 'lucide-react'
 import { useAriaStore } from '@/lib/store'
 import { useAriaChat } from '@/hooks/use-aria-chat'
@@ -45,7 +46,12 @@ export function ChatArea() {
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const scrollRef = useRef<HTMLDivElement>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
+  // Tracks whether the user is currently scrolled near the bottom of the
+  // messages container. Used to suppress force-scroll-to-bottom when the
+  // user has deliberately scrolled up to read older messages.
+  const isNearBottomRef = useRef(true)
   const [greeting, setGreeting] = useState('')
+  const [isUploading, setIsUploading] = useState(false)
 
   // === KEYBOARD SHORTCUTS (Phase 4.3) ===
   useEffect(() => {
@@ -88,9 +94,25 @@ export function ChatArea() {
     setGreeting(g)
   }, [user?.name])
 
-  // Auto-scroll to bottom on new messages / streaming
+  // Track whether the user is scrolled near the bottom of the messages
+  // container. Updates isNearBottomRef on every scroll event so the
+  // messages-change effect below can decide whether to auto-scroll.
   useEffect(() => {
-    if (scrollRef.current) {
+    const el = scrollRef.current
+    if (!el) return
+    const onScroll = () => {
+      isNearBottomRef.current =
+        el.scrollHeight - el.scrollTop - el.clientHeight < 120
+    }
+    el.addEventListener('scroll', onScroll, { passive: true })
+    return () => el.removeEventListener('scroll', onScroll)
+  }, [])
+
+  // Auto-scroll to bottom on new messages / streaming — but only when the
+  // user is already near the bottom, so we don't yank them away from older
+  // messages they've scrolled up to read.
+  useEffect(() => {
+    if (scrollRef.current && isNearBottomRef.current) {
       scrollRef.current.scrollTo({ top: scrollRef.current.scrollHeight, behavior: 'smooth' })
     }
   }, [messages])
@@ -160,7 +182,10 @@ export function ChatArea() {
   }
 
   const handleKeyDown = (e: React.KeyboardEvent) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
+    // Guard against IME composition (CJK / Japanese / Korean input methods):
+    // when the user is mid-composition, Enter confirms the candidate, not
+    // sends the message. e.nativeEvent.isComposing is the platform signal.
+    if (e.key === 'Enter' && !e.shiftKey && !e.nativeEvent.isComposing) {
       e.preventDefault()
       handleSend()
     }
@@ -173,6 +198,7 @@ export function ChatArea() {
       toast.error('Max 4 images per message')
       return
     }
+    setIsUploading(true)
     try {
       const form = new FormData()
       files.forEach((f) => form.append('files', f))
@@ -184,6 +210,7 @@ export function ChatArea() {
       console.error(err)
       toast.error('Could not attach file')
     } finally {
+      setIsUploading(false)
       if (fileInputRef.current) fileInputRef.current.value = ''
     }
   }
@@ -349,15 +376,21 @@ export function ChatArea() {
               />
               <button
                 onClick={() => fileInputRef.current?.click()}
-                className="w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0 transition-colors"
+                disabled={isUploading}
+                className="w-8 h-8 rounded-full flex items-center justify-center flex-shrink-0 transition-colors disabled:opacity-60 disabled:cursor-not-allowed"
                 style={{
                   background: 'var(--aria-card)',
                   border: '1px solid var(--aria-border)',
                   color: 'var(--aria-fg-muted)',
                 }}
-                title="Attach images"
+                title={isUploading ? 'Uploading…' : 'Attach images'}
+                aria-label={isUploading ? 'Uploading' : 'Attach images'}
               >
-                <Plus size={16} />
+                {isUploading ? (
+                  <Loader2 size={16} className="animate-spin" />
+                ) : (
+                  <Plus size={16} />
+                )}
               </button>
               <textarea
                 ref={textareaRef}

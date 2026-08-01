@@ -7,10 +7,12 @@ import type { Attachment, ChatMessage, MemoryCandidate } from '@/lib/types'
 
 /**
  * detectMemory — async helper that runs the memory-detection LLM call after
- * ARIA's reply completes. High-confidence candidates auto-save + toast.
- * Medium-confidence candidates surface as an ask card. Best-effort, silent on
- * failure. Also logs every decision (save or skip) so ARIA learns the user's
- * pattern over time.
+ * ARIA's reply completes. ALL confidence levels are routed through the
+ * pendingMemoryCandidate / MemoryAskCard flow — nothing is written to
+ * /api/memory until the user explicitly accepts via the ask card. The ask
+ * card (memory-ask-card.tsx) handles the save, the success toast, and the
+ * logDecision call on accept/skip, so detection here only queues the
+ * candidate. Best-effort, silent on failure.
  */
 async function detectMemory(userMessage: string, ariaReply: string) {
   let candidates: MemoryCandidate[] = []
@@ -39,48 +41,15 @@ async function detectMemory(userMessage: string, ariaReply: string) {
   const state = useAriaStore.getState()
 
   for (const c of candidates) {
-    if (c.confidence === 'high') {
-      // Auto-save silently, then toast so the user can see what was saved.
-      try {
-        const saveRes = await fetch('/api/memory', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ content: c.text, category: c.category, source: 'auto' }),
-        })
-        if (saveRes.status === 409) {
-          // Already exists — log as a skip (user effectively already has it)
-          await logDecision(c, false)
-          continue
-        }
-        if (!saveRes.ok) continue
-        const data = await saveRes.json()
-        state.upsertMemory(data.memory)
-        await logDecision(c, true)
-        toast.success(`ARIA remembered: ${c.text}`, { duration: 4000 })
-      } catch {
-        /* silent */
-      }
-    } else if (c.confidence === 'medium') {
-      // Queue the candidate — the store handles showing one at a time.
-      state.setPendingMemoryCandidate(c)
-      break
-    }
-  }
-}
-
-async function logDecision(candidate: MemoryCandidate, accepted: boolean) {
-  try {
-    await fetch('/api/memory/decision', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        candidateText: candidate.text,
-        category: candidate.category,
-        accepted,
-      }),
-    })
-  } catch {
-    /* silent */
+    // Route ALL confidence levels (high + medium) through the ask-card
+    // flow. Nothing is written to /api/memory here — the user must click
+    // "Save" on MemoryAskCard before any persistence happens. The ask card
+    // also owns the success toast and the logDecision call (on both accept
+    // and skip), so detection here only queues the candidate. The candidate's
+    // confidence is preserved on the object so the UI can visually
+    // differentiate (e.g. pre-select accept for high-confidence candidates).
+    state.setPendingMemoryCandidate(c)
+    break
   }
 }
 
@@ -277,9 +246,10 @@ export function useAriaChat() {
         }
 
         // 5. Auto-memory detection — runs async after the reply is done.
-        // High confidence → auto-save + toast. Medium → show ask card.
-        // Skipped entirely for vision/image-gen/tool messages (no clean user
-        // statement to extract from) and for very short user messages.
+        // All confidence levels surface as an ask card; nothing is saved
+        // until the user accepts. Skipped entirely for vision/image-gen/tool
+        // messages (no clean user statement to extract from) and for very
+        // short user messages.
         const skipDetect =
           toolForThisSend !== null || attachmentsForThisSend.length > 0
         if (!skipDetect && accumulated.trim().length > 0) {

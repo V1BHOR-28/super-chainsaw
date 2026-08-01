@@ -273,10 +273,11 @@ export function AuthModal() {
     signIn('google', { callbackUrl: '/' })
   }
 
-  const handleGitHub = () => {
-    toast.info('GitHub sign-in coming soon. Use email or Google for now.')
-  }
-
+  // NOTE: GitHub OAuth is NOT configured in src/lib/auth.ts (only Google +
+  // Credentials providers are wired). The button below is intentionally
+  // disabled and visually marked as "coming soon" so users can't mistake it
+  // for a working sign-in option. When GitHubProvider is added to authOptions,
+  // re-enable the button and replace this comment with `signIn('github', ...)`.
   if (!authModalOpen) return null
 
   /* ---------- Reusable pieces ---------- */
@@ -301,19 +302,36 @@ export function AuthModal() {
       </button>
       <button
         type="button"
-        onClick={handleGitHub}
-        style={oauthButtonStyle}
-        onMouseEnter={(e) => {
-          e.currentTarget.style.borderColor = 'rgba(245,158,11,0.45)'
-          e.currentTarget.style.background = 'rgba(245,158,11,0.05)'
-        }}
-        onMouseLeave={(e) => {
-          e.currentTarget.style.borderColor = 'var(--aria-border)'
-          e.currentTarget.style.background = 'var(--aria-card)'
+        disabled
+        aria-disabled="true"
+        title="GitHub sign-in is coming soon. Use email or Google for now."
+        style={{
+          ...oauthButtonStyle,
+          opacity: 0.5,
+          cursor: 'not-allowed',
+          // Visually distinct from the working Google button: dimmed text +
+          // dashed border so it reads as "not yet available" at a glance.
+          color: 'var(--aria-fg-dim)',
+          borderStyle: 'dashed',
         }}
       >
         <GitHubLogo />
         Continue with GitHub
+        <span
+          style={{
+            marginLeft: '4px',
+            padding: '2px 6px',
+            fontSize: '10px',
+            fontWeight: 600,
+            letterSpacing: '0.04em',
+            textTransform: 'uppercase',
+            borderRadius: '4px',
+            background: 'rgba(245,158,11,0.15)',
+            color: 'var(--aria-accent)',
+          }}
+        >
+          Soon
+        </span>
       </button>
     </div>
   )

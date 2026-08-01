@@ -199,7 +199,7 @@ export function SettingsModal() {
 
   const [activeTab, setActiveTab] = useState<TabId>('general')
   const [lightMode, setLightMode] = useState(false)
-  const [displayName, setDisplayName] = useState('Elias')
+  const [displayName, setDisplayName] = useState('')
   const [exporting, setExporting] = useState(false)
   const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
@@ -218,7 +218,7 @@ export function SettingsModal() {
         if (data.settings) setSettings(data.settings)
         if (data.user) {
           setUser(data.user)
-          setDisplayName(data.user.name || 'Elias')
+          setDisplayName(data.user.name || '')
         }
       } catch {
         if (!cancelled) toast.error('Could not load settings')
@@ -530,14 +530,14 @@ export function SettingsModal() {
                     onChange={(e) => setDisplayName(e.target.value)}
                     onBlur={() => {
                       const trimmed = displayName.trim()
-                      if (trimmed && trimmed !== (user?.name || 'Elias')) {
+                      if (trimmed && trimmed !== (user?.name || '')) {
                         patchSettings({ name: trimmed })
                       }
                     }}
                     onKeyDown={(e) => {
                       if (e.key === 'Enter') (e.target as HTMLInputElement).blur()
                     }}
-                    placeholder="Elias"
+                    placeholder="Your name"
                     className="rounded-lg outline-none transition-colors focus:border-[rgba(245,158,11,0.45)]"
                     style={{
                       width: '180px',
@@ -558,12 +558,12 @@ export function SettingsModal() {
                     className="text-[13px]"
                     style={{ color: 'var(--aria-fg-muted)' }}
                   >
-                    {user?.email ?? 'elias@aria.local'}
+                    {user?.email ?? '—'}
                   </span>
                 </SettingRow>
                 <SettingRow
                   title="Subscription Tier"
-                  desc="Currently on the Partner Tier. Manage billing."
+                  desc="Your current plan."
                 >
                   <button
                     disabled
@@ -575,7 +575,7 @@ export function SettingsModal() {
                       cursor: 'not-allowed',
                     }}
                   >
-                    Partner Tier
+                    {user?.tier || 'Free'}
                   </button>
                 </SettingRow>
                 <SettingRow

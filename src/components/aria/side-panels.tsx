@@ -117,13 +117,24 @@ function IconButton({
   children,
   danger,
   active,
+  confirming,
 }: {
   onClick: () => void
   title: string
   children: React.ReactNode
   danger?: boolean
   active?: boolean
+  confirming?: boolean
 }) {
+  // `confirming` renders the button in an armed delete-confirm state:
+  // red icon, red border, tinted red background — distinct from the
+  // default dim trash icon so the user knows a second click will fire.
+  const baseColor = confirming
+    ? '#ef4444'
+    : active
+      ? 'var(--aria-accent-glow)'
+      : 'var(--aria-fg-dim)'
+  const isDanger = danger || confirming
   return (
     <button
       onClick={onClick}
@@ -131,24 +142,20 @@ function IconButton({
       title={title}
       className="flex h-7 w-7 items-center justify-center rounded-md transition-colors"
       style={{
-        color: active
-          ? 'var(--aria-accent-glow)'
-          : danger
-            ? 'var(--aria-fg-dim)'
-            : 'var(--aria-fg-dim)',
-        background: 'transparent',
-        border: '1px solid transparent',
+        color: baseColor,
+        background: confirming ? 'rgba(239, 68, 68, 0.12)' : 'transparent',
+        border: confirming ? '1px solid #ef4444' : '1px solid transparent',
         cursor: 'pointer',
       }}
       onMouseEnter={(e) => {
-        e.currentTarget.style.color = danger ? '#ef4444' : 'var(--aria-accent-glow)'
-        e.currentTarget.style.background = 'var(--aria-card)'
+        e.currentTarget.style.color = isDanger ? '#ef4444' : 'var(--aria-accent-glow)'
+        e.currentTarget.style.background = confirming
+          ? 'rgba(239, 68, 68, 0.18)'
+          : 'var(--aria-card)'
       }}
       onMouseLeave={(e) => {
-        e.currentTarget.style.color = active
-          ? 'var(--aria-accent-glow)'
-          : 'var(--aria-fg-dim)'
-        e.currentTarget.style.background = 'transparent'
+        e.currentTarget.style.color = baseColor
+        e.currentTarget.style.background = confirming ? 'rgba(239, 68, 68, 0.12)' : 'transparent'
       }}
     >
       {children}
@@ -173,6 +180,8 @@ function MemoryPanel() {
   const [loadingMore, setLoadingMore] = useState(false)
   const [editingId, setEditingId] = useState<string | null>(null)
   const [editValue, setEditValue] = useState('')
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null)
+  const confirmTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
   const inputRef = useRef<HTMLInputElement>(null)
 
   useEffect(() => {
@@ -304,6 +313,45 @@ function MemoryPanel() {
     }
   }
 
+  // Two-step delete confirmation: first click arms the trash icon into a
+  // red "Confirm?" state; the second click fires the actual delete.
+  // Auto-resets after 3s, or on any click outside the confirming button.
+  const requestDelete = (id: string) => {
+    setConfirmDeleteId(id)
+    if (confirmTimerRef.current) clearTimeout(confirmTimerRef.current)
+    confirmTimerRef.current = setTimeout(() => setConfirmDeleteId(null), 3000)
+  }
+
+  const confirmDelete = (id: string) => {
+    if (confirmTimerRef.current) {
+      clearTimeout(confirmTimerRef.current)
+      confirmTimerRef.current = null
+    }
+    setConfirmDeleteId(null)
+    void handleDelete(id)
+  }
+
+  useEffect(() => {
+    if (!confirmDeleteId) return
+    const onMouseDown = (e: MouseEvent) => {
+      const target = e.target as HTMLElement | null
+      if (target?.closest?.('[data-confirm-trash]')) return
+      if (confirmTimerRef.current) {
+        clearTimeout(confirmTimerRef.current)
+        confirmTimerRef.current = null
+      }
+      setConfirmDeleteId(null)
+    }
+    document.addEventListener('mousedown', onMouseDown)
+    return () => document.removeEventListener('mousedown', onMouseDown)
+  }, [confirmDeleteId])
+
+  useEffect(() => {
+    return () => {
+      if (confirmTimerRef.current) clearTimeout(confirmTimerRef.current)
+    }
+  }, [])
+
   return (
     <div className="aria-fade-slide flex flex-1 min-h-0 flex-col">
       <PanelHeader
@@ -418,13 +466,26 @@ function MemoryPanel() {
                             fill={m.pinned ? 'currentColor' : 'none'}
                           />
                         </IconButton>
-                        <IconButton
-                          onClick={() => handleDelete(m.id)}
-                          title="Delete"
-                          danger
-                        >
-                          <Trash2 size={14} />
-                        </IconButton>
+                        {confirmDeleteId === m.id ? (
+                          <span className="contents" data-confirm-trash>
+                            <IconButton
+                              onClick={() => confirmDelete(m.id)}
+                              title="Confirm delete?"
+                              danger
+                              confirming
+                            >
+                              <Check size={14} />
+                            </IconButton>
+                          </span>
+                        ) : (
+                          <IconButton
+                            onClick={() => requestDelete(m.id)}
+                            title="Delete"
+                            danger
+                          >
+                            <Trash2 size={14} />
+                          </IconButton>
+                        )}
                       </div>
                     </div>
                     <div className="mt-2 flex items-center gap-2">
@@ -507,6 +568,8 @@ function MoodPanel() {
   const [loaded, setLoaded] = useState(false)
   const [noteEditingId, setNoteEditingId] = useState<string | null>(null)
   const [noteDraft, setNoteDraft] = useState('')
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null)
+  const confirmTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -582,7 +645,46 @@ function MoodPanel() {
     }
   }
 
-  const name = user?.name || 'Elias'
+  // Two-step delete confirmation: first click arms the trash icon into a
+  // red "Confirm?" state; the second click fires the actual delete.
+  // Auto-resets after 3s, or on any click outside the confirming button.
+  const requestDelete = (id: string) => {
+    setConfirmDeleteId(id)
+    if (confirmTimerRef.current) clearTimeout(confirmTimerRef.current)
+    confirmTimerRef.current = setTimeout(() => setConfirmDeleteId(null), 3000)
+  }
+
+  const confirmDelete = (id: string) => {
+    if (confirmTimerRef.current) {
+      clearTimeout(confirmTimerRef.current)
+      confirmTimerRef.current = null
+    }
+    setConfirmDeleteId(null)
+    void handleDelete(id)
+  }
+
+  useEffect(() => {
+    if (!confirmDeleteId) return
+    const onMouseDown = (e: MouseEvent) => {
+      const target = e.target as HTMLElement | null
+      if (target?.closest?.('[data-confirm-trash]')) return
+      if (confirmTimerRef.current) {
+        clearTimeout(confirmTimerRef.current)
+        confirmTimerRef.current = null
+      }
+      setConfirmDeleteId(null)
+    }
+    document.addEventListener('mousedown', onMouseDown)
+    return () => document.removeEventListener('mousedown', onMouseDown)
+  }, [confirmDeleteId])
+
+  useEffect(() => {
+    return () => {
+      if (confirmTimerRef.current) clearTimeout(confirmTimerRef.current)
+    }
+  }, [])
+
+  const name = user?.name || 'friend'
   const latestMood = moods[0]?.mood
 
   return (
@@ -713,13 +815,26 @@ function MoodPanel() {
                           <Pencil size={12} />
                         </IconButton>
                       )}
-                      <IconButton
-                        onClick={() => handleDelete(m.id)}
-                        title="Delete"
-                        danger
-                      >
-                        <Trash2 size={13} />
-                      </IconButton>
+                      {confirmDeleteId === m.id ? (
+                        <span className="contents" data-confirm-trash>
+                          <IconButton
+                            onClick={() => confirmDelete(m.id)}
+                            title="Confirm delete?"
+                            danger
+                            confirming
+                          >
+                            <Check size={13} />
+                          </IconButton>
+                        </span>
+                      ) : (
+                        <IconButton
+                          onClick={() => requestDelete(m.id)}
+                          title="Delete"
+                          danger
+                        >
+                          <Trash2 size={13} />
+                        </IconButton>
+                      )}
                     </div>
                   </div>
                   {/* Inline note editor */}
@@ -805,6 +920,8 @@ function RemindersPanel() {
   const [dueAt, setDueAt] = useState('')
   const [creating, setCreating] = useState(false)
   const [loaded, setLoaded] = useState(false)
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null)
+  const confirmTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
   useEffect(() => {
     let cancelled = false
@@ -883,6 +1000,45 @@ function RemindersPanel() {
       toast.error('Could not delete reminder')
     }
   }
+
+  // Two-step delete confirmation: first click arms the trash icon into a
+  // red "Confirm?" state; the second click fires the actual delete.
+  // Auto-resets after 3s, or on any click outside the confirming button.
+  const requestDelete = (id: string) => {
+    setConfirmDeleteId(id)
+    if (confirmTimerRef.current) clearTimeout(confirmTimerRef.current)
+    confirmTimerRef.current = setTimeout(() => setConfirmDeleteId(null), 3000)
+  }
+
+  const confirmDelete = (id: string) => {
+    if (confirmTimerRef.current) {
+      clearTimeout(confirmTimerRef.current)
+      confirmTimerRef.current = null
+    }
+    setConfirmDeleteId(null)
+    void handleDelete(id)
+  }
+
+  useEffect(() => {
+    if (!confirmDeleteId) return
+    const onMouseDown = (e: MouseEvent) => {
+      const target = e.target as HTMLElement | null
+      if (target?.closest?.('[data-confirm-trash]')) return
+      if (confirmTimerRef.current) {
+        clearTimeout(confirmTimerRef.current)
+        confirmTimerRef.current = null
+      }
+      setConfirmDeleteId(null)
+    }
+    document.addEventListener('mousedown', onMouseDown)
+    return () => document.removeEventListener('mousedown', onMouseDown)
+  }, [confirmDeleteId])
+
+  useEffect(() => {
+    return () => {
+      if (confirmTimerRef.current) clearTimeout(confirmTimerRef.current)
+    }
+  }, [])
 
   return (
     <div className="aria-fade-slide flex flex-1 min-h-0 flex-col">
@@ -985,13 +1141,26 @@ function RemindersPanel() {
                       </p>
                     )}
                   </div>
-                  <IconButton
-                    onClick={() => handleDelete(r.id)}
-                    title="Delete"
-                    danger
-                  >
-                    <Trash2 size={13} />
-                  </IconButton>
+                  {confirmDeleteId === r.id ? (
+                    <span className="contents" data-confirm-trash>
+                      <IconButton
+                        onClick={() => confirmDelete(r.id)}
+                        title="Confirm delete?"
+                        danger
+                        confirming
+                      >
+                        <Check size={13} />
+                      </IconButton>
+                    </span>
+                  ) : (
+                    <IconButton
+                      onClick={() => requestDelete(r.id)}
+                      title="Delete"
+                      danger
+                    >
+                      <Trash2 size={13} />
+                    </IconButton>
+                  )}
                 </li>
               )
             })}

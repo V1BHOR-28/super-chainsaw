@@ -2,7 +2,7 @@
 
 import { useEffect } from 'react'
 import { useSession } from 'next-auth/react'
-import { Sidebar, SidebarToggle } from '@/components/aria/sidebar'
+import { Sidebar } from '@/components/aria/sidebar'
 import { ChatArea } from '@/components/aria/chat-area'
 import { SettingsModal } from '@/components/aria/settings-modal'
 import { FeedAriaModal } from '@/components/aria/feed-aria-modal'
@@ -23,7 +23,6 @@ export default function HomePage() {
     setConversations,
     setActiveConversation,
     setUsage,
-    sidebarCollapsed,
   } = useAriaStore()
 
   // ─── Auth state bootstrap ───
@@ -47,13 +46,22 @@ export default function HomePage() {
     const userId = (session.user as { id?: string }).id || ''
     const onboarded = (session.user as { onboarded?: boolean }).onboarded
 
-    // Set basic user info from session
+    // Set basic user info from session.
+    // tier is set to a safe 'Free' default here — the subsequent /api/settings
+    // fetch in the bootstrap effect overwrites it with the real value. We avoid
+    // 'Partner' (a paid tier) so the sidebar profile chip never lies about the
+    // user's plan while the settings fetch is in flight.
+    //
+    // Note: `as any` is preserved from the original code — the User type in
+    // types.ts doesn't declare `image`, but the rest of the app reads
+    // user.image (e.g. message-bubble avatar). Widening the type is out of
+    // scope for this fix.
     setUser({
       id: userId,
       email: userEmail,
       name: userName,
       image: userImage,
-      tier: 'Partner',
+      tier: 'Free',
     } as any)
 
     if (!onboarded) {
@@ -126,7 +134,7 @@ export default function HomePage() {
   if (authState === 'loading') {
     return (
       <div
-        className="flex items-center justify-center h-screen"
+        className="flex items-center justify-center h-dvh"
         style={{ background: 'var(--aria-bg)' }}
       >
         <div className="aria-logo-dot" style={{ animation: 'pulse 2s infinite' }} />
@@ -152,8 +160,7 @@ export default function HomePage() {
   // Fully authenticated + onboarded → the app
   return (
     <>
-      <div className="flex h-screen w-screen overflow-hidden">
-        {sidebarCollapsed && <SidebarToggle />}
+      <div className="flex h-dvh w-screen overflow-hidden">
         <Sidebar />
         <ChatArea />
         <SettingsModal />

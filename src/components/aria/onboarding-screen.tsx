@@ -1,6 +1,7 @@
 'use client'
 
 import { useState } from 'react'
+import { useSession } from 'next-auth/react'
 import { motion } from 'framer-motion'
 import { ArrowRight, Loader2, GraduationCap, Briefcase } from 'lucide-react'
 import { toast } from 'sonner'
@@ -16,6 +17,11 @@ import { useAriaStore } from '@/lib/store'
 export function OnboardingScreen({ email }: { email: string }) {
   const setAuthState = useAriaStore((s) => s.setAuthState)
   const setUser = useAriaStore((s) => s.setUser)
+  // useSession().update refreshes the NextAuth session client-side after
+  // onboarding succeeds. The jwt callback (src/lib/auth.ts) always re-reads
+  // `onboarded` from the DB, so this both refreshes the JWT cookie and syncs
+  // session.user.onboarded on the client — no full page reload required.
+  const { update: updateSession } = useSession()
 
   const [step, setStep] = useState(0)
   const [name, setName] = useState('')
@@ -53,9 +59,25 @@ export function OnboardingScreen({ email }: { email: string }) {
       const data = await res.json()
       setUser(data.user)
       toast.success(`Welcome, ${name.trim().split(' ')[0]}. ARIA is here.`)
-      // Reload the page so the NextAuth session updates with the new
-      // onboarded=true status from the DB
-      setTimeout(() => window.location.reload(), 1000)
+
+      // Refresh the NextAuth session so the JWT cookie picks up the new
+      // onboarded=true flag from the DB (the jwt callback always re-reads
+      // from DB, so this also syncs session.user.onboarded on the client).
+      // Fire-and-await — if it throws, we still transition below; the
+      // cookie will refresh on the next server-side getServerSession call.
+      if (typeof updateSession === 'function') {
+        try {
+          await updateSession()
+        } catch {
+          /* non-fatal — fall through to client-side transition */
+        }
+      }
+
+      // Clean client-side transition: flip the store's authState so
+      // page.tsx swaps <OnboardingScreen> for the app with no full reload,
+      // no white-flash, and no artificial delay. The bootstrap effect in
+      // page.tsx will fetch settings/conversations/usage next.
+      setAuthState('authenticated')
     } catch (err) {
       toast.error((err as Error).message)
     } finally {
@@ -91,9 +113,39 @@ export function OnboardingScreen({ email }: { email: string }) {
         className="relative z-10 w-full max-w-[480px]"
       >
         {/* Logo */}
-        <div className="flex items-center justify-center gap-3 mb-10">
+        <div className="flex items-center justify-center gap-3 mb-8">
           <div className="aria-logo-dot" />
           <span className="font-serif-aria text-2xl tracking-tight">ARIA</span>
+        </div>
+
+        {/* Step indicator — 3 dots styled after the aria-logo-dot visual
+            language. Active dot uses the same radial amber gradient + glow;
+            dimmed dots use --aria-fg-dim. */}
+        <div
+          className="flex items-center justify-center gap-2 mb-8"
+          role="progressbar"
+          aria-valuenow={step + 1}
+          aria-valuemin={1}
+          aria-valuemax={3}
+          aria-label="Onboarding progress"
+        >
+          {[0, 1, 2].map((i) => (
+            <div
+              key={i}
+              className="rounded-full transition-all"
+              style={{
+                width: i === step ? '10px' : '7px',
+                height: i === step ? '10px' : '7px',
+                background:
+                  i === step
+                    ? 'radial-gradient(circle at 30% 30%, var(--aria-accent-glow), var(--aria-accent-bright) 50%, var(--aria-accent-deep) 100%)'
+                    : 'var(--aria-fg-dim)',
+                boxShadow:
+                  i === step ? '0 0 8px rgba(245, 158, 11, 0.5)' : 'none',
+                opacity: i === step ? 1 : 0.5,
+              }}
+            />
+          ))}
         </div>
 
         {step === 0 && (

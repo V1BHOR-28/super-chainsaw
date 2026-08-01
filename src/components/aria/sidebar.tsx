@@ -20,6 +20,7 @@ import {
   FileJson,
   FileText,
   BookOpen,
+  Check,
 } from 'lucide-react'
 import { useAriaStore } from '@/lib/store'
 import { SidePanels } from '@/components/aria/side-panels'
@@ -53,6 +54,26 @@ export function Sidebar() {
   } = useAriaStore()
 
   const [dropdownOpen, setDropdownOpen] = useState(false)
+  const profileRef = useRef<HTMLDivElement>(null)
+
+  // Close profile dropdown on outside click or Escape
+  useEffect(() => {
+    if (!dropdownOpen) return
+    const onMouseDown = (e: MouseEvent) => {
+      if (profileRef.current && !profileRef.current.contains(e.target as Node)) {
+        setDropdownOpen(false)
+      }
+    }
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setDropdownOpen(false)
+    }
+    document.addEventListener('mousedown', onMouseDown)
+    document.addEventListener('keydown', onKeyDown)
+    return () => {
+      document.removeEventListener('mousedown', onMouseDown)
+      document.removeEventListener('keydown', onKeyDown)
+    }
+  }, [dropdownOpen])
 
   // Load conversations on mount
   useEffect(() => {
@@ -266,7 +287,11 @@ export function Sidebar() {
         </div>
 
         {/* User profile */}
-        <div className="pt-4 border-t relative" style={{ borderColor: 'var(--aria-border)' }}>
+        <div
+          ref={profileRef}
+          className="pt-4 border-t relative"
+          style={{ borderColor: 'var(--aria-border)' }}
+        >
           <button
             onClick={() => setDropdownOpen((v) => !v)}
             className="flex items-center gap-3 p-2 rounded-[10px] w-full transition-colors"
@@ -282,14 +307,14 @@ export function Sidebar() {
                 border: '1px solid var(--aria-border)',
               }}
             >
-              {(user?.name?.[0] || 'E').toUpperCase()}
+              {(user?.name?.[0] || 'U').toUpperCase()}
             </div>
             <div className="flex-1 text-left overflow-hidden">
               <div className="text-sm font-medium" style={{ color: 'var(--aria-fg)' }}>
-                {user?.name || 'Elias'}
+                {user?.name || 'friend'}
               </div>
               <div className="text-[11px]" style={{ color: 'var(--aria-fg-dim)' }}>
-                {user?.tier || 'Partner'} Tier
+                {user?.tier || 'Free'} Tier
               </div>
             </div>
             <ChevronDown size={16} style={{ color: 'var(--aria-fg-muted)' }} />
@@ -385,7 +410,70 @@ function ConversationList({
   const [searchResults, setSearchResults] = useState<SearchResult[] | null>(null)
   const [searching, setSearching] = useState(false)
   const [exportMenuFor, setExportMenuFor] = useState<string | null>(null)
+  const [exportMenuFlip, setExportMenuFlip] = useState(false)
+  const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null)
   const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const confirmTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
+  const exportRef = useRef<HTMLDivElement>(null)
+
+  // Reset confirm-delete state if a different conversation is selected.
+  // Touching any other row cancels the pending delete confirmation.
+  useEffect(() => {
+    if (confirmDeleteId && confirmDeleteId !== activeId) {
+      setConfirmDeleteId(null)
+      if (confirmTimer.current) {
+        clearTimeout(confirmTimer.current)
+        confirmTimer.current = null
+      }
+    }
+  }, [activeId, confirmDeleteId])
+
+  // Clear confirm timer on unmount
+  useEffect(() => {
+    return () => {
+      if (confirmTimer.current) clearTimeout(confirmTimer.current)
+    }
+  }, [])
+
+  // Close export dropdown on outside click or Escape
+  useEffect(() => {
+    if (!exportMenuFor) return
+    const onMouseDown = (e: MouseEvent) => {
+      if (exportRef.current && !exportRef.current.contains(e.target as Node)) {
+        setExportMenuFor(null)
+      }
+    }
+    const onKeyDown = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setExportMenuFor(null)
+    }
+    document.addEventListener('mousedown', onMouseDown)
+    document.addEventListener('keydown', onKeyDown)
+    return () => {
+      document.removeEventListener('mousedown', onMouseDown)
+      document.removeEventListener('keydown', onKeyDown)
+    }
+  }, [exportMenuFor])
+
+  // Two-step delete: first click arms the confirm state, second click (within
+  // 3s) actually deletes. Clicking elsewhere or selecting another row resets it.
+  const requestDelete = (id: string, e: React.MouseEvent) => {
+    e.stopPropagation()
+    if (confirmDeleteId === id) {
+      if (confirmTimer.current) {
+        clearTimeout(confirmTimer.current)
+        confirmTimer.current = null
+      }
+      setConfirmDeleteId(null)
+      onDelete(id, e)
+      return
+    }
+    setConfirmDeleteId(id)
+    if (confirmTimer.current) clearTimeout(confirmTimer.current)
+    confirmTimer.current = setTimeout(() => {
+      setConfirmDeleteId(null)
+      confirmTimer.current = null
+    }, 3000)
+  }
 
   // Debounced search — only hits the API when the user stops typing for 250ms
   useEffect(() => {
@@ -636,11 +724,23 @@ function ConversationList({
                   </div>
                 )}
               </div>
-              <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity flex-shrink-0">
+              <div
+                className={`flex items-center gap-0.5 transition-opacity flex-shrink-0 ${
+                  active ? 'opacity-100' : 'opacity-40 group-hover:opacity-100'
+                }`}
+              >
                 <button
                   onClick={(e) => {
                     e.stopPropagation()
-                    setExportMenuFor(showExport ? null : c.id)
+                    if (exportMenuFor === c.id) {
+                      setExportMenuFor(null)
+                      return
+                    }
+                    // Flip the menu upward if it would overflow the viewport bottom.
+                    const rect = (e.currentTarget as HTMLButtonElement).getBoundingClientRect()
+                    const spaceBelow = window.innerHeight - rect.bottom
+                    setExportMenuFlip(spaceBelow < 200)
+                    setExportMenuFor(c.id)
                   }}
                   className="p-1 rounded transition-colors"
                   style={{ color: 'var(--aria-fg-muted)' }}
@@ -657,19 +757,26 @@ function ConversationList({
                   {c.pinned ? <PinOff size={12} /> : <Pin size={12} />}
                 </button>
                 <button
-                  onClick={(e) => onDelete(c.id, e)}
-                  className="p-1 rounded transition-colors hover:text-red-400"
-                  style={{ color: 'var(--aria-fg-muted)' }}
-                  title="Delete"
+                  onClick={(e) => requestDelete(c.id, e)}
+                  className="p-1 rounded transition-colors"
+                  style={{
+                    color: confirmDeleteId === c.id ? '#ef4444' : 'var(--aria-fg-muted)',
+                  }}
+                  title={
+                    confirmDeleteId === c.id ? 'Click again to confirm delete' : 'Delete'
+                  }
                 >
-                  <Trash2 size={12} />
+                  {confirmDeleteId === c.id ? <Check size={12} /> : <Trash2 size={12} />}
                 </button>
               </div>
 
               {/* Export dropdown */}
               {showExport && (
                 <div
-                  className="absolute right-2 top-10 z-30 rounded-xl p-1.5 min-w-[160px]"
+                  ref={exportRef}
+                  className={`absolute right-2 z-30 rounded-xl p-1.5 min-w-[160px] ${
+                    exportMenuFlip ? 'bottom-full mb-1' : 'top-full mt-1'
+                  }`}
                   style={{
                     background: 'var(--aria-bg-soft)',
                     border: '1px solid var(--aria-border)',
@@ -726,24 +833,4 @@ function safeParseAttachments(json: string) {
     /* ignore */
   }
   return undefined
-}
-
-/** Mobile sidebar toggle (shown when collapsed on small screens) */
-export function SidebarToggle() {
-  const { sidebarCollapsed, setSidebarCollapsed } = useAriaStore()
-  if (!sidebarCollapsed) return null
-  return (
-    <button
-      onClick={() => setSidebarCollapsed(false)}
-      className="fixed top-4 left-4 z-40 w-9 h-9 rounded-lg flex items-center justify-center md:hidden"
-      style={{
-        background: 'var(--aria-card)',
-        border: '1px solid var(--aria-border)',
-        color: 'var(--aria-fg-muted)',
-      }}
-      aria-label="Open sidebar"
-    >
-      <Menu size={18} />
-    </button>
-  )
 }

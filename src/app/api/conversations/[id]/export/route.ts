@@ -120,7 +120,7 @@ function buildMarkdown(
   lines.push(`# ${conversation.title}`)
   lines.push('')
   lines.push(`> Exported from ARIA on ${new Date().toLocaleString()}`)
-  lines.push(`> User: ${user?.name || 'Unknown'} (${user?.tier || 'Partner'} Tier)`)
+  lines.push(`> User: ${user?.name || 'Unknown'} (${user?.tier || 'Free'} Tier)`)
   lines.push(`> Conversation created: ${new Date(conversation.createdAt).toLocaleString()}`)
   lines.push(`> Last updated: ${new Date(conversation.updatedAt).toLocaleString()}`)
   lines.push('')
