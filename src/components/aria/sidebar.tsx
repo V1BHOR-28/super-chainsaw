@@ -16,11 +16,11 @@ import {
   Menu,
   Search,
   X,
-  Download,
   FileJson,
   FileText,
   BookOpen,
   Check,
+  MoreHorizontal,
 } from 'lucide-react'
 import { useAriaStore } from '@/lib/store'
 import { SidePanels } from '@/components/aria/side-panels'
@@ -237,7 +237,7 @@ export function Sidebar() {
         </div>
 
         {/* Nav tabs */}
-        <nav className="flex flex-col gap-1 shrink-0">
+        <nav className="flex flex-col gap-0.5 shrink-0">
           {TABS.map((tab) => {
             const Icon = tab.icon
             const active = activePanel === tab.id
@@ -245,7 +245,7 @@ export function Sidebar() {
               <button
                 key={tab.id}
                 onClick={() => setActivePanel(tab.id)}
-                className="flex items-center gap-3 py-2.5 px-3.5 rounded-[10px] text-sm transition-all text-left w-full shrink-0"
+                className="flex items-center gap-3 py-2 px-3.5 rounded-[10px] text-sm transition-all text-left w-full shrink-0"
                 style={{
                   background: active ? 'rgba(245,158,11,0.08)' : 'transparent',
                   color: active ? 'var(--aria-accent-glow)' : 'var(--aria-fg-muted)',
@@ -409,12 +409,12 @@ function ConversationList({
   const [searchQuery, setSearchQuery] = useState('')
   const [searchResults, setSearchResults] = useState<SearchResult[] | null>(null)
   const [searching, setSearching] = useState(false)
-  const [exportMenuFor, setExportMenuFor] = useState<string | null>(null)
-  const [exportMenuFlip, setExportMenuFlip] = useState(false)
+  const [overflowMenuFor, setOverflowMenuFor] = useState<string | null>(null)
+  const [overflowMenuFlip, setOverflowMenuFlip] = useState(false)
   const [confirmDeleteId, setConfirmDeleteId] = useState<string | null>(null)
   const searchTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   const confirmTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
-  const exportRef = useRef<HTMLDivElement>(null)
+  const overflowRef = useRef<HTMLDivElement>(null)
 
   // Reset confirm-delete state if a different conversation is selected.
   // Touching any other row cancels the pending delete confirmation.
@@ -435,16 +435,16 @@ function ConversationList({
     }
   }, [])
 
-  // Close export dropdown on outside click or Escape
+  // Close overflow dropdown on outside click or Escape
   useEffect(() => {
-    if (!exportMenuFor) return
+    if (!overflowMenuFor) return
     const onMouseDown = (e: MouseEvent) => {
-      if (exportRef.current && !exportRef.current.contains(e.target as Node)) {
-        setExportMenuFor(null)
+      if (overflowRef.current && !overflowRef.current.contains(e.target as Node)) {
+        setOverflowMenuFor(null)
       }
     }
     const onKeyDown = (e: KeyboardEvent) => {
-      if (e.key === 'Escape') setExportMenuFor(null)
+      if (e.key === 'Escape') setOverflowMenuFor(null)
     }
     document.addEventListener('mousedown', onMouseDown)
     document.addEventListener('keydown', onKeyDown)
@@ -452,7 +452,7 @@ function ConversationList({
       document.removeEventListener('mousedown', onMouseDown)
       document.removeEventListener('keydown', onKeyDown)
     }
-  }, [exportMenuFor])
+  }, [overflowMenuFor])
 
   // Two-step delete: first click arms the confirm state, second click (within
   // 3s) actually deletes. Clicking elsewhere or selecting another row resets it.
@@ -503,7 +503,7 @@ function ConversationList({
   }, [searchQuery])
 
   const handleExport = async (id: string, format: 'json' | 'markdown') => {
-    setExportMenuFor(null)
+    setOverflowMenuFor(null)
     try {
       const res = await fetch(`/api/conversations/${id}/export?format=${format}`)
       if (!res.ok) throw new Error('export failed')
@@ -692,14 +692,17 @@ function ConversationList({
       </div>
 
       <div className="flex-1 min-h-0 overflow-y-auto pr-1 -mr-1">
+        <div className="text-[10px] uppercase tracking-wider px-1 mb-2" style={{ color: 'var(--aria-fg-dim)' }}>
+          Recent
+        </div>
         {conversations.map((c) => {
           const active = c.id === activeId
-          const showExport = exportMenuFor === c.id
+          const showOverflow = overflowMenuFor === c.id
           return (
             <div
               key={c.id}
               onClick={() => onSelect(c)}
-              className="group flex items-start gap-2 p-3 rounded-[10px] mb-1 cursor-pointer transition-colors relative"
+              className="group flex items-center gap-2 py-2.5 px-3 rounded-[10px] mb-0.5 cursor-pointer transition-colors relative"
               style={{
                 background: active ? 'rgba(245,158,11,0.08)' : 'transparent',
               }}
@@ -718,64 +721,38 @@ function ConversationList({
                   {c.pinned && <Pin size={11} className="flex-shrink-0" />}
                   {c.title}
                 </div>
-                {c.preview && (
-                  <div className="text-[11px] truncate mt-0.5" style={{ color: 'var(--aria-fg-dim)' }}>
-                    {c.preview}
-                  </div>
-                )}
               </div>
               <div
-                className={`flex items-center gap-0.5 transition-opacity flex-shrink-0 ${
-                  active ? 'opacity-100' : 'opacity-40 group-hover:opacity-100'
+                className={`flex-shrink-0 transition-opacity ${
+                  active ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'
                 }`}
               >
                 <button
                   onClick={(e) => {
                     e.stopPropagation()
-                    if (exportMenuFor === c.id) {
-                      setExportMenuFor(null)
+                    if (overflowMenuFor === c.id) {
+                      setOverflowMenuFor(null)
                       return
                     }
-                    // Flip the menu upward if it would overflow the viewport bottom.
                     const rect = (e.currentTarget as HTMLButtonElement).getBoundingClientRect()
                     const spaceBelow = window.innerHeight - rect.bottom
-                    setExportMenuFlip(spaceBelow < 200)
-                    setExportMenuFor(c.id)
+                    setOverflowMenuFlip(spaceBelow < 200)
+                    setOverflowMenuFor(c.id)
                   }}
-                  className="p-1 rounded transition-colors"
+                  className="p-1.5 rounded-md transition-colors"
                   style={{ color: 'var(--aria-fg-muted)' }}
-                  title="Export"
+                  title="More options"
                 >
-                  <Download size={12} />
-                </button>
-                <button
-                  onClick={(e) => onTogglePin(c, e)}
-                  className="p-1 rounded transition-colors"
-                  style={{ color: 'var(--aria-fg-muted)' }}
-                  title={c.pinned ? 'Unpin' : 'Pin'}
-                >
-                  {c.pinned ? <PinOff size={12} /> : <Pin size={12} />}
-                </button>
-                <button
-                  onClick={(e) => requestDelete(c.id, e)}
-                  className="p-1 rounded transition-colors"
-                  style={{
-                    color: confirmDeleteId === c.id ? '#ef4444' : 'var(--aria-fg-muted)',
-                  }}
-                  title={
-                    confirmDeleteId === c.id ? 'Click again to confirm delete' : 'Delete'
-                  }
-                >
-                  {confirmDeleteId === c.id ? <Check size={12} /> : <Trash2 size={12} />}
+                  <MoreHorizontal size={14} />
                 </button>
               </div>
 
-              {/* Export dropdown */}
-              {showExport && (
+              {/* Unified overflow dropdown */}
+              {showOverflow && (
                 <div
-                  ref={exportRef}
+                  ref={overflowRef}
                   className={`absolute right-2 z-30 rounded-xl p-1.5 min-w-[160px] ${
-                    exportMenuFlip ? 'bottom-full mb-1' : 'top-full mt-1'
+                    overflowMenuFlip ? 'bottom-full mb-1' : 'top-full mt-1'
                   }`}
                   style={{
                     background: 'var(--aria-bg-soft)',
@@ -784,36 +761,46 @@ function ConversationList({
                   }}
                   onClick={(e) => e.stopPropagation()}
                 >
-                  <div className="text-[10px] uppercase tracking-wider px-2 py-1 mb-1" style={{ color: 'var(--aria-fg-dim)' }}>
-                    Export as
-                  </div>
+                  <button
+                    onClick={(e) => { onTogglePin(c, e); setOverflowMenuFor(null) }}
+                    className="flex w-full items-center gap-2 px-2 py-1.5 rounded-md text-[13px] transition-colors text-left"
+                    style={{ color: 'var(--aria-fg)' }}
+                    onMouseEnter={(e) => { e.currentTarget.style.background = 'var(--aria-card)' }}
+                    onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent' }}
+                  >
+                    {c.pinned ? <PinOff size={13} style={{ color: 'var(--aria-accent-glow)' }} /> : <Pin size={13} style={{ color: 'var(--aria-accent-glow)' }} />}
+                    {c.pinned ? 'Unpin' : 'Pin'}
+                  </button>
                   <button
                     onClick={() => handleExport(c.id, 'markdown')}
                     className="flex w-full items-center gap-2 px-2 py-1.5 rounded-md text-[13px] transition-colors text-left"
                     style={{ color: 'var(--aria-fg)' }}
-                    onMouseEnter={(e) => {
-                      e.currentTarget.style.background = 'var(--aria-card)'
-                    }}
-                    onMouseLeave={(e) => {
-                      e.currentTarget.style.background = 'transparent'
-                    }}
+                    onMouseEnter={(e) => { e.currentTarget.style.background = 'var(--aria-card)' }}
+                    onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent' }}
                   >
                     <FileText size={13} style={{ color: 'var(--aria-accent-glow)' }} />
-                    Markdown (.md)
+                    Export as Markdown
                   </button>
                   <button
                     onClick={() => handleExport(c.id, 'json')}
                     className="flex w-full items-center gap-2 px-2 py-1.5 rounded-md text-[13px] transition-colors text-left"
                     style={{ color: 'var(--aria-fg)' }}
-                    onMouseEnter={(e) => {
-                      e.currentTarget.style.background = 'var(--aria-card)'
-                    }}
-                    onMouseLeave={(e) => {
-                      e.currentTarget.style.background = 'transparent'
-                    }}
+                    onMouseEnter={(e) => { e.currentTarget.style.background = 'var(--aria-card)' }}
+                    onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent' }}
                   >
                     <FileJson size={13} style={{ color: 'var(--aria-accent-glow)' }} />
-                    JSON (.json)
+                    Export as JSON
+                  </button>
+                  <div style={{ borderTop: '1px solid var(--aria-border)', margin: '4px 0' }} />
+                  <button
+                    onClick={(e) => requestDelete(c.id, e)}
+                    className="flex w-full items-center gap-2 px-2 py-1.5 rounded-md text-[13px] transition-colors text-left"
+                    style={{ color: confirmDeleteId === c.id ? '#ef4444' : 'var(--aria-fg)' }}
+                    onMouseEnter={(e) => { e.currentTarget.style.background = 'var(--aria-card)' }}
+                    onMouseLeave={(e) => { e.currentTarget.style.background = 'transparent' }}
+                  >
+                    {confirmDeleteId === c.id ? <Check size={13} /> : <Trash2 size={13} />}
+                    {confirmDeleteId === c.id ? 'Click again to confirm' : 'Delete'}
                   </button>
                 </div>
               )}
