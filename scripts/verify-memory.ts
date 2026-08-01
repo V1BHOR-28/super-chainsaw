@@ -359,6 +359,34 @@ async function checkDeclinedCandidatesFiltered() {
   results.push({ name: 'declined-candidates-filtered', pass, detail: pass ? 'Hard filter against recent declines found.' : 'Still relying only on soft in-context hint.' })
 }
 
+// ─── ANTI-FABRICATION CHECKS ─────────────────────────────────────────────
+// These verify the 4 anti-fabrication fixes (search-intent detection,
+// hard rule, explicit empty signal, defanged headers) landed on main.
+
+async function checkExplicitSearchIntentDetection() {
+  const src = await getFileContent('src/app/api/chat/route.ts')
+  const pass = /explicitSearchIntent/.test(src)
+  results.push({ name: 'explicit-search-intent-detected', pass, detail: pass ? 'Server-side search-intent regex found.' : 'Still relying only on the client-side toggle.' })
+}
+
+async function checkAntiFabricationRulePresent() {
+  const src = await getFileContent('src/lib/aria.ts')
+  const pass = /NEVER INVENT SOURCES OR DATA/.test(src)
+  results.push({ name: 'anti-fabrication-rule-present', pass, detail: pass ? 'Hard rule found.' : 'No top-level anti-fabrication rule.' })
+}
+
+async function checkExplicitEmptySearchSignal() {
+  const src = await getFileContent('src/app/api/chat/route.ts')
+  const pass = /WEB SEARCH ATTEMPTED — no usable results/.test(src)
+  results.push({ name: 'explicit-empty-search-signal', pass, detail: pass ? 'Explicit no-results signal found.' : 'Empty search results still silent.' })
+}
+
+async function checkHeaderLabelsDefanged() {
+  const src = await getFileContent('src/app/api/chat/route.ts')
+  const pass = /Internal note/.test(src) && !/`YOUR LIBRARY — books/.test(src)
+  results.push({ name: 'header-labels-defanged', pass, detail: pass ? 'Labels rewritten as internal notes.' : 'Still using mimicable capitalized headers.' })
+}
+
 async function main() {
   await checkConversationOrdering()
   await checkPersonalConfidenceNotDowngraded()
@@ -410,6 +438,11 @@ async function main() {
   await checkPerConversationExportUntouched()
   // Declined-candidate filter
   await checkDeclinedCandidatesFiltered()
+  // Anti-fabrication
+  await checkExplicitSearchIntentDetection()
+  await checkAntiFabricationRulePresent()
+  await checkExplicitEmptySearchSignal()
+  await checkHeaderLabelsDefanged()
 
   console.table(results.map((r) => ({ Check: r.name, Result: r.pass ? 'PASS' : 'FAIL', Detail: r.detail })))
   const anyFail = results.some((r) => !r.pass)

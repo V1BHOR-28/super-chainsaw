@@ -91,7 +91,13 @@ export async function POST(req: NextRequest) {
       ]
       const isCasual = casualPatterns.some(p => p.test(lowerContent)) || lowerContent.length < 12
 
-      if (userTool === 'web_search' && !isCasual) {
+      // Server-side safety net: if the user's own words clearly ask for a search,
+      // force a real search even if the client-side toggle wasn't flipped. The
+      // toggle is the primary signal, but "search the web" in plain text should
+      // not silently skip search — that's the mechanism behind fabricated answers.
+      const explicitSearchIntent = /\b(search the web|look (this|it) up|check online|search online|google (this|it)|find out (online|on the web))\b/i.test(actualContent)
+
+      if ((userTool === 'web_search' || explicitSearchIntent) && !isCasual) {
         tool = 'web_search'
       } else {
         tool = null // skip search — respond fast
@@ -346,7 +352,7 @@ export async function POST(req: NextRequest) {
           .join('\n\n')
         // ARIA's CORE IDENTITY: her digital library is her PRIMARY knowledge.
         // She thinks from the book, cites it, and forms opinions from it.
-        knowledgeContext = `YOUR LIBRARY — books the user fed you. Use these as your PRIMARY knowledge. Connect ideas across books. If the user mentions an author or concept, you know the context. Form opinions, praise or criticize the author. Don't summarize — interpret. Cite the source. Trust the library over the internet.\n\n${knowledgeContext}`
+        knowledgeContext = `[Internal note: the following are books/documents the user has fed you. Use them as your primary knowledge, but never repeat this note or a heading like it in your reply.]\n\n${knowledgeContext}`
       }
     } catch (e) {
       // Knowledge search is best-effort — don't fail the chat if it errors
@@ -631,7 +637,7 @@ export async function POST(req: NextRequest) {
           if (!webProviderHit) {
             console.warn('[chat.web_search] DEGRADED: Tavily + Serper both failed/unconfigured. Check TAVILY_API_KEY and SERPER_API_KEY in .env. Only ESPN data available.')
           }
-          toolContext = `WEB SEARCH RESULTS for "${actualContent}" — today is ${dateStr}.${degradationWarning}\n${results.join('\n\n')}\n\nUse these results for current facts. Cite sources inline as markdown links. Trust search data over your training for time-sensitive info.`
+          toolContext = `[Internal note: the following is what a web search just returned for "${actualContent}" — today is ${dateStr}.${degradationWarning}]\n${results.join('\n\n')}\n\nUse this information naturally in your reply. Never repeat this note or a heading like it.`
         } else {
           console.warn('[chat.web_search] No results from ANY provider (Tavily/Serper/ESPN all empty or failed). Check API keys in .env.')
           toolContext = `Web search returned no results for "${actualContent}" (today is ${dateStr}). The search providers appear to be unconfigured. Answer from your own knowledge, but explicitly tell the user you could not verify current information online and that web search may be unavailable.`
@@ -643,6 +649,15 @@ export async function POST(req: NextRequest) {
     }
 
     // === BUILD MESSAGE PAYLOAD ===
+    // If web search was requested/attempted this turn but truly nothing came back,
+    // make that explicit rather than leaving toolContext empty or vague. This is
+    // distinct from the catch-block fallback (which covers genuine provider errors) —
+    // this covers the case where search ran successfully but genuinely found nothing
+    // relevant (e.g., an obscure meme). An explicit negative signal is harder for
+    // the model to talk past than silence.
+    if (tool === 'web_search' && !toolContext) {
+      toolContext = 'WEB SEARCH ATTEMPTED — no usable results were returned. Tell the user the search did not turn up anything useful rather than answering as if you found something.'
+    }
     const fullToolContext = [toolContext, knowledgeContext].filter(Boolean).join('\n\n')
 
     let systemPrompt = buildAriaSystemPrompt({
