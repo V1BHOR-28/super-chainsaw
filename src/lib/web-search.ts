@@ -19,10 +19,8 @@ export type WebSearchResult = {
 }
 
 export async function performWebSearch(
-  query: string,
-  opts?: { isGreenApple?: boolean }
+  query: string
 ): Promise<WebSearchResult> {
-  const isGreenApple = opts?.isGreenApple ?? false
   const results: string[] = []
   const webSources: WebSearchSource[] = []
   let webProviderHit = false // true once Tavily OR Serper returns usable results
@@ -54,8 +52,7 @@ export async function performWebSearch(
     'today news', 'breaking', 'just happened', 'recent update', 'recently', 'last night']
   const isCurrentEvent =
     sportsKeywords.some((kw) => lowerContent.includes(kw)) ||
-    newsKeywords.some((kw) => lowerContent.includes(kw)) ||
-    isGreenApple
+    newsKeywords.some((kw) => lowerContent.includes(kw))
 
   // === TAVILY SEARCH (primary) — run all reformulated queries in parallel ===
   const tavilyPromises = Array.from(queries)
@@ -68,7 +65,7 @@ export async function performWebSearch(
           max_results: 5,
           include_answer: true,
           include_raw_content: false,
-          search_depth: isGreenApple ? 'advanced' : 'basic',
+          search_depth: 'basic',
         }
         if (isCurrentEvent) {
           body.topic = 'news'

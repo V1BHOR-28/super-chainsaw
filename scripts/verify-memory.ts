@@ -371,7 +371,7 @@ async function checkExplicitSearchIntentDetection() {
 
 async function checkAntiFabricationRulePresent() {
   const src = await getFileContent('src/lib/aria.ts')
-  const pass = /NEVER INVENT SOURCES OR DATA/.test(src)
+  const pass = /NEVER INVENT, NEVER LABEL, ALWAYS HEDGE INFERENCE/.test(src)
   results.push({ name: 'anti-fabrication-rule-present', pass, detail: pass ? 'Hard rule found.' : 'No top-level anti-fabrication rule.' })
 }
 

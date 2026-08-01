@@ -180,27 +180,8 @@ export function ChatArea() {
     await sendMessage(text, convId)
   }
 
-  // Live green-apple morph: when the user types "/green apple " or "/ga "
-  // (with the trailing space), auto-replace the prefix with "🍏 " so the
-  // emoji appears IN the input as they type. The backend recognizes both
-  // /green apple and 🍏 as green-apple mode, so the sent message keeps the
-  // emoji and stays consistent with the chat bubble display.
   const handleInputChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
-    let value = e.target.value
-    // Only morph if this edit ADDED the triggering trailing space (so we don't
-    // fight the user while they backspace through the prefix).
-    // Match "/green apple " or "/ga " at the very start, case-insensitive.
-    const morphed = value.replace(/^\/(?:green\s*apple|ga)\s+/i, '🍏 ')
-    if (morphed !== value) {
-      // Preserve cursor position offset (prefix shrinks/grows by a few chars).
-      // /green apple = 12 chars, /ga = 3 chars, 🍏 = 2 chars (emoji). The
-      // replace swaps the whole prefix+space for "🍏 ", so we just set the
-      // cursor to the end of the morphed prefix region + whatever follows.
-      // Simplest correct behavior: place cursor right after "🍏 ".
-      const after = value.replace(/^\/(?:green\s*apple|ga)\s+/i, '')
-      value = '🍏 ' + after
-    }
-    setInput(value)
+    setInput(e.target.value)
   }
 
   const handleKeyDown = (e: React.KeyboardEvent) => {

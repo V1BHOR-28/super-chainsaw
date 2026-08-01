@@ -82,25 +82,8 @@ export async function POST(req: NextRequest) {
       })
     }
 
-    // === GREEN APPLE MODE ===
-    // Web search now runs on EVERY message by default — no more auto-detect
-    // misses. The user explicitly accepted the higher API usage in exchange
-    // for always-accurate, real-time answers. Exceptions:
-    //   - image_generation tool was explicitly selected (mutually exclusive)
-    //   - message has image attachments (vision — search doesn't apply)
     let tool = userTool
-    let isGreenApple = false
     let actualContent = content
-
-    // GREEN APPLE: type "/green apple" or "/ga" (or the 🍏 emoji it morphs
-    // into in the input) before a question for raw, unfiltered deep-analysis
-    // mode. This is a COMMUNICATION-STYLE layer (drop disclaimers, no
-    // hedging, deep thinking, raw opinions).
-    const gaMatch = content.match(/^(?:\/(?:green\s*apple|ga)|🍏)\s+(.*)/i)
-    if (gaMatch) {
-      isGreenApple = true
-      actualContent = gaMatch[1].trim()
-    }
 
     // === SMART WEB SEARCH + TOGGLE ===
     // Web search is ON by default BUT:
@@ -411,7 +394,7 @@ export async function POST(req: NextRequest) {
     if (tool === 'web_search') {
       try {
         const { performWebSearch } = await import('@/lib/web-search')
-        const searchResult = await performWebSearch(actualContent, { isGreenApple })
+        const searchResult = await performWebSearch(actualContent)
         toolContext = searchResult.resultsText
         webSources = searchResult.sources
       } catch (e) {
@@ -434,7 +417,7 @@ export async function POST(req: NextRequest) {
 
     let systemPrompt = buildAriaSystemPrompt({
       tone: settings?.tone ?? 'Warm & Honest',
-      responseLength: isGreenApple ? 'In-depth' : (settings?.responseLength ?? 'Balanced'),
+      responseLength: settings?.responseLength ?? 'Balanced',
       userName: user?.name,
       persona: user?.persona,
       age: user?.age,
@@ -446,14 +429,6 @@ export async function POST(req: NextRequest) {
       toolContext: fullToolContext || undefined,
       conversationSummary: conversationSummary?.summary ?? null,
     })
-
-    // === GREEN APPLE MODE ===
-    if (isGreenApple) {
-      systemPrompt += `
-
-🍏 GREEN APPLE MODE — RAW DEEP ANALYSIS.
-No hedging, no disclaimers. Give your raw, unvarnished interpretation. Engage with the book critically — don't summarize, form a take and defend it. Be blunt. Get straight to it.`
-    }
 
     // Map DB messages to SDK format; include vision content for the latest user message if images attached
     type SdkMessage = {
@@ -482,7 +457,7 @@ No hedging, no disclaimers. Give your raw, unvarnished interpretation. Engage wi
     }
 
     // If the last message wasn't the vision-augmented one, ensure the user content is present
-    // Use actualContent (without /green apple prefix) for the LLM
+    // Use actualContent for the LLM
     const last = sdkMessages[sdkMessages.length - 1]
     const lastIsCurrentUser =
       last &&

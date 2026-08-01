@@ -122,14 +122,7 @@ export function MessageBubble({ message }: { message: ChatMessage }) {
     !isUser &&
     (!!toolBadgeEl || (message.memoriesUsed ?? 0) > 0 || !!message.moodContext)
 
-  // Green apple emoji: when a user types "/green apple ..." or "/ga ...",
-  // the input morphs it to "🍏 ..." before sending (see chat-area.tsx), so
-  // most stored messages already start with 🍏. For older messages that
-  // still have the literal /green apple prefix, transform it for display.
-  // Messages already starting with 🍏 are left as-is.
-  const displayContent = isUser
-    ? message.content.replace(/^\/(?:green\s*apple|ga)\s+/i, '🍏 ')
-    : message.content
+  const displayContent = message.content
 
   return (
     <div className={`flex gap-2 sm:gap-3 max-w-[720px] w-full mx-auto aria-msg-enter ${isUser ? 'justify-end' : ''}`}>
