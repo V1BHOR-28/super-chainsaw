@@ -2,10 +2,39 @@
 // Run with: npx tsx scripts/verify-memory.ts
 //
 // Verifies all memory bug fixes + library/knowledge fixes are in place before deploying.
+import fs from 'fs/promises'
+import path from 'path'
 import { db } from '@/lib/db'
 
 type Check = { name: string; pass: boolean; detail?: string }
 const results: Check[] = []
+
+/**
+ * getFileContent — reads a file relative to the repo root.
+ * Prefers the local, already-checked-out copy (correct inside CI — no network
+ * call, no CDN lag, always reflects the exact commit being tested). Falls back
+ * to fetching from GitHub's raw CDN only if the local read fails, which covers
+ * running this script from outside a full repo checkout.
+ *
+ * URL-encoded path segments (e.g. %5Bid%5D for [id]) are decoded for the local
+ * read so they resolve to the actual directory name on disk.
+ */
+async function getFileContent(relativePath: string): Promise<string> {
+  // Decode URL-encoded segments for the local filesystem read (%5Bid%5D → [id])
+  const localRelativePath = decodeURIComponent(relativePath)
+  try {
+    const localPath = path.join(process.cwd(), localRelativePath)
+    return await fs.readFile(localPath, 'utf-8')
+  } catch {
+    try {
+      const res = await fetch(`https://raw.githubusercontent.com/V1BHOR-28/super-chainsaw/main/${relativePath}`)
+      if (!res.ok) return ''
+      return await res.text()
+    } catch {
+      return ''
+    }
+  }
+}
 
 async function checkConversationOrdering() {
   const convo = await db.conversation.findFirst({
@@ -33,13 +62,13 @@ async function checkConversationOrdering() {
 }
 
 async function checkPersonalConfidenceNotDowngraded() {
-  const src = await fetch('https://raw.githubusercontent.com/V1BHOR-28/super-chainsaw/main/src/app/api/memory/detect/route.ts').then(r => r.text()).catch(() => '')
+  const src = await getFileContent('src/app/api/memory/detect/route.ts')
   const pass = !/category === 'personal'.*confidence === 'high'.*confidence: 'medium'/s.test(src)
   results.push({ name: 'no-personal-downgrade', pass, detail: pass ? 'Downgrade rule removed.' : 'Downgrade rule still present in detect/route.ts' })
 }
 
 async function checkShortMessageThreshold() {
-  const src = await fetch('https://raw.githubusercontent.com/V1BHOR-28/super-chainsaw/main/src/app/api/memory/detect/route.ts').then(r => r.text()).catch(() => '')
+  const src = await getFileContent('src/app/api/memory/detect/route.ts')
   const match = src.match(/userMessage\.length < (\d+)/)
   const threshold = match ? parseInt(match[1], 10) : null
   const pass = threshold !== null && threshold <= 15
@@ -89,31 +118,31 @@ async function checkDocumentIdActuallyPersisted() {
 }
 
 async function checkSsrfGuardPresent() {
-  const src = await fetch('https://raw.githubusercontent.com/V1BHOR-28/super-chainsaw/main/src/app/api/knowledge/route.ts').then(r => r.text()).catch(() => '')
+  const src = await getFileContent('src/app/api/knowledge/route.ts')
   const pass = /isUrlSafe/.test(src)
   results.push({ name: 'ssrf-guard-present', pass, detail: pass ? 'isUrlSafe() found.' : 'No URL validation before fetchUrlContent.' })
 }
 
 async function checkTruncationSignaled() {
-  const src = await fetch('https://raw.githubusercontent.com/V1BHOR-28/super-chainsaw/main/src/app/api/knowledge/route.ts').then(r => r.text()).catch(() => '')
+  const src = await getFileContent('src/app/api/knowledge/route.ts')
   const pass = /truncated/.test(src)
   results.push({ name: 'truncation-signaled', pass, detail: pass ? 'truncated flag found.' : 'No truncation signal.' })
 }
 
 async function checkInBookOrderingDeterministic() {
-  const src = await fetch('https://raw.githubusercontent.com/V1BHOR-28/super-chainsaw/main/src/app/api/chat/route.ts').then(r => r.text()).catch(() => '')
+  const src = await getFileContent('src/app/api/chat/route.ts')
   const pass = /distinct:\s*\['title'\][\s\S]{0,80}orderBy:\s*\{\s*title:\s*'asc'\s*\}/.test(src)
   results.push({ name: 'in-book-ordering-deterministic', pass, detail: pass ? 'orderBy present on distinct title query.' : 'No orderBy — result order is non-deterministic.' })
 }
 
 async function checkKnowledgePriorityGated() {
-  const src = await fetch('https://raw.githubusercontent.com/V1BHOR-28/super-chainsaw/main/src/app/api/chat/route.ts').then(r => r.text()).catch(() => '')
+  const src = await getFileContent('src/app/api/chat/route.ts')
   const pass = /knowledgeFromSemanticSearch/.test(src)
   results.push({ name: 'knowledge-priority-gated', pass, detail: pass ? 'Semantic-only gate found.' : 'Still cancels web search on any keyword match.' })
 }
 
 async function checkDeleteByDocumentId() {
-  const src = await fetch('https://raw.githubusercontent.com/V1BHOR-28/super-chainsaw/main/src/app/api/knowledge/%5Bid%5D/route.ts').then(r => r.text()).catch(() => '')
+  const src = await getFileContent('src/app/api/knowledge/%5Bid%5D/route.ts')
   const pass = /documentId:\s*id/.test(src) && !/startsWith:\s*`\$\{id\}/.test(src)
   results.push({ name: 'delete-by-documentId', pass, detail: pass ? 'Deletes scoped to documentId, not title string.' : 'Still matching deletes by title string.' })
 }
@@ -123,31 +152,31 @@ async function checkDeleteByDocumentId() {
 // from GitHub raw (so they only pass AFTER a push); others query the DB.
 
 async function checkMemoryListPaginated() {
-  const src = await fetch('https://raw.githubusercontent.com/V1BHOR-28/super-chainsaw/main/src/app/api/memory/route.ts').then(r => r.text()).catch(() => '')
+  const src = await getFileContent('src/app/api/memory/route.ts')
   const pass = /nextCursor/.test(src) && /take:\s*limit/.test(src)
   results.push({ name: 'memory-list-paginated', pass, detail: pass ? 'Cursor pagination found.' : 'No pagination — GET still fetches everything.' })
 }
 
 async function checkSemanticDedup() {
-  const src = await fetch('https://raw.githubusercontent.com/V1BHOR-28/super-chainsaw/main/src/app/api/memory/route.ts').then(r => r.text()).catch(() => '')
+  const src = await getFileContent('src/app/api/memory/route.ts')
   const pass = /embedding <=>/.test(src) && /distance < 0\.\d+/.test(src)
   results.push({ name: 'semantic-dedup-present', pass, detail: pass ? 'Semantic dedup query found.' : 'Dedup still word-overlap only.' })
 }
 
 async function checkDuplicateErrorHandledInUi() {
-  const src = await fetch('https://raw.githubusercontent.com/V1BHOR-28/super-chainsaw/main/src/components/aria/side-panels.tsx').then(r => r.text()).catch(() => '')
+  const src = await getFileContent('src/components/aria/side-panels.tsx')
   const pass = /status === 409/.test(src)
   results.push({ name: 'duplicate-error-surfaced', pass, detail: pass ? '409 handled distinctly in UI.' : 'Still a generic error on duplicate.' })
 }
 
 async function checkEditInPlace() {
-  const src = await fetch('https://raw.githubusercontent.com/V1BHOR-28/super-chainsaw/main/src/components/aria/side-panels.tsx').then(r => r.text()).catch(() => '')
+  const src = await getFileContent('src/components/aria/side-panels.tsx')
   const pass = /editingId/.test(src)
   results.push({ name: 'edit-in-place-present', pass, detail: pass ? 'Inline edit state found.' : 'No edit UI found.' })
 }
 
 async function checkPatchRegeneratesEmbedding() {
-  const src = await fetch('https://raw.githubusercontent.com/V1BHOR-28/super-chainsaw/main/src/app/api/memory/%5Bid%5D/route.ts').then(r => r.text()).catch(() => '')
+  const src = await getFileContent('src/app/api/memory/%5Bid%5D/route.ts')
   const pass = /generateEmbedding/.test(src)
   results.push({ name: 'patch-regenerates-embedding', pass, detail: pass ? 'Embedding regeneration found in PATCH.' : 'PATCH still leaves stale embeddings on content edit.' })
 }
@@ -172,26 +201,26 @@ async function checkConversationSummaryColumnExists() {
 }
 
 async function checkRecentMessagesWidened() {
-  const src = await fetch('https://raw.githubusercontent.com/V1BHOR-28/super-chainsaw/main/src/app/api/chat/route.ts').then(r => r.text()).catch(() => '')
+  const src = await getFileContent('src/app/api/chat/route.ts')
   const match = src.match(/orderBy:\s*\{\s*createdAt:\s*'desc'\s*\},\s*take:\s*(\d+),/)
   const take = match ? parseInt(match[1], 10) : null
   results.push({ name: 'recent-messages-widened', pass: take !== null && take >= 8, detail: `take is ${take}, expected >= 8` })
 }
 
 async function checkSummaryUpdateWired() {
-  const src = await fetch('https://raw.githubusercontent.com/V1BHOR-28/super-chainsaw/main/src/app/api/chat/route.ts').then(r => r.text()).catch(() => '')
+  const src = await getFileContent('src/app/api/chat/route.ts')
   const pass = /updateConversationSummary/.test(src)
   results.push({ name: 'summary-update-wired', pass, detail: pass ? 'updateConversationSummary called.' : 'Not called anywhere in chat/route.ts.' })
 }
 
 async function checkSummaryInjectedIntoPrompt() {
-  const src = await fetch('https://raw.githubusercontent.com/V1BHOR-28/super-chainsaw/main/src/lib/aria.ts').then(r => r.text()).catch(() => '')
+  const src = await getFileContent('src/lib/aria.ts')
   const pass = /conversationSummary/.test(src)
   results.push({ name: 'summary-injected-into-prompt', pass, detail: pass ? 'conversationSummary param found in buildAriaSystemPrompt.' : 'Not wired into the system prompt.' })
 }
 
 async function checkSummarizationDoesntBlockResponse() {
-  const src = await fetch('https://raw.githubusercontent.com/V1BHOR-28/super-chainsaw/main/src/app/api/chat/route.ts').then(r => r.text()).catch(() => '')
+  const src = await getFileContent('src/app/api/chat/route.ts')
   const pass = /updateConversationSummary\([^)]*\)\.catch/.test(src) && !/await\s+updateConversationSummary/.test(src)
   results.push({ name: 'summary-update-non-blocking', pass, detail: pass ? 'Fire-and-forget, not awaited.' : 'Either missing .catch() or being awaited — check it is not blocking the response.' })
 }
@@ -205,13 +234,13 @@ async function checkSummarizationDoesntBlockResponse() {
 // safety net per the original hardening prompt.)
 
 async function checkDetectionLoggingPresent() {
-  const src = await fetch('https://raw.githubusercontent.com/V1BHOR-28/super-chainsaw/main/src/app/api/memory/detect/route.ts').then(r => r.text()).catch(() => '')
+  const src = await getFileContent('src/app/api/memory/detect/route.ts')
   const pass = /console\.(error|warn)\(`\[memory\.detect\]/.test(src)
   results.push({ name: 'detection-failure-logging', pass, detail: pass ? 'Distinguishable log lines found.' : 'Failures still silent.' })
 }
 
 async function checkDeterministicFallbackPresent() {
-  const src = await fetch('https://raw.githubusercontent.com/V1BHOR-28/super-chainsaw/main/src/app/api/memory/detect/route.ts').then(r => r.text()).catch(() => '')
+  const src = await getFileContent('src/app/api/memory/detect/route.ts')
   const pass = /extractObviousCandidates/.test(src)
   results.push({ name: 'deterministic-fallback-present', pass, detail: pass ? 'Pattern-match fallback found.' : 'Detection still 100% dependent on one LLM call.' })
 }
@@ -221,13 +250,13 @@ async function checkDeterministicFallbackPresent() {
 // free llm-fallback helper, and that LLM failures route to the deterministic floor.
 
 async function checkDetectionUsesLlmFallback() {
-  const src = await fetch('https://raw.githubusercontent.com/V1BHOR-28/super-chainsaw/main/src/app/api/memory/detect/route.ts').then(r => r.text()).catch(() => '')
+  const src = await getFileContent('src/app/api/memory/detect/route.ts')
   const pass = /from '@\/lib\/llm-fallback'/.test(src) && !/openrouter\.ai\/api/.test(src)
   results.push({ name: 'detection-uses-free-fallback', pass, detail: pass ? 'Detect route no longer calls OpenRouter directly.' : 'Still hitting OpenRouter directly, or import missing.' })
 }
 
 async function checkDetectionFallsBackToDeterministicOnFailure() {
-  const src = await fetch('https://raw.githubusercontent.com/V1BHOR-28/super-chainsaw/main/src/app/api/memory/detect/route.ts').then(r => r.text()).catch(() => '')
+  const src = await getFileContent('src/app/api/memory/detect/route.ts')
   const pass = /extractObviousCandidates\(userMessage\)/.test(src)
   const occurrences = (src.match(/extractObviousCandidates\(userMessage\)/g) || []).length
   results.push({ name: 'deterministic-fallback-on-llm-failure', pass: pass && occurrences >= 2, detail: `Found ${occurrences} call(s) — expect at least 2 (normal merge path + failure path).` })
@@ -238,25 +267,25 @@ async function checkDetectionFallsBackToDeterministicOnFailure() {
 // specificity rule, widened patterns) landed on main.
 
 async function checkLargerGroqModelForDetection() {
-  const src = await fetch('https://raw.githubusercontent.com/V1BHOR-28/super-chainsaw/main/src/app/api/memory/detect/route.ts').then(r => r.text()).catch(() => '')
+  const src = await getFileContent('src/app/api/memory/detect/route.ts')
   const pass = /llama-3\.3-70b-versatile/.test(src)
   results.push({ name: 'larger-model-for-detection', pass, detail: pass ? '70B model used for detection.' : 'Still using the small 8B model.' })
 }
 
 async function checkGeminiFallbackForDetection() {
-  const src = await fetch('https://raw.githubusercontent.com/V1BHOR-28/super-chainsaw/main/src/app/api/memory/detect/route.ts').then(r => r.text()).catch(() => '')
+  const src = await getFileContent('src/app/api/memory/detect/route.ts')
   const pass = /callGeminiForExtraction/.test(src)
   results.push({ name: 'gemini-fallback-for-detection', pass, detail: pass ? 'Gemini fallback tier found.' : 'No second-provider fallback before deterministic patterns.' })
 }
 
 async function checkSpecificityRuleInPrompt() {
-  const src = await fetch('https://raw.githubusercontent.com/V1BHOR-28/super-chainsaw/main/src/app/api/memory/detect/route.ts').then(r => r.text()).catch(() => '')
+  const src = await getFileContent('src/app/api/memory/detect/route.ts')
   const pass = /NEVER generalize/.test(src)
   results.push({ name: 'specificity-rule-present', pass, detail: pass ? 'Specificity rule found in prompt.' : 'Prompt still allows vague generalization.' })
 }
 
 async function checkPatternListWidened() {
-  const src = await fetch('https://raw.githubusercontent.com/V1BHOR-28/super-chainsaw/main/src/app/api/memory/detect/route.ts').then(r => r.text()).catch(() => '')
+  const src = await getFileContent('src/app/api/memory/detect/route.ts')
   const count = (src.match(/regex:\s*\//g) || []).length
   results.push({ name: 'pattern-list-widened', pass: count >= 8, detail: `Found ${count} patterns, expected >= 8.` })
 }
