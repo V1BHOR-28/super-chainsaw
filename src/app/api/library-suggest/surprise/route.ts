@@ -44,7 +44,10 @@ Respond with ONLY JSON: {"title": "...", "author": "...", "why": "one sentence, 
       } catch {
         continue
       }
-      if (!parsed.title || !parsed.author) continue
+      if (!parsed.title || !parsed.author) {
+        console.log(`[surprise] attempt ${attempt}: LLM response did not parse to a valid title/author. Raw: ${raw?.slice(0, 200)}`)
+        continue
+      }
 
       const gutenberg = await checkGutenbergAvailability(parsed.title, parsed.author)
       if (gutenberg.available) {

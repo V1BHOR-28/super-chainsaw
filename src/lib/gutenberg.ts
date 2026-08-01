@@ -6,10 +6,40 @@
  *
  * Uses the free, public Gutendex API (no key required).
  * Hardened: scans all results (not just the first) for a usable plain-text
- * format, and falls back to a title-only search if the combined title+author
- * query returns no usable match (common when author name format differs,
- * e.g. "Dostoevsky" vs Gutendex's "Dostoyevsky, Fyodor").
+ * format, filters by title relevance before accepting a candidate (prevents
+ * silently matching an unrelated but popular book like Moby Dick to a
+ * Pride and Prejudice query), and falls back to a title-only search if the
+ * combined title+author query returns no usable match.
  */
+
+/**
+ * normalize — lowercase, strip punctuation/articles, collapse whitespace.
+ * Used to compare titles/authors loosely without exact-string brittleness.
+ */
+function normalize(s: string): string {
+  return s
+    .toLowerCase()
+    .replace(/^(the|a|an)\s+/, '')
+    .replace(/[^\w\s]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+}
+
+/**
+ * isRelevantMatch — true if the candidate's title is a reasonably close
+ * match to the requested title (handles subtitles like "Pride and
+ * Prejudice: A Novel" or "Moby Dick; Or, The Whale" matching "Moby Dick").
+ * This is deliberately loose (substring, either direction) rather than
+ * exact — Gutendex titles often carry extra subtitle text the LLM's
+ * suggested title won't include, and vice versa.
+ */
+function isRelevantMatch(requestedTitle: string, candidateTitle: string): boolean {
+  const req = normalize(requestedTitle)
+  const cand = normalize(candidateTitle)
+  if (!req || !cand) return false
+  return cand.includes(req) || req.includes(cand)
+}
+
 export async function checkGutenbergAvailability(
   title: string,
   author: string
@@ -19,7 +49,10 @@ export async function checkGutenbergAvailability(
     const res = await fetch(`https://gutendex.com/books?search=${query}`, {
       signal: AbortSignal.timeout(8000),
     })
-    if (!res.ok) return { available: false }
+    if (!res.ok) {
+      console.log(`[gutenberg] fetch failed: ${res.status}`)
+      return { available: false }
+    }
     const data = await res.json()
     const results = data.results as Array<{
       title: string
@@ -31,20 +64,23 @@ export async function checkGutenbergAvailability(
       return await searchByTitleOnly(title)
     }
 
-    // Scan all results (not just the first) for one with a usable plain-text format.
-    for (const candidate of results) {
+    // Only consider candidates whose title actually resembles what was asked for —
+    // this is the critical fix. Without this filter, an unrelated but popular book
+    // with a text/plain format (e.g. Moby Dick) can get matched to any query.
+    const relevantCandidates = results.filter(c => isRelevantMatch(title, c.title))
+
+    for (const candidate of relevantCandidates) {
       const textUrl =
         candidate.formats['text/plain; charset=utf-8'] ||
         candidate.formats['text/plain'] ||
         Object.entries(candidate.formats).find(([k]) => k.startsWith('text/plain'))?.[1]
       if (textUrl) {
-        console.log(`[gutenberg] search="${title} ${author}" → ${results.length} results, match="${candidate.title}"`)
+        console.log(`[gutenberg] search="${title} ${author}" → matched "${candidate.title}"`)
         return { available: true, downloadUrl: textUrl, matchedTitle: candidate.title }
       }
     }
 
-    // Results existed but none had plain text — try title-only as a last resort
-    console.log(`[gutenberg] search="${title} ${author}" → ${results.length} results, no plain-text format, trying title-only`)
+    console.log(`[gutenberg] search="${title} ${author}" → ${results.length} results, ${relevantCandidates.length} relevant, none had text/plain — trying title-only`)
     return await searchByTitleOnly(title)
   } catch (err) {
     console.error('[gutenberg]', err)
@@ -64,17 +100,20 @@ async function searchByTitleOnly(title: string): Promise<{ available: boolean; d
       console.log(`[gutenberg] title-only search="${title}" → 0 results`)
       return { available: false }
     }
-    for (const candidate of results) {
+
+    const relevantCandidates = results.filter(c => isRelevantMatch(title, c.title))
+
+    for (const candidate of relevantCandidates) {
       const textUrl =
         candidate.formats['text/plain; charset=utf-8'] ||
         candidate.formats['text/plain'] ||
         Object.entries(candidate.formats).find(([k]) => k.startsWith('text/plain'))?.[1]
       if (textUrl) {
-        console.log(`[gutenberg] title-only search="${title}" → ${results.length} results, match="${candidate.title}"`)
+        console.log(`[gutenberg] title-only search="${title}" → matched "${candidate.title}"`)
         return { available: true, downloadUrl: textUrl, matchedTitle: candidate.title }
       }
     }
-    console.log(`[gutenberg] title-only search="${title}" → ${results.length} results, no plain-text format`)
+    console.log(`[gutenberg] title-only search="${title}" → ${results.length} results, ${relevantCandidates.length} relevant, none had text/plain`)
     return { available: false }
   } catch (err) {
     console.error('[gutenberg.titleOnly]', err)
