@@ -41,6 +41,7 @@ model User {
   dailyDigests    DailyDigest[]
   quotes          Quote[]
   audiobooks      Audiobook[]
+  audiobookJobs   AudiobookJob[]
 }
 
 model Conversation {
@@ -265,4 +266,24 @@ model AudiobookChapter {
   audiobook Audiobook @relation(fields: [audiobookId], references: [id], onDelete: Cascade)
 
   @@index([audiobookId])
+}
+
+// One-shot job tracking for GitHub Actions audiobook conversion.
+// Created when the user hits "Narrate", updated by the callback route
+// when the GitHub Actions job completes.
+model AudiobookJob {
+  id           String   @id @default(cuid())
+  userId       String
+  documentId   String
+  audiobookId  String?
+  epubUrl      String
+  status       String   @default("queued") // queued | running | complete | failed
+  errorMessage String?
+  chapterUrls  String[] @default([])
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
 }

@@ -1,0 +1,45 @@
+name: Convert Audiobook
+
+on:
+  workflow_dispatch:
+    inputs:
+      job_id:
+        required: true
+        type: string
+      epub_url:
+        required: true
+        type: string
+      audiobook_id:
+        required: false
+        type: string
+        default: ''
+
+jobs:
+  convert:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install system dependencies
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+
+      - name: Install Python dependencies
+        run: |
+          pip install edge-tts ebooklib beautifulsoup4 requests
+
+      - name: Run conversion
+        env:
+          JOB_ID: ${{ inputs.job_id }}
+          EPUB_URL: ${{ inputs.epub_url }}
+          AUDIOBOOK_ID: ${{ inputs.audiobook_id }}
+          BLOB_READ_WRITE_TOKEN: ${{ secrets.BLOB_READ_WRITE_TOKEN }}
+          APP_BASE_URL: ${{ secrets.APP_BASE_URL }}
+          APP_CALLBACK_SECRET: ${{ secrets.APP_CALLBACK_SECRET }}
+        run: python .github/scripts/convert_audiobook.py

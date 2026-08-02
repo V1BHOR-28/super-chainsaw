@@ -63,70 +63,37 @@ export function LibraryView() {
     fetchAudiobooks();
   }, [fetchAudiobooks]);
 
-  // Drive chapter preparation for audiobooks that aren't completed yet.
-  // Polls POST /api/audiobooks/[id]/prep-batch every 3 seconds for one
-  // audiobook at a time (sequential, not parallel — avoids overwhelming
-  // the LLM provider with concurrent chapter-cleaning calls).
-  // Stops polling for an audiobook once its response is { done: true }.
-  const [preppingId, setPreppingId] = useState<string | null>(null);
-
+  // Poll for audiobook status updates when there are pending/generating books.
+  // The actual TTS generation runs on GitHub Actions (not on Vercel), so we
+  // just re-fetch the audiobook list every 5 seconds to pick up status changes.
+  // The callback route updates the audiobook status when the GitHub Actions job completes.
   useEffect(() => {
-    // Find audiobooks that still need prep (status is PENDING or GENERATING)
-    const pending = audiobooks.filter(b => b.status === 'PENDING' || b.status === 'GENERATING');
-    if (pending.length === 0) {
-      setPreppingId(null);
-      return;
-    }
-
-    // If we're not currently prepping anything, start with the first pending one
-    if (!preppingId || !audiobooks.find(b => b.id === preppingId && (b.status === 'PENDING' || b.status === 'GENERATING'))) {
-      setPreppingId(pending[0].id);
-      return;
-    }
+    const hasPending = audiobooks.some(b => b.status === 'PENDING' || b.status === 'GENERATING');
+    if (!hasPending) return;
 
     const poll = async () => {
       try {
-        const res = await fetch(`/api/audiobooks/${preppingId}/prep-batch`, { method: 'POST' });
+        const res = await fetch('/api/audiobooks');
         if (!res.ok) return;
         const data = await res.json();
-
-        // Update the audiobook's state in the local list
-        setAudiobooks(prev => prev.map(b => {
-          if (b.id !== preppingId) return b;
-          // Show cleanedCount if no audio is ready yet (cleaning phase),
-          // otherwise show audio-ready count (generation phase).
-          const audioReady = data.progress ?? 0
-          const cleaned = data.cleanedCount ?? 0
-          const displayProgress = audioReady > 0 ? audioReady : cleaned
-          return {
-            ...b,
-            status: data.status || b.status,
-            prepProgress: displayProgress,
-            prepTotal: data.total,
-            narratedCount: audioReady,
-            chapterCount: data.total ?? b.chapterCount,
-          };
-        }));
-
-        // If this one is done (COMPLETED or FAILED), move to the next
-        if (data.done === true) {
-          setPreppingId(null); // triggers re-evaluation on next render
+        if (data.audiobooks) {
+          setAudiobooks(data.audiobooks);
         }
-      } catch (err) {
-        console.error('[library-view] prep-batch poll failed for', preppingId, err);
+      } catch {
+        // silent — will retry on next interval
       }
     };
 
-    const interval = setInterval(poll, 3000);
+    const interval = setInterval(poll, 5000);
     return () => clearInterval(interval);
-  }, [audiobooks, preppingId]);
+  }, [audiobooks]);
 
   const handleOpen = async (book: AudiobookListItem) => {
     // Don't allow opening the player until the audiobook is at least partially ready.
     // COMPLETED_WITH_ERRORS means some chapters failed but the rest are playable —
     // still allow playback, the failed chapters will use live-narration fallback.
     if (book.status !== 'COMPLETED' && book.status !== 'COMPLETED_WITH_ERRORS') {
-      toast({ title: "Still generating", description: "This audiobook isn't ready to play yet." });
+      toast({ title: "Still converting", description: "This audiobook isn't ready to play yet." });
       return;
     }
     try {
@@ -347,20 +314,23 @@ export function LibraryView() {
                                 e.stopPropagation()
                                 // Reset status to trigger re-polling
                                 setAudiobooks(prev => prev.map(b =>
-                                  b.id === book.id ? { ...b, status: 'PENDING' } : b
+                                  b.id === book.id ? { ...b, status: 'GENERATING' } : b
                                 ))
-                                // Call prep-batch to reset failed chapters and restart
-                                fetch(`/api/audiobooks/${book.id}/prep-batch`, { method: 'POST' })
+                                // Call enqueue to re-dispatch the GitHub Actions job
+                                fetch(`/api/audiobooks/enqueue`, {
+                                  method: 'POST',
+                                  headers: { 'Content-Type': 'application/json' },
+                                  body: JSON.stringify({ audiobookId: book.id }),
+                                })
                                   .then(res => res.json())
                                   .then(data => {
-                                    if (data.status) {
+                                    if (data.error) {
                                       setAudiobooks(prev => prev.map(b =>
-                                        b.id === book.id ? { ...b, status: data.status } : b
+                                        b.id === book.id ? { ...b, status: 'FAILED' } : b
                                       ))
                                     }
                                   })
                                   .catch(() => {
-                                    // Revert to FAILED if the retry itself failed
                                     setAudiobooks(prev => prev.map(b =>
                                       b.id === book.id ? { ...b, status: 'FAILED' } : b
                                     ))
@@ -383,8 +353,8 @@ export function LibraryView() {
                           <p className="text-[11px] text-[var(--aria-accent-glow)] flex items-center gap-1">
                             <span className="status-dot" />
                             {book.prepTotal && book.prepTotal > 0
-                              ? `Processing… (${book.prepProgress ?? 0}/${book.prepTotal} chapters)`
-                              : 'Processing…'}
+                              ? `Converting… (${book.prepProgress ?? 0}/${book.prepTotal} chapters)`
+                              : 'Converting on GitHub Actions…'}
                           </p>
                         )}
                       </div>
