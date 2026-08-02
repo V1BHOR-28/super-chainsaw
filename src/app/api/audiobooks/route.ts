@@ -58,7 +58,7 @@ async function autoBackfillMissingAudiobooks(userId: string): Promise<void> {
             title: bookTitle,
             author: null,
             fullText,
-            chaptersReady: false,
+            status: 'PENDING',
             prepStatus: 'pending',
           },
         })
@@ -101,20 +101,20 @@ export async function GET() {
         createdAt: true,
         progressChapter: true,
         progressCharOffset: true,
-        chaptersReady: true,
+        status: true,
         chapters: {
-          select: { status: true },
+          select: { status: true, audioUrl: true },
         },
       },
     })
 
-    // Compute narrated chapter counts for each audiobook
+    // Compute chapter counts for each audiobook
     const audiobooksWithCounts = audiobooks.map(a => {
       const total = a.chapters.length
-      const narrated = a.chapters.filter(c => c.status === 'ready').length
+      const ready = a.chapters.filter(c => c.audioUrl).length
       // Strip the full chapters array — just return counts
       const { chapters: _chapters, ...rest } = a
-      return { ...rest, chapterCount: total, narratedCount: narrated }
+      return { ...rest, chapterCount: total, narratedCount: ready }
     })
 
     return NextResponse.json({ audiobooks: audiobooksWithCounts })

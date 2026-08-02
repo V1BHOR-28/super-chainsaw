@@ -415,7 +415,7 @@ export async function POST(req: NextRequest) {
             title: title!,
             author: null,
             fullText: audiobookFullText,
-            chaptersReady: false,
+            status: 'PENDING',
             prepStatus: 'pending',
           },
         })

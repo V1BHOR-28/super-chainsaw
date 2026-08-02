@@ -21,7 +21,7 @@ interface AudiobookListItem {
   progressCharOffset: number;
   chapterCount: number;
   narratedCount: number;
-  chaptersReady: boolean;
+  status: string; // PENDING | GENERATING | COMPLETED | FAILED
   prepProgress?: number;
   prepTotal?: number;
 }
@@ -63,7 +63,7 @@ export function LibraryView() {
     fetchAudiobooks();
   }, [fetchAudiobooks]);
 
-  // Drive chapter preparation for audiobooks that aren't ready yet.
+  // Drive chapter preparation for audiobooks that aren't completed yet.
   // Polls POST /api/audiobooks/[id]/prep-batch every 3 seconds for one
   // audiobook at a time (sequential, not parallel — avoids overwhelming
   // the LLM provider with concurrent chapter-cleaning calls).
@@ -71,15 +71,15 @@ export function LibraryView() {
   const [preppingId, setPreppingId] = useState<string | null>(null);
 
   useEffect(() => {
-    // Find audiobooks that still need prep
-    const pending = audiobooks.filter(b => !b.chaptersReady);
+    // Find audiobooks that still need prep (status is PENDING or GENERATING)
+    const pending = audiobooks.filter(b => b.status === 'PENDING' || b.status === 'GENERATING');
     if (pending.length === 0) {
       setPreppingId(null);
       return;
     }
 
     // If we're not currently prepping anything, start with the first pending one
-    if (!preppingId || !audiobooks.find(b => b.id === preppingId && !b.chaptersReady)) {
+    if (!preppingId || !audiobooks.find(b => b.id === preppingId && (b.status === 'PENDING' || b.status === 'GENERATING'))) {
       setPreppingId(pending[0].id);
       return;
     }
@@ -95,15 +95,15 @@ export function LibraryView() {
           if (b.id !== preppingId) return b;
           return {
             ...b,
-            chaptersReady: data.done === true,
+            status: data.status || b.status,
             prepProgress: data.progress,
             prepTotal: data.total,
-            // When done, refresh chapter count from the total
-            chapterCount: data.done === true ? (data.total ?? b.chapterCount) : b.chapterCount,
+            narratedCount: data.progress ?? b.narratedCount,
+            chapterCount: data.total ?? b.chapterCount,
           };
         }));
 
-        // If this one is done, move to the next pending audiobook
+        // If this one is done (COMPLETED or FAILED), move to the next
         if (data.done === true) {
           setPreppingId(null); // triggers re-evaluation on next render
         }
@@ -117,6 +117,11 @@ export function LibraryView() {
   }, [audiobooks, preppingId]);
 
   const handleOpen = async (book: AudiobookListItem) => {
+    // Don't allow opening the player until the audiobook is COMPLETED
+    if (book.status !== 'COMPLETED') {
+      toast({ title: "Still generating", description: "This audiobook isn't ready to play yet." });
+      return;
+    }
     try {
       // Fetch chapters for this audiobook before opening the player
       const res = await fetch(`/api/audiobooks/${book.id}/chapters`);
@@ -307,14 +312,7 @@ export function LibraryView() {
                         {book.author ? `by ${book.author}` : 'Author unknown'}
                       </p>
                       <div className="flex items-center gap-2 mt-1">
-                        {!book.chaptersReady ? (
-                          <p className="text-[11px] text-[var(--aria-accent-glow)] flex items-center gap-1">
-                            <span className="status-dot" />
-                            {book.prepTotal && book.prepTotal > 0
-                              ? `Preparing… (${book.prepProgress ?? 0}/${book.prepTotal} chapters)`
-                              : 'Preparing your audiobook…'}
-                          </p>
-                        ) : (
+                        {book.status === 'COMPLETED' ? (
                           <>
                             {hasProgress && (
                               <p className="text-[11px] text-[var(--aria-accent-glow)]">
@@ -323,10 +321,21 @@ export function LibraryView() {
                             )}
                             {book.chapterCount > 0 && (
                               <p className="text-[11px] text-[var(--aria-fg-dim)]">
-                                {book.narratedCount}/{book.chapterCount} narrated
+                                {book.chapterCount} chapters
                               </p>
                             )}
                           </>
+                        ) : book.status === 'FAILED' ? (
+                          <p className="text-[11px] text-[#ef4444]">
+                            Generation failed
+                          </p>
+                        ) : (
+                          <p className="text-[11px] text-[var(--aria-accent-glow)] flex items-center gap-1">
+                            <span className="status-dot" />
+                            {book.prepTotal && book.prepTotal > 0
+                              ? `Generating… (${book.prepProgress ?? 0}/${book.prepTotal} chapters)`
+                              : 'Generating…'}
+                          </p>
                         )}
                       </div>
                     </div>

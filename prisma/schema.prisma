@@ -224,9 +224,8 @@ model Quote {
 }
 
 // Audiobooks — auto-created when a user feeds ARIA book-length content.
-// Links to Knowledge.documentId (the source text). Chapters are materialized
-// at creation time (AudiobookChapter rows) so each can track its own TTS
-// generation status and store its own audio URL independently.
+// Links to Knowledge.documentId (the source text). Chapters are extracted
+// from the PDF's TOC (outline) and stored as AudiobookChapter rows.
 model Audiobook {
   id                 String   @id @default(cuid())
   userId             String
@@ -234,8 +233,11 @@ model Audiobook {
   title              String
   author             String?
   accent             String   @default("#f59e0b")
-  fullText           String?  // complete untruncated source text (bypasses the 200K RAG cap); nullable for backfill of existing rows
-  chaptersReady      Boolean  @default(false) // false while the LLM prep agent is running
+  fullText           String?  // complete untruncated source text (bypasses the 200K RAG cap)
+  // Overall audiobook status — drives the UI's generation state.
+  // PENDING → GENERATING (prep + TTS in progress) → COMPLETED (ready to play)
+  //         → FAILED (something broke)
+  status             String   @default("PENDING")
   // Resumable prep state — tracks progress across batched invocations so
   // the worker endpoint can resume from where the last call left off.
   chapterBoundaries  Json?    // result of pass A (chapter detection), stored so it never re-runs
@@ -251,21 +253,30 @@ model Audiobook {
   @@index([userId, createdAt])
 }
 
-// Per-chapter TTS generation state. Each chapter generates audio lazily
-// (on first play) and stores the resulting MP3 URL for reuse.
+// Per-chapter data — one row per chapter extracted from the PDF's TOC.
+// Each chapter has rawText (from PDF), cleanedText (after LLM cleaning),
+// and an audioUrl (after TTS generation completes).
 model AudiobookChapter {
   id              String   @id @default(cuid())
   audiobookId     String
-  chapterIndex    Int
+  // `order` is the chapter's position in the book (0-indexed), derived from
+  // the PDF's outline/TOC. Used for sorting and navigation.
+  order           Int
   title           String
-  cleanedText     String   // narration-ready text, post text-cleaning
-  status          String   @default("pending") // pending | generating | ready | failed
+  // Raw text extracted directly from the PDF pages for this chapter.
+  rawText         String
+  // Narration-ready text after LLM cleaning (strips page numbers, headers,
+  // footers, fixes hyphenated words). Falls back to rawText if cleaning fails.
+  cleanedText     String   @default("")
+  // TTS generation status for this chapter: pending | generating | ready | failed
+  status          String   @default("pending")
+  // URL of the generated MP3 audio file. Null until generation completes.
   audioUrl        String?
   durationSeconds Int?
   createdAt       DateTime @default(now())
 
   audiobook Audiobook @relation(fields: [audiobookId], references: [id], onDelete: Cascade)
 
-  @@unique([audiobookId, chapterIndex])
+  @@unique([audiobookId, order])
   @@index([audiobookId])
 }

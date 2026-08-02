@@ -236,6 +236,40 @@ ${rawText}`
 }
 
 /**
+ * cleanChapterText — Phase 3 public API.
+ *
+ * Takes a single chapter's rawText (from PDF extraction) and returns
+ * cleanedText optimized for TTS. Strips OCR artifacts before LLM cleaning,
+ * then sends to the LLM with a prompt to fix page numbers, headers, footers,
+ * hyphenated words, and line wraps — WITHOUT summarizing. Falls back to
+ * regex-based cleanForNarration() if the LLM call fails.
+ *
+ * This is the function the prep-batch route calls per chapter.
+ */
+export async function cleanChapterText(rawText: string): Promise<string> {
+  // Strip OCR control characters/mojibake BEFORE sending to the LLM
+  const prepped = stripOcrArtifacts(rawText).trim()
+  if (!prepped) return ''
+
+  let cleanedText: string | null = null
+
+  try {
+    cleanedText = await cleanChapterLLM(prepped)
+  } catch (e) {
+    console.error('[audiobook-prep] cleanChapterText: LLM cleaning failed:', e instanceof Error ? e.message : String(e))
+    cleanedText = null
+  }
+
+  if (!cleanedText) {
+    // Fallback: regex-based cleaning (also strips OCR artifacts)
+    cleanedText = cleanForNarration(prepped)
+    console.log('[audiobook-prep] cleanChapterText: fell back to regex cleaning')
+  }
+
+  return cleanedText
+}
+
+/**
  * Pass B (batched) — clean a bounded range of chapters via LLM.
  *
  * Runs LLM cleaning for only `batchSize` chapters starting at `startIndex`,

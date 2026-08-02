@@ -5,7 +5,7 @@ import { motion, AnimatePresence } from 'framer-motion'
 import { BookOpen, Link2, FileText, X, Loader2, Trash2, BookMarked, Upload, FileUp, Quote, Sparkles } from 'lucide-react'
 import { toast } from 'sonner'
 import { useAriaStore } from '@/lib/store'
-import { parsePdfInBrowser, type PdfParseProgress } from '@/lib/client-pdf'
+import { parsePdfInBrowser, extractPdfChapters, type PdfParseProgress } from '@/lib/client-pdf'
 import { chunkText } from '@/lib/chunk-text'
 
 type FeedTab = 'text' | 'url' | 'file' | 'library' | 'quotes'
@@ -168,8 +168,8 @@ export function FeedAriaModal() {
     setState('parsing')
 
     try {
-      // Step 1: Parse the PDF in the browser
-      const fullText = await parsePdfInBrowser(pdfFile, (progress) => {
+      // Step 1: Parse the PDF in the browser — extract chapters from TOC
+      const { chapters: pdfChapters, fullText } = await extractPdfChapters(pdfFile, (progress) => {
         setParseProgress(progress)
       })
 
@@ -177,7 +177,7 @@ export function FeedAriaModal() {
         throw new Error('Could not extract any text from this PDF. It might be scanned images (no text layer).')
       }
 
-      // Step 2: Chunk the text
+      // Step 2: Chunk the text for knowledge/RAG (separate from audiobook chapters)
       const chunks = chunkText(fullText)
       const totalChunks = chunks.length
       const documentId = `doc-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
@@ -237,7 +237,28 @@ export function FeedAriaModal() {
         }
       }
 
-      // Step 4: Done
+      // Step 4: Create audiobook from the PDF's TOC chapters
+      // This creates Audiobook + AudiobookChapter rows with rawText from the
+      // PDF's actual outline. Chapter cleaning + TTS generation happens later
+      // via the prep-batch route, driven by client polling.
+      if (pdfChapters.length > 0) {
+        try {
+          await fetch('/api/audiobooks/create-from-toc', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              documentId,
+              title,
+              chapters: pdfChapters.map(ch => ({ title: ch.title, rawText: ch.rawText })),
+            }),
+          })
+        } catch (audiobookErr) {
+          console.error('[feed-aria] Failed to create audiobook from TOC:', audiobookErr)
+          // Non-blocking — the knowledge upload already succeeded
+        }
+      }
+
+      // Step 5: Done
       setState('done')
       const chunkInfo = storedTotal > 1 ? ` (${storedTotal} sections indexed)` : ''
       const pageInfo = parseProgress ? ` · ${parseProgress.totalPages} pages` : ''

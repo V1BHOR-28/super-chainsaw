@@ -132,3 +132,210 @@ export async function parsePdfInBrowser(
 
   return fullText
 }
+
+// ─── PDF TOC (Table of Contents) Extraction ─────────────────────────────
+
+/** A chapter extracted from the PDF's outline/bookmark tree. */
+export interface PdfChapter {
+  title: string
+  /** 1-indexed start page (PDF page number) */
+  startPage: number
+  /** 1-indexed end page (inclusive). The last chapter ends on the last page. */
+  endPage: number
+  /** The raw text for this chapter, extracted from its page range */
+  rawText: string
+}
+
+/** Flatten the PDF outline tree (which can be nested) into a flat list of
+ *  { title, dest } items, preserving document order. */
+async function flattenOutline(
+  outline: any[],
+  pdf: any,
+  result: { title: string; dest: any }[] = []
+): Promise<{ title: string; dest: any }[]> {
+  for (const item of outline) {
+    if (item.title) {
+      result.push({ title: item.title, dest: item.dest })
+    }
+    // Recurse into nested items (sub-chapters)
+    if (item.items && Array.isArray(item.items) && item.items.length > 0) {
+      await flattenOutline(item.items, pdf, result)
+    }
+  }
+  return result
+}
+
+/** Resolve an outline item's destination to a 1-indexed page number.
+ *  Returns 0 if the destination can't be resolved. */
+async function resolveDestToPage(pdf: any, dest: any): Promise<number> {
+  try {
+    if (!dest) return 0
+
+    // `dest` can be a string (a named destination) or an array
+    // [pageRef, ...coords]. Handle both.
+    let explicitDest = dest
+    if (typeof dest === 'string') {
+      // Named destination — resolve it first
+      explicitDest = await pdf.getDestination(dest)
+      if (!explicitDest) return 0
+    }
+
+    if (Array.isArray(explicitDest) && explicitDest.length > 0) {
+      // explicitDest[0] is a page reference object — resolve it to a page index
+      const pageIndex = await pdf.getPageIndex(explicitDest[0])
+      return pageIndex + 1 // pdfjs uses 0-indexed page indices; convert to 1-indexed
+    }
+  } catch {
+    // Best-effort — if we can't resolve, return 0
+  }
+  return 0
+}
+
+/** Extract the PDF's Table of Contents (outline/bookmarks) and map each
+ *  chapter to its page range + raw text. This is the core of Phase 2:
+ *  we use the PDF's ACTUAL metadata for chapter boundaries, not arbitrary
+ *  character limits or LLM guesses.
+ *
+ *  Falls back to a single "whole book" chapter if the PDF has no outline. */
+export async function extractPdfChapters(
+  file: Blob,
+  onProgress?: (progress: PdfParseProgress) => void
+): Promise<{ chapters: PdfChapter[]; fullText: string }> {
+  const pdfjsLib = await getPdfjs()
+
+  const arrayBuffer = await file.arrayBuffer()
+  const loadingTask = pdfjsLib.getDocument({
+    data: new Uint8Array(arrayBuffer),
+    disableFontFace: true,
+    useSystemFonts: true,
+  })
+
+  let pdf: Awaited<typeof loadingTask.promise> | null = null
+  try {
+    pdf = await loadingTask.promise
+  } catch (err) {
+    throw new Error(
+      `Could not open this PDF. It might be corrupted or password-protected. ` +
+      `(Detail: ${err instanceof Error ? err.message : String(err)})`
+    )
+  }
+
+  const totalPages = pdf.numPages
+
+  // Step 1: Extract the PDF's outline (bookmark tree)
+  let outline: any[] = []
+  try {
+    outline = await pdf.getOutline() || []
+  } catch {
+    outline = []
+  }
+
+  // Step 2: Parse all pages' text first (we need it to slice chapters)
+  const pageTexts: string[] = []
+  let fullText = ''
+
+  for (let i = 1; i <= totalPages; i++) {
+    try {
+      const page = await pdf.getPage(i)
+      const content = await page.getTextContent()
+      const pageText = (content.items as any[])
+        .map((item: any) => item.str || '')
+        .join(' ')
+      pageTexts.push(pageText)
+      fullText += pageText + '\n\n'
+
+      if (onProgress) {
+        onProgress({
+          currentPage: i,
+          totalPages,
+          percent: Math.round((i / totalPages) * 100),
+        })
+      }
+
+      try { page.cleanup?.() } catch { /* best-effort cleanup */ }
+    } catch {
+      pageTexts.push('') // empty page on failure — partial extraction is better than total failure
+    }
+
+    if (i % 10 === 0) {
+      await new Promise((r) => setTimeout(r, 0))
+    }
+  }
+
+  // Step 3: Map outline items to page numbers and build chapter list
+  let chapters: PdfChapter[] = []
+
+  if (outline.length > 0) {
+    // Flatten the outline tree (handles nested sub-chapters)
+    const flatOutline = await flattenOutline(outline, pdf)
+
+    // Resolve each outline item to a start page
+    const outlinePages = await Promise.all(
+      flatOutline.map(async (item) => ({
+        title: item.title,
+        startPage: await resolveDestToPage(pdf, item.dest),
+      }))
+    )
+
+    // Filter out items that couldn't be resolved to a page (startPage === 0)
+    // and deduplicate (some PDFs have duplicate outline entries)
+    const validChapters = outlinePages
+      .filter((c, i, arr) => c.startPage > 0 && arr.findIndex(x => x.startPage === c.startPage) === i)
+      .sort((a, b) => a.startPage - b.startPage)
+
+    if (validChapters.length >= 2) {
+      // Build chapter ranges: each chapter starts at its startPage and ends
+      // at the page before the next chapter's startPage (or the last page).
+      chapters = validChapters.map((ch, i) => {
+        const startPage = ch.startPage
+        const endPage = i + 1 < validChapters.length
+          ? validChapters[i + 1].startPage - 1
+          : totalPages
+        // Slice the page texts for this chapter's page range (1-indexed → 0-indexed array)
+        const chapterText = pageTexts
+          .slice(startPage - 1, endPage)
+          .join('\n\n')
+          .trim()
+        return {
+          title: ch.title.slice(0, 200), // cap title length
+          startPage,
+          endPage,
+          rawText: chapterText,
+        }
+      }).filter(ch => ch.rawText.length > 0)
+    }
+  }
+
+  // Step 4: Fallback — if no outline or too few chapters, treat the whole
+  // document as a single chapter. This ensures we always have at least one
+  // chapter to work with, even for PDFs without bookmarks.
+  if (chapters.length === 0) {
+    // Split by a large fixed size as a last resort (not ideal, but better
+    // than a single 500K-char chapter that can't be TTS'd)
+    const SECTION_SIZE = 10000
+    const sections: PdfChapter[] = []
+    for (let i = 0; i < fullText.length; i += SECTION_SIZE) {
+      const text = fullText.slice(i, i + SECTION_SIZE).trim()
+      if (text.length > 0) {
+        sections.push({
+          title: `Section ${sections.length + 1}`,
+          startPage: 1,
+          endPage: totalPages,
+          rawText: text,
+        })
+      }
+    }
+    chapters = sections.length > 0 ? sections : [{
+      title: 'Full Text',
+      startPage: 1,
+      endPage: totalPages,
+      rawText: fullText.trim(),
+    }]
+  }
+
+  // Cleanup
+  try { await (pdf as any).destroy?.() } catch { /* best-effort cleanup */ }
+  try { await (pdf as any).cleanup?.() } catch { /* best-effort cleanup */ }
+
+  return { chapters, fullText }
+}

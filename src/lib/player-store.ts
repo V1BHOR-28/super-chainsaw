@@ -23,10 +23,10 @@ export interface CurrentAudiobook {
   documentId: string;
 }
 
-/** A materialized chapter row — carries TTS generation status + audio URL. */
+/** A chapter row from the database — carries TOC title, order, audio URL. */
 export interface PlayerChapter {
   id: string;
-  chapterIndex: number;
+  order: number;
   title: string;
   cleanedText: string;
   status: string; // pending | generating | ready | failed

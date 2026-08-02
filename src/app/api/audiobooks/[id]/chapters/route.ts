@@ -5,7 +5,7 @@ import { getAuthenticatedUserId } from '@/lib/user'
 
 export interface ChapterRow {
   id: string
-  chapterIndex: number
+  order: number
   title: string
   cleanedText: string
   status: string // pending | generating | ready | failed
@@ -14,10 +14,9 @@ export interface ChapterRow {
 }
 
 /**
- * GET /api/audiobooks/[id]/chapters — returns the materialized AudiobookChapter
- * rows for this audiobook, ordered by chapterIndex. Each chapter carries its
- * own TTS generation status and audio URL so the client knows whether to play
- * a stored file or trigger generation.
+ * GET /api/audiobooks/[id]/chapters — returns the AudiobookChapter rows
+ * for this audiobook, ordered by `order` (chapter position from the PDF's TOC).
+ * Each chapter carries its own TTS generation status and audio URL.
  */
 export async function GET(
   _req: NextRequest,
@@ -36,6 +35,7 @@ export async function GET(
         author: true,
         accent: true,
         documentId: true,
+        status: true,
         progressChapter: true,
         progressCharOffset: true,
       },
@@ -45,10 +45,10 @@ export async function GET(
 
     const chapterRows = await db.audiobookChapter.findMany({
       where: { audiobookId: id },
-      orderBy: { chapterIndex: 'asc' },
+      orderBy: { order: 'asc' },
       select: {
         id: true,
-        chapterIndex: true,
+        order: true,
         title: true,
         cleanedText: true,
         status: true,
