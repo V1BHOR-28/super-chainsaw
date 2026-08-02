@@ -261,22 +261,66 @@ export function useAudioEngine() {
           }
         });
       } else if (chapter.status === 'failed') {
-        // Fall back to live narration
-        startLiveNarration();
+        // Fall back to live narration — but if live narration was already
+        // active and merely paused (from a previous play/pause cycle on this
+        // chapter), resume it in place rather than restarting from paragraph 0.
+        if (speakingLiveRef.current && typeof window !== "undefined" && window.speechSynthesis?.paused) {
+          window.speechSynthesis.resume();
+        } else {
+          startLiveNarration();
+        }
       } else if (chapter.status === 'generating') {
-        // Another request is generating — wait briefly then check status
-        // For simplicity, fall back to live narration for now
-        startLiveNarration();
+        // Another request is actively generating this chapter's audio.
+        // Wait for it to finish (poll the chapter's status) instead of
+        // instantly falling back to the low-quality browser voice — real
+        // TTS audio is likely to be ready soon.
+        setNarrating(true);
+        const chapterId = chapter.id;
+        const pollForCompletion = async () => {
+          const maxAttempts = 20; // ~20 x 2s = 40 seconds of patience before giving up
+          for (let attempt = 0; attempt < maxAttempts; attempt++) {
+            await new Promise(resolve => setTimeout(resolve, 2000));
+            // Re-check current state — the user may have paused, skipped, or the
+            // chapter may no longer be the active one by the time this resolves.
+            const state = usePlayerStore.getState();
+            if (!state.isPlaying || state.chapters[state.chapterIndex]?.id !== chapterId) {
+              return; // bail — situation changed, don't force stale playback
+            }
+            const current = state.chapters.find(c => c.id === chapterId);
+            if (current?.status === 'ready' && current.audioUrl) {
+              setNarrating(false);
+              const aa = audioRef.current;
+              if (aa) {
+                aa.src = current.audioUrl;
+                aa.load();
+                aa.play().catch(() => usePlayerStore.getState().pause());
+              }
+              preGenerateNextChapter();
+              return;
+            }
+            if (current?.status === 'failed') break;
+          }
+          // Generation didn't finish in a reasonable time (or failed) — now
+          // it's reasonable to fall back to live narration.
+          setNarrating(false);
+          // Re-check state one more time before starting fallback
+          const state = usePlayerStore.getState();
+          if (state.isPlaying && state.chapters[state.chapterIndex]?.id === chapterId) {
+            startLiveNarration();
+          }
+        };
+        pollForCompletion();
       }
     } else {
       // Pause
       if (!a.paused) a.pause();
-      if (speakingLiveRef.current) {
-        speakingLiveRef.current = false;
-        if (typeof window !== "undefined" && window.speechSynthesis) {
-          window.speechSynthesis.cancel();
-        }
-        setUsingLiveNarration(false);
+      if (speakingLiveRef.current && typeof window !== "undefined" && window.speechSynthesis) {
+        // Use pause() instead of cancel() for live narration — preserves the
+        // current utterance's position so resume() continues from where it
+        // left off, rather than restarting the chapter from the beginning.
+        // Do NOT reset speakingLiveRef or setUsingLiveNarration(false) here —
+        // the narration session should remain "paused," not torn down.
+        window.speechSynthesis.pause();
       }
     }
   }, [isPlaying, currentAudiobook, chapterIndex, chapters]);

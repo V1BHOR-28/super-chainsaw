@@ -20,7 +20,7 @@
 
 import { generateWithFallback, callGeminiForExtraction } from '@/lib/llm-fallback'
 import { deriveChapters } from '@/lib/audiobook-chapters'
-import { cleanForNarration } from '@/lib/narration-clean'
+import { cleanForNarration, stripOcrArtifacts } from '@/lib/narration-clean'
 
 export interface PreparedChapter {
   index: number
@@ -52,6 +52,38 @@ function buildStructuralSample(fullText: string): string {
   // Cap the total sample to avoid exceeding context limits for very long books
   // (60 blocks × ~550 chars ≈ 33K chars, well within limits)
   return blocks.slice(0, 60).join('\n---\n')
+}
+
+/** Snap an LLM-guessed character offset to the nearest real paragraph break
+ *  in fullText, so chapters don't start mid-word. The LLM's offset is a rough
+ *  guess based on a compressed structural sample, not an exact position.
+ *  Falls back to nearest whitespace if no paragraph break is found nearby. */
+function snapToParagraphBoundary(fullText: string, approxOffset: number): number {
+  const searchWindow = 400 // look up to 400 chars before/after the guess
+  const start = Math.max(0, approxOffset - searchWindow)
+  const end = Math.min(fullText.length, approxOffset + searchWindow)
+  const windowText = fullText.slice(start, end)
+
+  // Find the nearest paragraph break (double newline) to the guessed offset
+  let bestOffset = approxOffset
+  let bestDistance = Infinity
+  const paragraphBreakRegex = /\n\s*\n/g
+  let match: RegExpExecArray | null
+  while ((match = paragraphBreakRegex.exec(windowText)) !== null) {
+    const candidateOffset = start + match.index + match[0].length
+    const distance = Math.abs(candidateOffset - approxOffset)
+    if (distance < bestDistance) {
+      bestDistance = distance
+      bestOffset = candidateOffset
+    }
+  }
+  // If no paragraph break found nearby, fall back to nearest whitespace at least,
+  // so we never cut mid-word even if we can't find a full paragraph boundary.
+  if (bestDistance === Infinity) {
+    const nearestSpaceBefore = fullText.lastIndexOf(' ', approxOffset)
+    bestOffset = nearestSpaceBefore >= start ? nearestSpaceBefore + 1 : approxOffset
+  }
+  return bestOffset
 }
 
 /**
@@ -124,12 +156,16 @@ Return ONLY the JSON array, no other text.`
       return boundariesFromDerived(fullText)
     }
 
-    // Convert to ChapterBoundary with startOffset/endOffset
+    // Convert to ChapterBoundary with startOffset/endOffset.
+    // Snap each LLM-guessed offset to the nearest real paragraph boundary
+    // so chapters don't start mid-word (the LLM's offset is a rough guess
+    // based on a compressed structural sample, not an exact position).
+    const snappedOffsets = valid.map((b: any) => snapToParagraphBoundary(fullText, b.offset))
     const boundaries: ChapterBoundary[] = valid.map((b: any, i: number) => ({
       index: i,
       title: b.title,
-      startOffset: b.offset,
-      endOffset: i + 1 < valid.length ? valid[i + 1].offset : fullText.length,
+      startOffset: snappedOffsets[i],
+      endOffset: i + 1 < valid.length ? snappedOffsets[i + 1] : fullText.length,
     }))
 
     console.log(`[audiobook-prep] Pass A: LLM detected ${boundaries.length} chapters`)
@@ -178,6 +214,7 @@ async function cleanChapterLLM(rawText: string): Promise<string | null> {
 - Repeated running headers/footers (e.g. book title or author name appearing at the top/bottom of every page)
 - OCR artifacts and scanning errors
 - Standalone page-number lines
+- Remove any stray unicode replacement characters, boxes, or unrecognizable symbols that are clearly OCR scanning artifacts, not real punctuation or content
 
 CRITICAL RULES:
 - Do NOT summarize, paraphrase, or shorten the text
@@ -219,7 +256,9 @@ export async function cleanChapterBatch(
 
   for (let i = startIndex; i < endIndex; i++) {
     const boundary = boundaries[i]
-    const rawText = fullText.slice(boundary.startOffset, boundary.endOffset).trim()
+    // Strip OCR control characters/mojibake BEFORE sending to the LLM, so
+    // the LLM never sees this garbage rather than relying on it to remove them.
+    const rawText = stripOcrArtifacts(fullText.slice(boundary.startOffset, boundary.endOffset)).trim()
 
     if (!rawText) {
       // Skip empty chapters
@@ -237,7 +276,7 @@ export async function cleanChapterBatch(
     }
 
     if (!cleanedText) {
-      // Fallback: regex-based cleaning for this chapter
+      // Fallback: regex-based cleaning for this chapter (also strips OCR artifacts)
       cleanedText = cleanForNarration(rawText)
       console.log(`[audiobook-prep] Pass B: chapter ${i + 1} fell back to regex cleaning`)
     }
