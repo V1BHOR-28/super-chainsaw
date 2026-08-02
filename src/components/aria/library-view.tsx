@@ -333,28 +333,45 @@ export function LibraryView() {
                             )}
                           </>
                         ) : book.status === 'FAILED' ? (
-                          <div className="flex items-center gap-2">
-                            <p className="text-[11px] text-[#ef4444]">
+                          <div className="flex items-center gap-3 mt-1">
+                            <p className="text-[12px] text-[#ef4444]">
                               Generation failed
                             </p>
                             <button
                               onClick={(e) => {
                                 e.stopPropagation()
+                                // Reset status to trigger re-polling
+                                setAudiobooks(prev => prev.map(b =>
+                                  b.id === book.id ? { ...b, status: 'PENDING' } : b
+                                ))
+                                // Call prep-batch to reset failed chapters and restart
                                 fetch(`/api/audiobooks/${book.id}/prep-batch`, { method: 'POST' })
                                   .then(res => res.json())
                                   .then(data => {
-                                    if (data.status && data.status !== 'FAILED') {
+                                    if (data.status) {
                                       setAudiobooks(prev => prev.map(b =>
                                         b.id === book.id ? { ...b, status: data.status } : b
                                       ))
                                     }
                                   })
-                                  .catch(() => {})
+                                  .catch(() => {
+                                    // Revert to FAILED if the retry itself failed
+                                    setAudiobooks(prev => prev.map(b =>
+                                      b.id === book.id ? { ...b, status: 'FAILED' } : b
+                                    ))
+                                  })
                               }}
-                              className="text-[10px] underline"
-                              style={{ color: 'var(--aria-accent-glow)' }}
+                              className="px-3 py-1.5 rounded-lg text-[12px] font-medium transition-all"
+                              style={{
+                                background: 'rgba(245,158,11,0.15)',
+                                border: '1px solid rgba(245,158,11,0.3)',
+                                color: 'var(--aria-accent-glow)',
+                                cursor: 'pointer',
+                                minHeight: '32px',
+                                minWidth: '60px',
+                              }}
                             >
-                              Retry
+                              Retry generation
                             </button>
                           </div>
                         ) : (

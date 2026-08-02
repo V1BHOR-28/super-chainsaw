@@ -247,34 +247,31 @@ ${rawText}`
  * cleanChapterText — Phase 3 public API.
  *
  * Takes a single chapter's rawText (from EPUB HTML-to-text conversion) and
- * returns cleanedText optimized for TTS. EPUBs are cleaner than PDFs (no
- * page numbers, no OCR artifacts), so this is lighter: normalize Unicode,
- * fix encoding artifacts, ensure sentence flow. Falls back to regex-based
- * cleanForNarration() if the LLM call fails.
- *
- * This is the function the prep-batch route calls per chapter.
+ * returns cleanedText optimized for TTS. EPUBs are already clean (no page
+ * numbers, no OCR), so regex cleaning is sufficient and fast. LLM cleaning
+ * is attempted but not required — if Groq fails, regex output is used directly.
  */
 export async function cleanChapterText(rawText: string): Promise<string> {
-  // Pre-clean with regex (handles Unicode normalization, HTML entities, etc.)
+  // Pre-clean with regex — this is the primary cleaning path for EPUBs.
+  // It handles Unicode normalization, HTML entities, smart quotes, etc.
   const prepped = cleanForNarration(rawText).trim()
   if (!prepped) return ''
 
-  let cleanedText: string | null = null
-
+  // Try LLM cleaning for better quality (fixes sentence flow, expands
+  // abbreviations). If it fails or takes too long, the regex-cleaned
+  // text is already good enough for TTS — don't block on the LLM.
   try {
-    cleanedText = await cleanChapterLLM(prepped)
+    const cleanedText = await cleanChapterLLM(prepped)
+    if (cleanedText && cleanedText.length >= prepped.length * 0.8) {
+      return cleanedText
+    }
+    console.log('[audiobook-prep] LLM output too short, using regex-cleaned text')
   } catch (e) {
-    console.error('[audiobook-prep] cleanChapterText: LLM cleaning failed:', e instanceof Error ? e.message : String(e))
-    cleanedText = null
+    console.error('[audiobook-prep] LLM cleaning failed, using regex-cleaned text:', e instanceof Error ? e.message : String(e))
   }
 
-  if (!cleanedText) {
-    // Fallback: the regex-cleaned text is already good enough for EPUBs
-    cleanedText = prepped
-    console.log('[audiobook-prep] cleanChapterText: using regex-cleaned text (LLM failed)')
-  }
-
-  return cleanedText
+  // Regex-cleaned text is the reliable fallback (and primary path for EPUBs)
+  return prepped
 }
 
 /**
