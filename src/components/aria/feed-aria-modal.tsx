@@ -5,7 +5,6 @@ import { motion, AnimatePresence } from 'framer-motion'
 import { BookOpen, Link2, FileText, X, Loader2, Trash2, BookMarked, Upload, FileUp, Quote, Sparkles } from 'lucide-react'
 import { toast } from 'sonner'
 import { useAriaStore } from '@/lib/store'
-import { parsePdfInBrowser, extractPdfChapters, type PdfParseProgress } from '@/lib/client-pdf'
 import { chunkText } from '@/lib/chunk-text'
 
 type FeedTab = 'text' | 'url' | 'file' | 'library' | 'quotes'
@@ -16,7 +15,7 @@ const STATE_LABELS: Record<FeedState, string> = {
   reading: 'ARIA is reading the document...',
   refining: 'ARIA is analyzing what she learned...',
   embedding: 'ARIA is storing it in her library...',
-  parsing: 'Reading the PDF in your browser...',
+  parsing: 'Parsing the EPUB file...',
   indexing: 'Indexing chunks into ARIA\'s library...',
   done: 'Done! ARIA now knows this.',
 }
@@ -29,8 +28,8 @@ export function FeedAriaModal() {
   const [file, setFile] = useState<File | null>(null)
   const [state, setState] = useState<FeedState>('idle')
   const [knowledge, setKnowledge] = useState<Array<{ id: string; title: string; source: string; contentLength: number; chunks?: number }>>([])
-  // Large-file pipeline progress
-  const [parseProgress, setParseProgress] = useState<PdfParseProgress | null>(null)
+  // EPUB upload progress
+  const [epubUploading, setEpubUploading] = useState(false)
   const [indexProgress, setIndexProgress] = useState<{ current: number; total: number } | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
@@ -48,13 +47,19 @@ export function FeedAriaModal() {
       return
     }
 
-    // === LARGE PDF PIPELINE ===
-    // PDFs are parsed in the browser (client-side) to avoid Vercel's 60s
-    // timeout. The extracted text is chunked and sent to the backend in
-    // batches for embedding + storage. This supports books of ANY size
-    // (3000+ pages) because the browser has no timeout or memory limit.
-    if (tab === 'file' && file && (file.name.toLowerCase().endsWith('.pdf') || file.type === 'application/pdf')) {
-      return handlePdfUpload(file)
+    // === EPUB PIPELINE ===
+    // EPUBs are parsed server-side (the epub2 library needs Node fs).
+    // The upload endpoint extracts the TOC, creates Audiobook + AudiobookChapter
+    // rows, and returns immediately. Chapter cleaning + TTS generation happens
+    // later via the prep-batch route, driven by client polling.
+    if (tab === 'file' && file && (file.name.toLowerCase().endsWith('.epub') || file.type === 'application/epub+zip')) {
+      return handleEpubUpload(file)
+    }
+
+    // Reject PDF files — only EPUB is supported now
+    if (tab === 'file' && file && file.name.toLowerCase().endsWith('.pdf')) {
+      toast.error('PDF files are no longer supported. Please upload an .epub file.')
+      return
     }
 
     // === EXISTING PATH (text, URL, TXT files) ===
@@ -151,129 +156,80 @@ export function FeedAriaModal() {
   }
 
   /**
-   * Client-side PDF pipeline:
-   * 1. Parse the PDF in the browser (no server timeout)
-   * 2. Chunk the extracted text into ~3000-char sections
-   * 3. Send batches of 10 chunks to /api/knowledge/batch for embedding + storage
-   * 4. Show live progress: "Reading page X of Y" → "Indexing chunk X of Y"
+   * EPUB upload pipeline:
+   * 1. Send the .epub file to the server for parsing
+   * 2. Server extracts TOC + chapter HTML, creates Audiobook + AudiobookChapter rows
+   * 3. Chapter cleaning + TTS generation happens later via prep-batch polling
    *
-   * This supports books of ANY size (3000+ pages) because:
-   * - Browser parsing has no timeout (unlike Vercel's 60s limit)
-   * - Browser memory is the user's device RAM (typically 4-16GB, plenty)
-   * - Batches are sent sequentially, each taking ~2-3s
+   * EPUBs are parsed server-side (epub2 needs Node fs), unlike the old
+   * PDF pipeline which parsed in the browser. This is simpler and more
+   * reliable — EPUBs are structured XML, not scanned images.
    */
-  const handlePdfUpload = async (pdfFile: File) => {
-    setParseProgress(null)
-    setIndexProgress(null)
+  const handleEpubUpload = async (epubFile: File) => {
+    setEpubUploading(true)
     setState('parsing')
 
     try {
-      // Step 1: Parse the PDF in the browser — extract chapters from TOC
-      const { chapters: pdfChapters, fullText } = await extractPdfChapters(pdfFile, (progress) => {
-        setParseProgress(progress)
+      const formData = new FormData()
+      formData.append('file', epubFile)
+
+      const res = await fetch('/api/audiobooks/upload-epub', {
+        method: 'POST',
+        body: formData,
       })
 
-      if (!fullText || fullText.trim().length < 10) {
-        throw new Error('Could not extract any text from this PDF. It might be scanned images (no text layer).')
+      const data = await res.json()
+
+      if (!res.ok) {
+        throw new Error(data.error || 'Failed to upload EPUB')
       }
 
-      // Step 2: Chunk the text for knowledge/RAG (separate from audiobook chapters)
-      const chunks = chunkText(fullText)
-      const totalChunks = chunks.length
-      const documentId = `doc-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
-      const title = pdfFile.name.replace(/\.pdf$/i, '')
+      // Also store the full text as Knowledge for chat/RAG
+      // (so ARIA can still reference the book in conversations)
+      try {
+        // Fetch the audiobook's chapters to get the full text for RAG
+        const chaptersRes = await fetch(`/api/audiobooks/${data.audiobookId}/chapters`)
+        if (chaptersRes.ok) {
+          const chaptersData = await chaptersRes.json()
+          const fullText = (chaptersData.chapters || [])
+            .map((ch: any) => ch.cleanedText || ch.rawText || '')
+            .join('\n\n')
 
-      // Step 3: Send chunks to backend in batches of 10
-      setState('indexing')
-      const BATCH_SIZE = 10
-      let storedTotal = 0
-      let embeddedTotal = 0
+          if (fullText.length > 100) {
+            // Send to knowledge batch for RAG embedding
+            const chunks = chunkText(fullText)
+            const documentId = `epub-${data.audiobookId}`
+            const BATCH_SIZE = 10
 
-      for (let i = 0; i < chunks.length; i += BATCH_SIZE) {
-        const batchChunks = chunks.slice(i, i + BATCH_SIZE)
-        const batchIndex = Math.floor(i / BATCH_SIZE)
-
-        setIndexProgress({ current: i + batchChunks.length, total: totalChunks })
-
-        const res = await fetch('/api/knowledge/batch', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            documentId,
-            title,
-            source: 'pdf',
-            chunks: batchChunks,
-            batchIndex,
-            totalBatches: Math.ceil(totalChunks / BATCH_SIZE),
-            totalChunks,
-            chunkOffset: i,
-          }),
-        })
-
-        const data = await res.json()
-        if (res.status === 409 && data.error === 'duplicate') {
-          // Duplicate title on a batch upload — confirm + resend this batch with forceReupload
-          const ok = window.confirm(data.message || 'Duplicate title. Upload anyway?')
-          if (!ok) throw new Error('Upload cancelled')
-          const retryRes = await fetch('/api/knowledge/batch', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              documentId, title, source: 'pdf',
-              chunks: batchChunks, batchIndex,
-              totalBatches: Math.ceil(totalChunks / BATCH_SIZE),
-              totalChunks, chunkOffset: i, forceReupload: true,
-            }),
-          })
-          const retryData = await retryRes.json()
-          if (!retryRes.ok) throw new Error(retryData.error || 'Batch upload failed')
-          storedTotal += retryData.stored || 0
-          embeddedTotal += retryData.embedded || 0
-        } else if (!res.ok) {
-          throw new Error(data.error || 'Batch upload failed')
-        } else {
-          storedTotal += data.stored || 0
-          embeddedTotal += data.embedded || 0
+            for (let i = 0; i < chunks.length; i += BATCH_SIZE) {
+              const batchChunks = chunks.slice(i, i + BATCH_SIZE)
+              await fetch('/api/knowledge/batch', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                  documentId,
+                  title: data.title,
+                  source: 'epub',
+                  chunks: batchChunks,
+                  batchIndex: Math.floor(i / BATCH_SIZE),
+                  totalBatches: Math.ceil(chunks.length / BATCH_SIZE),
+                  totalChunks: chunks.length,
+                  chunkOffset: i,
+                }),
+              })
+            }
+          }
         }
+      } catch (ragErr) {
+        console.error('[feed-aria] RAG indexing failed (non-blocking):', ragErr)
+        // Non-blocking — the audiobook was already created successfully
       }
 
-      // Step 4: Create audiobook from the PDF's TOC chapters
-      // This creates Audiobook + AudiobookChapter rows with rawText from the
-      // PDF's actual outline. Chapter cleaning + TTS generation happens later
-      // via the prep-batch route, driven by client polling.
-      if (pdfChapters.length > 0) {
-        try {
-          await fetch('/api/audiobooks/create-from-toc', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({
-              documentId,
-              title,
-              chapters: pdfChapters.map(ch => ({ title: ch.title, rawText: ch.rawText })),
-            }),
-          })
-        } catch (audiobookErr) {
-          console.error('[feed-aria] Failed to create audiobook from TOC:', audiobookErr)
-          // Non-blocking — the knowledge upload already succeeded
-        }
-      }
-
-      // Step 5: Done
       setState('done')
-      const chunkInfo = storedTotal > 1 ? ` (${storedTotal} sections indexed)` : ''
-      const pageInfo = parseProgress ? ` · ${parseProgress.totalPages} pages` : ''
-      toast.success(`ARIA has learned this book.${chunkInfo}${pageInfo} She'll use it in your conversations.`)
-
-      setKnowledge(prev => [{
-        id: documentId,
-        title: title,
-        source: 'pdf',
-        contentLength: fullText.length,
-      }, ...prev])
+      toast.success(`"${data.title}" uploaded with ${data.chapterCount} chapters. Audiobook generation will begin shortly.`)
 
       setFile(null)
-      setParseProgress(null)
-      setIndexProgress(null)
+      setEpubUploading(false)
       if (fileInputRef.current) fileInputRef.current.value = ''
 
       setTimeout(() => {
@@ -282,8 +238,7 @@ export function FeedAriaModal() {
       }, 2000)
     } catch (err) {
       setState('idle')
-      setParseProgress(null)
-      setIndexProgress(null)
+      setEpubUploading(false)
       toast.error((err as Error).message)
     }
   }
@@ -484,7 +439,7 @@ export function FeedAriaModal() {
                 <input
                   ref={fileInputRef}
                   type="file"
-                  accept=".pdf,.txt,.md,text/plain,application/pdf"
+                  accept=".epub,.txt,.md,text/plain,application/epub+zip"
                   className="hidden"
                   onChange={(e) => {
                     const f = e.target.files?.[0]
@@ -536,26 +491,21 @@ export function FeedAriaModal() {
                   )}
                 </button>
                 <p className="text-[11px]" style={{ color: 'var(--aria-fg-dim)' }}>
-                  ARIA will read the entire document in your browser (no size limit), learn its contents, and use it as context when you ask related questions. Perfect for books, manuals, study notes, research papers.
+                  Upload an EPUB file and ARIA will parse its table of contents, extract each chapter, and generate an audiobook you can listen to. The text is also indexed for chat context.
                 </p>
 
-                {/* Progress bar for large PDF pipeline */}
-                {state === 'parsing' && parseProgress && (
+                {/* EPUB upload progress */}
+                {state === 'parsing' && epubUploading && (
                   <div className="rounded-xl p-4" style={{ background: 'var(--aria-bg-panel)', border: '1px solid var(--aria-border)' }}>
-                    <div className="flex items-center justify-between mb-2">
+                    <div className="flex items-center gap-3">
+                      <Loader2 className="w-4 h-4 animate-spin" style={{ color: 'var(--aria-accent-glow)' }} />
                       <span className="text-[12px] font-medium" style={{ color: 'var(--aria-fg)' }}>
-                        Reading page {parseProgress.currentPage} of {parseProgress.totalPages}
-                      </span>
-                      <span className="text-[12px] font-mono-aria" style={{ color: 'var(--aria-accent-glow)' }}>
-                        {parseProgress.percent}%
+                        Parsing EPUB and extracting chapters...
                       </span>
                     </div>
-                    <div className="h-2 rounded-full overflow-hidden" style={{ background: 'rgba(252,211,77,0.08)' }}>
-                      <div
-                        className="h-full rounded-full transition-all duration-300"
-                        style={{ width: `${parseProgress.percent}%`, background: 'var(--aria-accent)' }}
-                      />
-                    </div>
+                    <p className="text-[10px] mt-2" style={{ color: 'var(--aria-fg-dim)' }}>
+                      Reading the EPUB's table of contents and extracting chapter text.
+                    </p>
                   </div>
                 )}
 

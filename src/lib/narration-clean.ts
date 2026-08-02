@@ -1,7 +1,7 @@
 /**
  * stripOcrArtifacts — removes Unicode replacement characters and non-printable
- * control characters from OCR scans. Exported separately so it can be run as
- * a lightweight pre-pass before LLM cleaning (so the LLM never sees this garbage).
+ * control characters. EPUBs are generally cleaner than PDFs (no OCR), but
+ * encoding artifacts can still appear from poorly-converted files.
  */
 export function stripOcrArtifacts(text: string): string {
   return text
@@ -10,39 +10,47 @@ export function stripOcrArtifacts(text: string): string {
 }
 
 /**
- * cleanForNarration — strips the things that make TTS narration sound broken:
- * mid-sentence line-wrap breaks, page numbers, footnote markers, bare URLs,
- * and repeated header/footer lines. Does NOT attempt full ACX-style mastering
- * (room tone, precise loudness/bitrate targets) — those are retail-distribution
- * requirements, not needed for in-app personal listening.
+ * cleanForNarration — lightweight text normalization for TTS.
+ *
+ * EPUBs don't have the page-number/OCR/header problems PDFs do — the HTML
+ * is already structured by chapter. This function handles the remaining
+ * issues that affect narration quality:
+ * - Character encoding artifacts (from poorly-converted EPUBs)
+ * - Weird Unicode quotation marks/dashes that TTS engines mishandle
+ * - Excessive whitespace from HTML-to-text conversion
+ * - Stray HTML entities that weren't fully decoded
+ *
+ * Does NOT do LLM-level cleanup (that's in audiobook-prep-agent.ts).
  */
 export function cleanForNarration(raw: string): string {
   let text = raw
 
-  // Strip Unicode replacement characters (U+FFFD) and other non-printable control
-  // characters left over from OCR scanning artifacts — these render as boxes and
-  // would otherwise pass straight through to both narration and TTS.
-  text = text.replace(/\uFFFD/g, '')
-  text = text.replace(/[\u0000-\u0008\u000B\u000C\u000E-\u001F]/g, '')
+  // Strip non-printable control characters
+  text = stripOcrArtifacts(text)
 
-  // Join lines that were broken mid-sentence by the PDF's page width —
-  // a line that doesn't end in sentence-ending punctuation, followed by
-  // a lowercase letter on the next line, is almost certainly a wrapped line.
-  text = text.replace(/([a-z,;])\n([a-z])/g, '$1 $2')
+  // Decode common HTML entities that cheerio might have missed
+  text = text.replace(/&nbsp;/g, ' ')
+  text = text.replace(/&amp;/g, '&')
+  text = text.replace(/&lt;/g, '<')
+  text = text.replace(/&gt;/g, '>')
+  text = text.replace(/&quot;/g, '"')
+  text = text.replace(/&#\d+;/g, '') // strip numeric entities
 
-  // Strip standalone page-number lines (a line that's just digits, alone).
-  text = text.replace(/^\s*\d{1,4}\s*$/gm, '')
+  // Normalize Unicode quotation marks and dashes to ASCII (TTS engines
+  // handle these more reliably)
+  text = text.replace(/[\u2018\u2019\u201A\u201B]/g, "'") // smart single quotes
+  text = text.replace(/[\u201C\u201D\u201E\u201F]/g, '"') // smart double quotes
+  text = text.replace(/[\u2013\u2014]/g, '-') // en/em dashes
+  text = text.replace(/\u2026/g, '...') // ellipsis
+  text = text.replace(/[\u00AB\u00BB]/g, '"') // angle quotes
 
-  // Strip bare URLs — TTS reading out a raw URL character-by-character is
-  // useless and jarring; better to drop them than narrate "h-t-t-p-s colon...".
+  // Strip bare URLs — TTS reading "h-t-t-p-s colon" is jarring
   text = text.replace(/https?:\/\/\S+/g, '')
 
-  // Strip footnote markers like [1], [12], (1) when they appear as a standalone
-  // reference (not general use of brackets/parens elsewhere in prose).
-  text = text.replace(/\[\d{1,3}\]/g, '')
-
-  // Collapse 3+ blank lines down to 2 (paragraph break), and trim.
-  text = text.replace(/\n{3,}/g, '\n\n').trim()
+  // Collapse excessive whitespace from HTML-to-text conversion
+  text = text.replace(/\n{3,}/g, '\n\n')
+  text = text.replace(/[ \t]{2,}/g, ' ')
+  text = text.trim()
 
   return text
 }

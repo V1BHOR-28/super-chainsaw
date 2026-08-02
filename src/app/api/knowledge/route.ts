@@ -258,12 +258,10 @@ export async function POST(req: NextRequest) {
       title = (formData.get('title') as string)?.trim() || file.name || 'Uploaded document'
       forceReupload = (formData.get('forceReupload') as string) === 'true'
       const fileName = file.name.toLowerCase()
-      if (fileName.endsWith('.pdf') || file.type === 'application/pdf') {
-        const pdf = await parsePdf(file)
-        content = pdf.text
-        rawFullText = pdf.raw
-        truncated = pdf.truncated
-        source = 'pdf'
+      if (fileName.endsWith('.epub') || file.type === 'application/epub+zip') {
+        return NextResponse.json({ error: 'EPUB files should be uploaded via the audiobook upload endpoint.' }, { status: 400 })
+      } else if (fileName.endsWith('.pdf') || file.type === 'application/pdf') {
+        return NextResponse.json({ error: 'PDF files are no longer supported. Please upload an .epub file.' }, { status: 400 })
       } else if (fileName.endsWith('.txt') || fileName.endsWith('.md') || file.type.startsWith('text/')) {
         const fileText = await file.text()
         rawFullText = fileText
@@ -272,7 +270,7 @@ export async function POST(req: NextRequest) {
         truncated = refined.truncated
         source = 'file'
       } else {
-        return NextResponse.json({ error: 'Unsupported file type. Please upload a PDF or text file.' }, { status: 400 })
+        return NextResponse.json({ error: 'Unsupported file type. Please upload a .txt, .md, or .epub file.' }, { status: 400 })
       }
     } else {
       const body = await req.json().catch(() => ({}))

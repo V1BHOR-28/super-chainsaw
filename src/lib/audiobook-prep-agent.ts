@@ -208,13 +208,11 @@ function boundariesFromDerived(fullText: string): ChapterBoundary[] {
 /** Pass B — LLM-based per-chapter cleaning.
  *  Returns the cleaned text, or null on failure (caller falls back to regex). */
 async function cleanChapterLLM(rawText: string): Promise<string | null> {
-  const prompt = `You are a narration text cleaner. Clean the following book chapter text for text-to-speech narration. Fix:
-- Hyphenated word-breaks across lines (e.g. "under-\nstand" → "understand")
-- Mid-sentence line wraps (join lines that were broken by page width)
-- Repeated running headers/footers (e.g. book title or author name appearing at the top/bottom of every page)
-- OCR artifacts and scanning errors
-- Standalone page-number lines
-- Remove any stray unicode replacement characters, boxes, or unrecognizable symbols that are clearly OCR scanning artifacts, not real punctuation or content
+  const prompt = `You are a narration text cleaner for an EPUB audiobook. Clean the following chapter text for text-to-speech narration. Fix:
+- Character encoding artifacts and mojibake
+- Weird Unicode characters that TTS engines might mispronounce
+- Excessive whitespace or line breaks from HTML-to-text conversion
+- Any remaining HTML entities or tags that weren't fully stripped
 
 CRITICAL RULES:
 - Do NOT summarize, paraphrase, or shorten the text
@@ -238,17 +236,17 @@ ${rawText}`
 /**
  * cleanChapterText — Phase 3 public API.
  *
- * Takes a single chapter's rawText (from PDF extraction) and returns
- * cleanedText optimized for TTS. Strips OCR artifacts before LLM cleaning,
- * then sends to the LLM with a prompt to fix page numbers, headers, footers,
- * hyphenated words, and line wraps — WITHOUT summarizing. Falls back to
- * regex-based cleanForNarration() if the LLM call fails.
+ * Takes a single chapter's rawText (from EPUB HTML-to-text conversion) and
+ * returns cleanedText optimized for TTS. EPUBs are cleaner than PDFs (no
+ * page numbers, no OCR artifacts), so this is lighter: normalize Unicode,
+ * fix encoding artifacts, ensure sentence flow. Falls back to regex-based
+ * cleanForNarration() if the LLM call fails.
  *
  * This is the function the prep-batch route calls per chapter.
  */
 export async function cleanChapterText(rawText: string): Promise<string> {
-  // Strip OCR control characters/mojibake BEFORE sending to the LLM
-  const prepped = stripOcrArtifacts(rawText).trim()
+  // Pre-clean with regex (handles Unicode normalization, HTML entities, etc.)
+  const prepped = cleanForNarration(rawText).trim()
   if (!prepped) return ''
 
   let cleanedText: string | null = null
@@ -261,9 +259,9 @@ export async function cleanChapterText(rawText: string): Promise<string> {
   }
 
   if (!cleanedText) {
-    // Fallback: regex-based cleaning (also strips OCR artifacts)
-    cleanedText = cleanForNarration(prepped)
-    console.log('[audiobook-prep] cleanChapterText: fell back to regex cleaning')
+    // Fallback: the regex-cleaned text is already good enough for EPUBs
+    cleanedText = prepped
+    console.log('[audiobook-prep] cleanChapterText: using regex-cleaned text (LLM failed)')
   }
 
   return cleanedText
