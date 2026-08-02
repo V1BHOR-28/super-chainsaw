@@ -372,6 +372,40 @@ export function useAudioEngine() {
     }
   }, [volume, muted]);
 
+  // Seek → actually move the <audio> element's playhead.
+  //
+  // We subscribe to the store directly (getState + subscribe) rather than
+  // using a React useEffect dependency on `currentTime`, because currentTime
+  // changes on EVERY timeupdate tick (many times per second). Reacting to
+  // every change would cause an infinite loop: audio fires timeupdate →
+  // store updates currentTime → effect fires → sets audio.currentTime →
+  // audio fires timeupdate → ...
+  //
+  // Instead, we track the last time WE wrote to audio.currentTime and only
+  // propagate store → audio when the difference is large enough that it
+  // can't have come from a natural timeupdate tick (i.e., it came from a
+  // seek() call, not from the audio element itself).
+  useEffect(() => {
+    const SEEK_THRESHOLD = 1.5; // seconds — normal playback never jumps this far per tick
+    let lastWrittenTime = -1;
+
+    const unsubscribe = usePlayerStore.subscribe((state) => {
+      const a = audioRef.current;
+      if (!a || !a.src) return;
+
+      const storeTime = state.currentTime;
+      // If the store's time differs from what audio reports by more than the
+      // threshold, it was a user seek — write it back to the element.
+      const delta = Math.abs(storeTime - a.currentTime);
+      if (delta > SEEK_THRESHOLD && Math.abs(storeTime - lastWrittenTime) > 0.1) {
+        a.currentTime = storeTime;
+        lastWrittenTime = storeTime;
+      }
+    });
+
+    return unsubscribe;
+  }, []); // empty deps — subscription is created once and cleaned up on unmount
+
   // Virtual elapsed-time clock for live narration (when no real audio is playing)
   useEffect(() => {
     if (!currentAudiobook || !isPlaying) {

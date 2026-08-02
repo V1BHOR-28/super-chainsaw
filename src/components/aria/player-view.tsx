@@ -96,15 +96,15 @@ export function PlayerView() {
           </button>
         </div>
 
-        <div className="flex items-center gap-2">
+        <div className="hidden sm:flex items-center gap-2">
           {narrating && (
-            <StatusPill className="!text-[10px]" >
+            <StatusPill className="!text-[10px]">
               <span className="status-dot" />
               Narrating…
             </StatusPill>
           )}
           {usingLiveNarration && (
-            <StatusPill className="!text-[10px]" >
+            <StatusPill className="!text-[10px]">
               <span className="status-dot" />
               Live narration
             </StatusPill>
@@ -140,8 +140,8 @@ export function PlayerView() {
               />
               <div className="absolute inset-0 bg-gradient-to-t from-black/60 via-transparent to-transparent" />
 
-              {/* now playing badge */}
-              <div className="absolute top-3 left-3 status-pill !py-1 !px-2.5 !text-[9px]">
+              {/* now playing badge — shown only on mobile where the header pill is hidden */}
+              <div className="sm:hidden absolute top-3 left-3 status-pill !py-1 !px-2.5 !text-[9px]">
                 <span className="status-dot" />
                 {isPlaying ? "Playing" : "Paused"}
               </div>
