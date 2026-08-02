@@ -115,55 +115,13 @@ export async function generateWithFallback(
     return content.trim()
   }
 
-  // Pollinations — keyless backstop (same as the chat route's callPollinations).
-  // Always available, no API key needed, no rate limits. The safety net.
-  // NOTE: The POST /openai endpoint now returns 402 for large anonymous requests
-  // (chapter cleaning needs ~1576 output tokens). The GET endpoint below is the
-  // true backstop — it doesn't enforce the pollen budget.
-  const callPollinations = async (): Promise<string> => {
-    const res = await fetch('https://text.pollinations.ai/openai', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: 'openai', messages, max_tokens: maxTokens }),
-      signal: AbortSignal.timeout(25000),
-    })
-    if (!res.ok) throw new Error(`Pollinations ${res.status}`)
-    const data = await res.json()
-    const content = data.choices?.[0]?.message?.content ?? ''
-    if (!content?.trim()) throw new Error('Pollinations empty')
-    return content.trim()
-  }
-
-  // Pollinations GET endpoint — the POST /openai endpoint now returns 402 for
-  // large anonymous requests (chapter cleaning needs ~1576 output tokens).
-  // The GET endpoint (text.pollinations.ai/{prompt}) does NOT enforce the
-  // pollen budget for anonymous requests — it's the original free API.
-  // URL-encode the prompt and cap its length to stay under URL length limits.
-  const callPollinationsGet = async (): Promise<string> => {
-    // Cap prompt to 60000 chars (well under URL length limits for most servers).
-    // For chapter cleaning, this covers chapters up to ~15K chars (plenty).
-    const cappedPrompt = prompt.slice(0, 60000)
-    const encoded = encodeURIComponent(cappedPrompt)
-    const res = await fetch(`https://text.pollinations.ai/${encoded}`, {
-      method: 'GET',
-      signal: AbortSignal.timeout(60000), // GET can be slower for long outputs
-    })
-    if (!res.ok) throw new Error(`Pollinations GET ${res.status}`)
-    const text = await res.text()
-    if (!text?.trim()) throw new Error('Pollinations GET empty')
-    return text.trim()
-  }
-
   const providers: Array<() => Promise<string>> = []
-  // Groq is the fastest + cheapest — primary path (works from Vercel/production).
+  // Groq is the ONLY LLM provider. Pollinations has been removed — it was
+  // returning 402 for chapter-sized requests and causing generation failures.
   if (process.env.GROQ_API_KEY) providers.push(callGroq)
-  // Pollinations POST is the first keyless backstop.
-  providers.push(callPollinations)
-  // Pollinations GET is the true keyless backstop — doesn't enforce pollen budget.
-  providers.push(callPollinationsGet)
 
   if (providers.length === 0) {
-    console.error('[llm-fallback] No providers available (GROQ_API_KEY unset and Pollinations unreachable)')
+    console.error('[llm-fallback] No providers available — GROQ_API_KEY is not set. LLM cleaning and chat will fail.')
     return null
   }
 
@@ -175,8 +133,8 @@ export async function generateWithFallback(
     // visibility without each having to re-log. AggregateError (Node 15+) carries
     // the per-provider rejection reasons on .errors.
     const tried = providers.length === 1
-      ? 'Pollinations only'
-      : 'Groq + Pollinations'
+      ? 'Groq only'
+      : 'Groq'
     const reasons = err instanceof AggregateError
       ? err.errors.map((e, i) => `[${i}] ${e instanceof Error ? e.message : String(e)}`).join(' | ')
       : (err instanceof Error ? err.message : String(err))
@@ -185,9 +143,8 @@ export async function generateWithFallback(
   }
 }
 
-// Warn once at module load if no LLM API keys are set — Pollinations POST
-// now returns 402 for large requests, so the GET endpoint is the only free
-// backstop. Quality will be lower without Groq or OpenRouter.
-if (!process.env.GROQ_API_KEY && !process.env.OPENROUTER_API_KEY && !process.env.GEMINI_API_KEY) {
-  console.warn('[llm-fallback] No GROQ_API_KEY, OPENROUTER_API_KEY, or GEMINI_API_KEY set. Falling back to Pollinations GET only — chapter cleaning and chat quality will be reduced.')
+// Warn once at module load if GROQ_API_KEY is not set — Groq is the only
+// LLM provider now (Pollinations removed due to 402 errors on large requests).
+if (!process.env.GROQ_API_KEY) {
+  console.warn('[llm-fallback] GROQ_API_KEY is not set. LLM cleaning will fall back to regex-only (lower quality). Set GROQ_API_KEY in your environment variables.')
 }

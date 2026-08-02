@@ -12,7 +12,7 @@ import {
 import { claimChapterForGeneration, generateChapterAudioTask } from '@/lib/generate-chapter-audio'
 
 const BATCH_SIZE = 1 // process ONE chapter per call (cleaning + TTS) to stay within 60s.
-// The LLM cleaning call has a 25s timeout and EdgeTTS synthesis can take 10-30s
+// The LLM cleaning call has a 25s timeout and Kokoro TTS synthesis can take 10-30s
 // per chapter, so 1 chapter per call = ~35-55s, safely within the 60s budget.
 // Multiple chapters per call risks timeout → chapter stuck at 'generating' forever.
 
