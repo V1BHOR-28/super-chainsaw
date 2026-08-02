@@ -264,7 +264,7 @@ model AudiobookChapter {
   order           Int
   title           String
   // Raw text extracted directly from the PDF pages for this chapter.
-  rawText         String
+  rawText         String   @default("")
   // Narration-ready text after LLM cleaning (strips page numbers, headers,
   // footers, fixes hyphenated words). Falls back to rawText if cleaning fails.
   cleanedText     String   @default("")
