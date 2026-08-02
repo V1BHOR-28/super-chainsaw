@@ -224,8 +224,9 @@ model Quote {
 }
 
 // Audiobooks — auto-created when a user feeds ARIA book-length content.
-// Links to Knowledge.documentId (the source text). Chapters are derived
-// at request time from the real Knowledge text, not stored separately.
+// Links to Knowledge.documentId (the source text). Chapters are materialized
+// at creation time (AudiobookChapter rows) so each can track its own TTS
+// generation status and store its own audio URL independently.
 model Audiobook {
   id                 String   @id @default(cuid())
   userId             String
@@ -237,7 +238,27 @@ model Audiobook {
   progressChapter    Int      @default(0)
   progressCharOffset Int      @default(0) // resume position within the chapter's text
 
-  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  user     User              @relation(fields: [userId], references: [id], onDelete: Cascade)
+  chapters AudiobookChapter[]
 
   @@index([userId, createdAt])
+}
+
+// Per-chapter TTS generation state. Each chapter generates audio lazily
+// (on first play) and stores the resulting MP3 URL for reuse.
+model AudiobookChapter {
+  id              String   @id @default(cuid())
+  audiobookId     String
+  chapterIndex    Int
+  title           String
+  cleanedText     String   // narration-ready text, post text-cleaning
+  status          String   @default("pending") // pending | generating | ready | failed
+  audioUrl        String?
+  durationSeconds Int?
+  createdAt       DateTime @default(now())
+
+  audiobook Audiobook @relation(fields: [audiobookId], references: [id], onDelete: Cascade)
+
+  @@unique([audiobookId, chapterIndex])
+  @@index([audiobookId])
 }

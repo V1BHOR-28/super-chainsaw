@@ -2,7 +2,6 @@
 
 import { create } from "zustand";
 import { persist, createJSONStorage } from "zustand/middleware";
-import type { DerivedChapter } from "@/lib/audiobook-chapters";
 
 export interface Bookmark {
   id: string;
@@ -24,19 +23,37 @@ export interface CurrentAudiobook {
   documentId: string;
 }
 
+/** A materialized chapter row — carries TTS generation status + audio URL. */
+export interface PlayerChapter {
+  id: string;
+  chapterIndex: number;
+  title: string;
+  cleanedText: string;
+  status: string; // pending | generating | ready | failed
+  audioUrl: string | null;
+  durationSeconds: number | null;
+}
+
 type View = "landing" | "player";
 
 interface PlayerState {
   // View
   view: View;
   setView: (v: View) => void;
-  openPlayer: (audiobook: CurrentAudiobook, chapters: DerivedChapter[], chapterIndex?: number) => void;
+  openPlayer: (audiobook: CurrentAudiobook, chapters: PlayerChapter[], chapterIndex?: number) => void;
   closePlayer: () => void;
 
   // Current audiobook & chapters (fetched from API, not static data)
   currentAudiobook: CurrentAudiobook | null;
-  chapters: DerivedChapter[];
+  chapters: PlayerChapter[];
   chapterIndex: number;
+
+  // Narration generation status for the current chapter
+  narrating: boolean; // true while generating audio for the current chapter
+  usingLiveNarration: boolean; // true if falling back to speechSynthesis (generation failed)
+  setNarrating: (v: boolean) => void;
+  setUsingLiveNarration: (v: boolean) => void;
+  updateChapterStatus: (chapterId: string, status: string, audioUrl?: string | null) => void;
 
   // Playback
   isPlaying: boolean;
@@ -82,7 +99,7 @@ interface PlayerState {
   removeBookmark: (id: string) => void;
   jumpToBookmark: (b: Bookmark) => void;
 
-  getChapter: () => DerivedChapter | undefined;
+  getChapter: () => PlayerChapter | undefined;
 }
 
 export const usePlayerStore = create<PlayerState>()(
@@ -98,15 +115,17 @@ export const usePlayerStore = create<PlayerState>()(
           chapters,
           chapterIndex: idx,
           currentTime: 0,
-          duration: chapters[idx]?.estimatedSeconds ?? 0,
+          duration: chapters[idx]?.durationSeconds ?? 0,
           isPlaying: false,
+          narrating: false,
+          usingLiveNarration: false,
         });
         if (typeof window !== "undefined") {
           window.scrollTo({ top: 0, behavior: "instant" as ScrollBehavior });
         }
       },
       closePlayer: () => {
-        set({ view: "landing", isPlaying: false });
+        set({ view: "landing", isPlaying: false, narrating: false, usingLiveNarration: false });
         if (typeof window !== "undefined") {
           window.scrollTo({ top: 0, behavior: "instant" as ScrollBehavior });
         }
@@ -115,6 +134,19 @@ export const usePlayerStore = create<PlayerState>()(
       currentAudiobook: null,
       chapters: [],
       chapterIndex: 0,
+
+      narrating: false,
+      usingLiveNarration: false,
+      setNarrating: (v) => set({ narrating: v }),
+      setUsingLiveNarration: (v) => set({ usingLiveNarration: v }),
+      updateChapterStatus: (chapterId, status, audioUrl) =>
+        set((s) => ({
+          chapters: s.chapters.map((ch) =>
+            ch.id === chapterId
+              ? { ...ch, status, audioUrl: audioUrl !== undefined ? audioUrl : ch.audioUrl }
+              : ch
+          ),
+        })),
 
       isPlaying: false,
       currentTime: 0,
@@ -148,7 +180,9 @@ export const usePlayerStore = create<PlayerState>()(
           set({
             chapterIndex: next,
             currentTime: 0,
-            duration: chapters[next].estimatedSeconds,
+            duration: chapters[next].durationSeconds ?? 0,
+            narrating: false,
+            usingLiveNarration: false,
           });
         } else {
           // finished — pause
@@ -167,7 +201,9 @@ export const usePlayerStore = create<PlayerState>()(
           set({
             chapterIndex: prev,
             currentTime: 0,
-            duration: chapters[prev].estimatedSeconds,
+            duration: chapters[prev].durationSeconds ?? 0,
+            narrating: false,
+            usingLiveNarration: false,
           });
         }
       },
@@ -177,8 +213,10 @@ export const usePlayerStore = create<PlayerState>()(
         set({
           chapterIndex: index,
           currentTime: 0,
-          duration: chapters[index].estimatedSeconds,
+          duration: chapters[index].durationSeconds ?? 0,
           isPlaying: true,
+          narrating: false,
+          usingLiveNarration: false,
         });
       },
       skip: (seconds) => {
@@ -243,8 +281,10 @@ export const usePlayerStore = create<PlayerState>()(
         set({
           chapterIndex: b.chapterIndex,
           currentTime: b.time,
-          duration: chapters[b.chapterIndex]?.estimatedSeconds ?? 0,
+          duration: chapters[b.chapterIndex]?.durationSeconds ?? 0,
           isPlaying: true,
+          narrating: false,
+          usingLiveNarration: false,
         });
       },
 

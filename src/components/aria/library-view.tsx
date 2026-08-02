@@ -1,13 +1,13 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
-import { Play, Trash2, BookOpen } from "lucide-react";
+import { Play, Trash2, BookOpen, ArrowLeft } from "lucide-react";
 import { AmbientGlow, GradientText } from "./primitives";
 import { ScrollReveal } from "./scroll-reveal";
 import { BookCover } from "./book-cover";
-import { usePlayerStore, type CurrentAudiobook } from "@/lib/player-store";
+import { usePlayerStore, type CurrentAudiobook, type PlayerChapter } from "@/lib/player-store";
+import { useAriaStore } from "@/lib/store";
 import { formatDuration } from "@/lib/audiobooks";
-import type { DerivedChapter } from "@/lib/audiobook-chapters";
 import { toast } from "@/hooks/use-toast";
 
 interface AudiobookListItem {
@@ -19,6 +19,8 @@ interface AudiobookListItem {
   createdAt: string;
   progressChapter: number;
   progressCharOffset: number;
+  chapterCount: number;
+  narratedCount: number;
 }
 
 /**
@@ -27,6 +29,7 @@ interface AudiobookListItem {
  */
 export function LibraryView() {
   const openPlayer = usePlayerStore((s) => s.openPlayer);
+  const setActiveWorkspace = useAriaStore((s) => s.setActiveWorkspace);
   const [audiobooks, setAudiobooks] = useState<AudiobookListItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [hoveredBook, setHoveredBook] = useState<string | null>(null);
@@ -58,7 +61,7 @@ export function LibraryView() {
         return;
       }
       const data = await res.json();
-      const chapters: DerivedChapter[] = data.chapters || [];
+      const chapters: PlayerChapter[] = data.chapters || [];
       if (chapters.length === 0) {
         toast({ title: "No readable text found", description: "This audiobook has no content" });
         return;
@@ -94,6 +97,15 @@ export function LibraryView() {
       <AmbientGlow color="#f59e0b" opacity={0.1} size={600} className="top-0 right-0" />
 
       <div className="relative z-10 max-w-7xl mx-auto px-5 sm:px-8 pt-10 sm:pt-14 pb-16">
+        {/* Back to chat — exits the audiobook workspace entirely */}
+        <button
+          onClick={() => setActiveWorkspace('chat')}
+          className="flex items-center gap-1.5 text-sm px-3 py-1.5 rounded-md hover:bg-white/5 transition-colors mb-6"
+          style={{ color: 'var(--aria-fg-muted)' }}
+        >
+          <ArrowLeft size={15} />
+          Back to chat
+        </button>
         <ScrollReveal>
           <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-4 mb-10">
             <div>
@@ -207,11 +219,18 @@ export function LibraryView() {
                       <p className="text-xs text-[var(--aria-fg-muted)] mt-0.5">
                         {book.author ? `by ${book.author}` : 'Author unknown'}
                       </p>
-                      {hasProgress && (
-                        <p className="text-[11px] mt-1 text-[var(--aria-accent-glow)]">
-                          Ch. {book.progressChapter + 1} · {formatDuration(book.progressCharOffset)}
-                        </p>
-                      )}
+                      <div className="flex items-center gap-2 mt-1">
+                        {hasProgress && (
+                          <p className="text-[11px] text-[var(--aria-accent-glow)]">
+                            Ch. {book.progressChapter + 1} · {formatDuration(book.progressCharOffset)}
+                          </p>
+                        )}
+                        {book.chapterCount > 0 && (
+                          <p className="text-[11px] text-[var(--aria-fg-dim)]">
+                            {book.narratedCount}/{book.chapterCount} narrated
+                          </p>
+                        )}
+                      </div>
                     </div>
                   </div>
                 </ScrollReveal>

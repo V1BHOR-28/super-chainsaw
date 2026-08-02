@@ -6,6 +6,8 @@ import { getAuthenticatedUserId } from '@/lib/user'
 import { generateEmbedding, embeddingToPgVector } from '@/lib/embeddings'
 import { hasHitUploadLimit, recordUpload } from '@/lib/usage'
 import { chunkText } from '@/lib/chunk-text'
+import { deriveChapters } from '@/lib/audiobook-chapters'
+import { cleanForNarration } from '@/lib/narration-clean'
 
 /**
  * GET /api/knowledge — list all knowledge entries.
@@ -391,12 +393,13 @@ export async function POST(req: NextRequest) {
     // === AUTO-CREATE AUDIOBOOK for book-length content ===
     // If the extracted text is long enough to be a real book (>8000 chars —
     // long enough to exclude short documents/articles uploaded for chat context),
-    // create a linked Audiobook row so it appears in the audiobook library.
+    // create a linked Audiobook row AND materialize its chapters as
+    // AudiobookChapter rows (each tracking its own TTS generation status).
     // This applies to PDFs, URLs, and pasted text alike — the user's intent
     // is "when I feed ARIA something book-length, make it an audiobook."
     if (content.length > 8000) {
       try {
-        await db.audiobook.create({
+        const audiobook = await db.audiobook.create({
           data: {
             userId,
             documentId,
@@ -404,7 +407,20 @@ export async function POST(req: NextRequest) {
             author: null, // no reliable author extraction from arbitrary uploads
           },
         })
-        console.log(`[knowledge.autoAudiobook] Created audiobook for "${title}" (${content.length} chars)`)
+        // Derive chapters from the full text and save them with narration-ready
+        // cleaned text. Audio is NOT generated here — that happens lazily, per
+        // chapter, on first play (see /api/audiobooks/[id]/chapters/[chapterId]/generate).
+        const derivedChapters = deriveChapters(content)
+        await db.audiobookChapter.createMany({
+          data: derivedChapters.map((ch) => ({
+            audiobookId: audiobook.id,
+            chapterIndex: ch.index,
+            title: ch.title,
+            cleanedText: cleanForNarration(ch.text),
+            status: 'pending',
+          })),
+        })
+        console.log(`[knowledge.autoAudiobook] Created audiobook for "${title}" (${content.length} chars, ${derivedChapters.length} chapters)`)
       } catch (e) {
         console.error('[knowledge.autoAudiobook]', e)
         // best-effort — the knowledge upload itself already succeeded, don't fail the request over this

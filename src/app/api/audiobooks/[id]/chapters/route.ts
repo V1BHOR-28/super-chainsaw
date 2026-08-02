@@ -2,13 +2,22 @@ import { NextRequest, NextResponse } from 'next/server'
 export const runtime = "nodejs"
 import { db } from '@/lib/db'
 import { getAuthenticatedUserId } from '@/lib/user'
-import { deriveChapters, type DerivedChapter } from '@/lib/audiobook-chapters'
+
+export interface ChapterRow {
+  id: string
+  chapterIndex: number
+  title: string
+  cleanedText: string
+  status: string // pending | generating | ready | failed
+  audioUrl: string | null
+  durationSeconds: number | null
+}
 
 /**
- * GET /api/audiobooks/[id]/chapters — fetch the linked Knowledge chunks for
- * that audiobook's documentId (ordered, concatenated), run them through
- * deriveChapters(), and return the chapter list including full text (needed
- * client-side to feed the speech synthesizer).
+ * GET /api/audiobooks/[id]/chapters — returns the materialized AudiobookChapter
+ * rows for this audiobook, ordered by chapterIndex. Each chapter carries its
+ * own TTS generation status and audio URL so the client knows whether to play
+ * a stored file or trigger generation.
  */
 export async function GET(
   _req: NextRequest,
@@ -34,20 +43,21 @@ export async function GET(
 
     if (!audiobook) return NextResponse.json({ error: 'Not found' }, { status: 404 })
 
-    // Fetch all Knowledge chunks for this documentId, ordered by title
-    // (which encodes "Part N/M" so they sort in the right order).
-    const chunks = await db.knowledge.findMany({
-      where: { userId, documentId: audiobook.documentId, source: { not: 'summary' } },
-      orderBy: { title: 'asc' },
-      select: { content: true, title: true },
+    const chapterRows = await db.audiobookChapter.findMany({
+      where: { audiobookId: id },
+      orderBy: { chapterIndex: 'asc' },
+      select: {
+        id: true,
+        chapterIndex: true,
+        title: true,
+        cleanedText: true,
+        status: true,
+        audioUrl: true,
+        durationSeconds: true,
+      },
     })
 
-    // Concatenate all chunks into the full text — chapters are derived from
-    // the complete document, not per-chunk, so chapter headings that span
-    // chunk boundaries are detected correctly.
-    const fullText = chunks.map(c => c.content).join('\n\n')
-
-    const chapters: DerivedChapter[] = deriveChapters(fullText)
+    const chapters: ChapterRow[] = chapterRows
 
     return NextResponse.json({
       audiobook,

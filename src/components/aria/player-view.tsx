@@ -9,6 +9,7 @@ import {
   Rewind,
   FastForward,
   ChevronLeft,
+  ArrowLeft,
   ListMusic,
   Bookmark,
   BookmarkCheck,
@@ -25,6 +26,7 @@ import {
 } from "lucide-react";
 import { useAudioEngine } from "@/hooks/use-audio-engine";
 import { usePlayerStore } from "@/lib/player-store";
+import { useAriaStore } from "@/lib/store";
 import { formatTime, formatDuration } from "@/lib/audiobooks";
 import { cn } from "@/lib/utils";
 import { AmbientGlow, StatusPill, AriaDivider } from "./primitives";
@@ -49,6 +51,8 @@ export function PlayerView() {
   const showBookmarks = usePlayerStore((s) => s.showBookmarks);
   const showSettings = usePlayerStore((s) => s.showSettings);
   const sleepTimerMinutes = usePlayerStore((s) => s.sleepTimerMinutes);
+  const narrating = usePlayerStore((s) => s.narrating);
+  const usingLiveNarration = usePlayerStore((s) => s.usingLiveNarration);
 
   const toggle = usePlayerStore((s) => s.toggle);
   const skip = usePlayerStore((s) => s.skip);
@@ -56,6 +60,7 @@ export function PlayerView() {
   const nextChapter = usePlayerStore((s) => s.nextChapter);
   const prevChapter = usePlayerStore((s) => s.prevChapter);
   const closePlayer = usePlayerStore((s) => s.closePlayer);
+  const setActiveWorkspace = useAriaStore((s) => s.setActiveWorkspace);
 
   if (!book) return null;
   const chapter = chapters[chapterIndex];
@@ -71,16 +76,40 @@ export function PlayerView() {
 
       {/* ============ Top bar ============ */}
       <header className="relative z-20 flex items-center justify-between px-4 sm:px-8 pt-6 pb-4">
-        <button
-          onClick={closePlayer}
-          className="flex items-center gap-2 text-sm text-[var(--aria-fg-muted)] hover:text-[var(--aria-accent-glow)] transition-colors group"
-        >
-          <ChevronLeft className="w-4 h-4 group-hover:-translate-x-0.5 transition-transform" />
-          <span className="hidden sm:inline">Back to library</span>
-          <span className="sm:hidden">Library</span>
-        </button>
+        <div className="flex items-center gap-3">
+          <button
+            onClick={closePlayer}
+            className="flex items-center gap-2 text-sm text-[var(--aria-fg-muted)] hover:text-[var(--aria-accent-glow)] transition-colors group"
+          >
+            <ChevronLeft className="w-4 h-4 group-hover:-translate-x-0.5 transition-transform" />
+            <span className="hidden sm:inline">Back to library</span>
+            <span className="sm:hidden">Library</span>
+          </button>
+          {/* Back to chat — secondary, exits the audiobook workspace entirely */}
+          <button
+            onClick={() => setActiveWorkspace('chat')}
+            className="flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-md hover:bg-white/5 transition-colors"
+            style={{ color: 'var(--aria-fg-dim)' }}
+            title="Exit to chat"
+          >
+            <ArrowLeft size={13} />
+            <span className="hidden sm:inline">Back to chat</span>
+          </button>
+        </div>
 
         <div className="flex items-center gap-2">
+          {narrating && (
+            <StatusPill className="!text-[10px]" >
+              <span className="status-dot" />
+              Narrating…
+            </StatusPill>
+          )}
+          {usingLiveNarration && (
+            <StatusPill className="!text-[10px]" >
+              <span className="status-dot" />
+              Live narration
+            </StatusPill>
+          )}
           <StatusPill className="!text-[10px]">
             <NowPlayingBars active={isPlaying} />
             {isPlaying ? "Now playing" : "Paused"}
@@ -144,7 +173,7 @@ export function PlayerView() {
             <div className="flex items-center gap-3 mt-3 justify-center lg:justify-start text-[11px] text-[var(--aria-fg-dim)]">
               <span className="flex items-center gap-1">
                 <Clock className="w-3 h-3" />
-                {formatDuration(chapter.estimatedSeconds)}
+                {formatDuration(chapter.durationSeconds ?? Math.round((chapter.cleanedText.split(/\s+/).length / 155) * 60))}
               </span>
               <span>{chapters.length} chapters</span>
             </div>
@@ -162,7 +191,7 @@ export function PlayerView() {
               {chapter.title}
             </h2>
             <p className="text-sm text-[var(--aria-fg-muted)] mt-2 leading-relaxed max-w-xl line-clamp-3">
-              {chapter.text.slice(0, 200)}{chapter.text.length > 200 ? '…' : ''}
+              {chapter.cleanedText.slice(0, 200)}{chapter.cleanedText.length > 200 ? '…' : ''}
             </p>
           </div>
 
@@ -639,7 +668,7 @@ function ChapterListPanel() {
 
   if (!book) return null;
 
-  const totalSeconds = chapters.reduce((sum, ch) => sum + ch.estimatedSeconds, 0);
+  const totalSeconds = chapters.reduce((sum, ch) => sum + (ch.durationSeconds ?? Math.round((ch.cleanedText.split(/\s+/).length / 155) * 60)), 0);
 
   return (
     <>
@@ -654,7 +683,7 @@ function ChapterListPanel() {
           const done = i < chapterIndex;
           return (
             <button
-              key={ch.index}
+              key={ch.chapterIndex}
               onClick={() => {
                 goToChapter(i);
                 toggle();
@@ -684,11 +713,30 @@ function ChapterListPanel() {
                     {ch.title}
                   </span>
                   {active && <NowPlayingBars active />}
+                  {/* Per-chapter generation status indicator */}
+                  {ch.status === 'pending' && (
+                    <span className="text-[9px] font-mono px-1.5 py-0.5 rounded-full bg-[var(--aria-card)] text-[var(--aria-fg-dim)] border border-[var(--aria-border)]" title="Audio not generated yet">
+                      pending
+                    </span>
+                  )}
+                  {ch.status === 'generating' && (
+                    <span className="text-[9px] font-mono px-1.5 py-0.5 rounded-full bg-[rgba(245,158,11,0.1)] text-[var(--aria-accent-glow)] border border-[rgba(245,158,11,0.2)]" title="Generating audio…">
+                      generating
+                    </span>
+                  )}
+                  {ch.status === 'ready' && (
+                    <span className="w-1.5 h-1.5 rounded-full bg-[var(--aria-accent)]" title="Audio ready" />
+                  )}
+                  {ch.status === 'failed' && (
+                    <span className="text-[9px] font-mono px-1.5 py-0.5 rounded-full bg-[rgba(239,68,68,0.1)] text-[#ef4444] border border-[rgba(239,68,68,0.2)]" title="Generation failed — using live narration">
+                      failed
+                    </span>
+                  )}
                 </div>
-                <p className="text-xs text-[var(--aria-fg-muted)] truncate mt-0.5">{ch.text.slice(0, 80)}{ch.text.length > 80 ? '…' : ''}</p>
+                <p className="text-xs text-[var(--aria-fg-muted)] truncate mt-0.5">{ch.cleanedText.slice(0, 80)}{ch.cleanedText.length > 80 ? '…' : ''}</p>
               </div>
               <span className="font-mono text-[10px] text-[var(--aria-fg-dim)] shrink-0">
-                {formatTime(ch.estimatedSeconds)}
+                {formatTime(ch.durationSeconds ?? Math.round((ch.cleanedText.split(/\s+/).length / 155) * 60))}
               </span>
             </button>
           );

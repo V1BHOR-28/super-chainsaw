@@ -24,10 +24,22 @@ export async function GET() {
         createdAt: true,
         progressChapter: true,
         progressCharOffset: true,
+        chapters: {
+          select: { status: true },
+        },
       },
     })
 
-    return NextResponse.json({ audiobooks })
+    // Compute narrated chapter counts for each audiobook
+    const audiobooksWithCounts = audiobooks.map(a => {
+      const total = a.chapters.length
+      const narrated = a.chapters.filter(c => c.status === 'ready').length
+      // Strip the full chapters array — just return counts
+      const { chapters: _chapters, ...rest } = a
+      return { ...rest, chapterCount: total, narratedCount: narrated }
+    })
+
+    return NextResponse.json({ audiobooks: audiobooksWithCounts })
   } catch (err) {
     console.error('[audiobooks.list]', err)
     return NextResponse.json({ error: 'Failed to load audiobooks' }, { status: 500 })
