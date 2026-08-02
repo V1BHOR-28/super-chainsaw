@@ -38,16 +38,22 @@ async function generateChapterAudio(cleanedText: string): Promise<{ audioBlob: B
   const audioBuffers: Blob[] = []
   let totalDurationHundredsOfNs = 0
 
-  for (const segment of segments) {
-    const tts = new EdgeTTS(segment, VOICE)
-    const result = await tts.synthesize()
-    audioBuffers.push(result.audio)
+  for (let i = 0; i < segments.length; i++) {
+    const segment = segments[i]
+    try {
+      const tts = new EdgeTTS(segment, VOICE)
+      const result = await tts.synthesize()
+      audioBuffers.push(result.audio)
 
-    // Accumulate real duration from word-boundary timing
-    if (result.subtitle && result.subtitle.length > 0) {
-      const lastWord = result.subtitle[result.subtitle.length - 1]
-      const segmentDuration = (lastWord.offset ?? 0) + (lastWord.duration ?? 0)
-      totalDurationHundredsOfNs += segmentDuration
+      // Accumulate real duration from word-boundary timing
+      if (result.subtitle && result.subtitle.length > 0) {
+        const lastWord = result.subtitle[result.subtitle.length - 1]
+        const segmentDuration = (lastWord.offset ?? 0) + (lastWord.duration ?? 0)
+        totalDurationHundredsOfNs += segmentDuration
+      }
+    } catch (ttsErr) {
+      console.error(`[audiobook.prep-batch] EdgeTTS failed for segment ${i + 1}/${segments.length}:`, ttsErr instanceof Error ? ttsErr.message : String(ttsErr))
+      throw new Error(`EdgeTTS synthesis failed: ${ttsErr instanceof Error ? ttsErr.message : String(ttsErr)}`)
     }
   }
 
@@ -57,6 +63,25 @@ async function generateChapterAudio(cleanedText: string): Promise<{ audioBlob: B
     : Math.round((cleanedText.split(/\s+/).length / 155) * 60) // fallback: word count estimate
 
   return { audioBlob, durationSeconds }
+}
+
+/** Upload audio to Vercel Blob. Falls back to a data URL if Blob isn't configured. */
+async function uploadChapterAudio(audiobookId: string, chapterOrder: number, audioBlob: Blob): Promise<string> {
+  // Check if Vercel Blob is configured
+  if (!process.env.BLOB_READ_WRITE_TOKEN) {
+    console.warn('[audiobook.prep-batch] BLOB_READ_WRITE_TOKEN not set — storing audio as data URL (not recommended for production)')
+    // Fall back to data URL — works but bloats the DB. Better than failing entirely.
+    const arrayBuffer = await audioBlob.arrayBuffer()
+    const base64 = Buffer.from(arrayBuffer).toString('base64')
+    return `data:audio/mpeg;base64,${base64}`
+  }
+
+  const blob = await put(
+    `audiobooks/${audiobookId}/chapter-${chapterOrder}.mp3`,
+    audioBlob,
+    { access: 'public', contentType: 'audio/mpeg' }
+  )
+  return blob.url
 }
 
 /**
@@ -122,13 +147,27 @@ export async function POST(
     let processed = 0
 
     // Find chapters that need work (either cleaning or TTS generation)
-    // Process up to BATCH_SIZE per call
+    // Process up to BATCH_SIZE per call. Skip chapters that have already
+    // failed (status === 'failed') so we don't get stuck retrying the same
+    // failed chapter on every poll while chapters 4-9 never get processed.
     for (const chapter of audiobook.chapters) {
       if (processed >= BATCH_SIZE) break
 
+      // Skip chapters that already failed — don't retry them in this pass
+      if (chapter.status === 'failed') continue
+
       try {
         // Step 1: Clean if not yet cleaned
-        if (!chapter.cleanedText) {
+        // Use a explicit check for empty string AND not-yet-cleaned status,
+        // rather than !chapter.cleanedText (which is truthy for empty string)
+        if (chapter.cleanedText === '' && chapter.status === 'pending') {
+          // If rawText is also empty, mark as failed and skip
+          if (!chapter.rawText || chapter.rawText.trim().length === 0) {
+            console.warn(`[audiobook.prep-batch] ${audiobook.id}: chapter ${chapter.chapterOrder + 1} has empty rawText, marking as failed`)
+            await db.audiobookChapter.update({ where: { id: chapter.id }, data: { status: 'failed' } })
+            continue
+          }
+
           console.log(`[audiobook.prep-batch] ${audiobook.id}: cleaning chapter ${chapter.chapterOrder + 1}/${total}`)
           const cleaned = await cleanChapterText(chapter.rawText)
           await db.audiobookChapter.update({
@@ -142,25 +181,22 @@ export async function POST(
           if (processed >= BATCH_SIZE) break
         }
 
-        // Step 2: Generate TTS audio if cleaned but not yet generated
-        if (chapter.cleanedText && !chapter.audioUrl && chapter.status !== 'generating') {
+        // Step 2: Generate TTS audio if cleaned but not yet generated.
+        // Skip chapters with status 'generating' (another request is working on them)
+        // and status 'failed' (already failed, don't retry).
+        if (chapter.cleanedText && !chapter.audioUrl && chapter.status !== 'generating' && chapter.status !== 'failed') {
           console.log(`[audiobook.prep-batch] ${audiobook.id}: generating TTS for chapter ${chapter.chapterOrder + 1}/${total}`)
           await db.audiobookChapter.update({ where: { id: chapter.id }, data: { status: 'generating' } })
 
           try {
             const { audioBlob, durationSeconds } = await generateChapterAudio(chapter.cleanedText)
-
-            const blob = await put(
-              `audiobooks/${audiobook.id}/chapter-${chapter.chapterOrder}.mp3`,
-              audioBlob,
-              { access: 'public', contentType: 'audio/mpeg' }
-            )
+            const audioUrl = await uploadChapterAudio(audiobook.id, chapter.chapterOrder, audioBlob)
 
             await db.audiobookChapter.update({
               where: { id: chapter.id },
               data: {
                 status: 'ready',
-                audioUrl: blob.url,
+                audioUrl,
                 durationSeconds,
               },
             })
@@ -168,7 +204,7 @@ export async function POST(
             console.log(`[audiobook.prep-batch] ${audiobook.id}: chapter ${chapter.chapterOrder + 1} ready (${durationSeconds}s)`)
             processed++
           } catch (genErr) {
-            console.error(`[audiobook.prep-batch] ${audiobook.id}: TTS failed for chapter ${chapter.chapterOrder + 1}:`, genErr)
+            console.error(`[audiobook.prep-batch] ${audiobook.id}: TTS/upload failed for chapter ${chapter.chapterOrder + 1}:`, genErr instanceof Error ? genErr.message : String(genErr))
             await db.audiobookChapter.update({ where: { id: chapter.id }, data: { status: 'failed' } })
             // Continue to next chapter — one failure shouldn't block the whole book
             processed++
