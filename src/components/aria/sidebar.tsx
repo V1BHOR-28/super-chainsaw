@@ -206,7 +206,10 @@ export function Sidebar() {
             Chat
           </button>
           <button
-            onClick={() => setActiveWorkspace('audiobooks')}
+            onClick={() => {
+              setActiveWorkspace('audiobooks')
+              setSidebarCollapsed(true)
+            }}
             className="flex-1 py-2.5 px-3 rounded-xl flex items-center justify-center gap-2 transition-all text-xs"
             style={{
               background: activeWorkspace === 'audiobooks' ? 'rgba(245,158,11,0.1)' : 'var(--aria-card)',

@@ -1,26 +1,93 @@
 "use client";
 
-import { useState } from "react";
-import { Play, Star, Clock } from "lucide-react";
+import { useState, useEffect, useCallback } from "react";
+import { Play, Trash2, BookOpen } from "lucide-react";
 import { AmbientGlow, GradientText } from "./primitives";
-import { NowPlayingBars } from "./waveform";
 import { ScrollReveal } from "./scroll-reveal";
 import { BookCover } from "./book-cover";
-import { usePlayerStore } from "@/lib/player-store";
-import { BOOKS, formatDuration } from "@/lib/audiobooks";
-import { cn } from "@/lib/utils";
+import { usePlayerStore, type CurrentAudiobook } from "@/lib/player-store";
+import { formatDuration } from "@/lib/audiobooks";
+import type { DerivedChapter } from "@/lib/audiobook-chapters";
+import { toast } from "@/hooks/use-toast";
+
+interface AudiobookListItem {
+  id: string;
+  title: string;
+  author: string | null;
+  accent: string;
+  documentId: string;
+  createdAt: string;
+  progressChapter: number;
+  progressCharOffset: number;
+}
 
 /**
- * LibraryView — the audiobook browsing grid, lifted out of the standalone
- * audiobook prototype's marketing landing page (which also had a hero,
- * marquee, features, and CTA section that we deliberately did NOT bring
- * over). This is just the book grid, now the root screen of the Audiobooks
- * workspace inside ARIA.
+ * LibraryView — fetches the user's real audiobooks from /api/audiobooks.
+ * Audiobooks are auto-created when book-length content is fed via Feed ARIA.
  */
 export function LibraryView() {
   const openPlayer = usePlayerStore((s) => s.openPlayer);
-  const progress = usePlayerStore((s) => s.progress);
+  const [audiobooks, setAudiobooks] = useState<AudiobookListItem[]>([]);
+  const [loading, setLoading] = useState(true);
   const [hoveredBook, setHoveredBook] = useState<string | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
+
+  const fetchAudiobooks = useCallback(async () => {
+    try {
+      const res = await fetch('/api/audiobooks');
+      if (!res.ok) return;
+      const data = await res.json();
+      setAudiobooks(data.audiobooks || []);
+    } catch {
+      // silent — empty state will show
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    fetchAudiobooks();
+  }, [fetchAudiobooks]);
+
+  const handleOpen = async (book: AudiobookListItem) => {
+    try {
+      // Fetch chapters for this audiobook before opening the player
+      const res = await fetch(`/api/audiobooks/${book.id}/chapters`);
+      if (!res.ok) {
+        toast({ title: "Could not load chapters", description: "Try again" });
+        return;
+      }
+      const data = await res.json();
+      const chapters: DerivedChapter[] = data.chapters || [];
+      if (chapters.length === 0) {
+        toast({ title: "No readable text found", description: "This audiobook has no content" });
+        return;
+      }
+      const current: CurrentAudiobook = {
+        id: book.id,
+        title: book.title,
+        author: book.author,
+        accent: book.accent,
+        documentId: book.documentId,
+      };
+      // Resume from saved progress if available
+      openPlayer(current, chapters, book.progressChapter || 0);
+    } catch {
+      toast({ title: "Could not open audiobook", description: "Try again" });
+    }
+  };
+
+  const handleDelete = async (id: string) => {
+    try {
+      const res = await fetch(`/api/audiobooks/${id}`, { method: 'DELETE' });
+      if (!res.ok) throw new Error('failed');
+      setAudiobooks(prev => prev.filter(b => b.id !== id));
+      toast({ title: "Audiobook removed" });
+    } catch {
+      toast({ title: "Could not delete", description: "Try again" });
+    }
+    setConfirmDelete(null);
+  };
 
   return (
     <div className="relative min-h-screen overflow-hidden">
@@ -41,96 +108,117 @@ export function LibraryView() {
               </h1>
             </div>
             <p className="text-sm text-[var(--aria-fg-muted)] max-w-xs">
-              Six carefully narrated books. Each one a complete world you can
-              carry in your ears.
+              Feed ARIA a book-length PDF, URL, or text and it appears here —
+              ready to be read aloud.
             </p>
           </div>
         </ScrollReveal>
 
-        <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-3 gap-5 sm:gap-7">
-          {BOOKS.map((book, i) => {
-            const p = progress[book.id];
-            const pct =
-              p && book.totalDuration > 0
-                ? Math.min(
-                    100,
-                    ((p.chapterIndex * 60 * 30 + p.time) / book.totalDuration) * 100
-                  )
-                : 0;
-            return (
-              <ScrollReveal key={book.id} delay={i * 80}>
-                <button
-                  onClick={() => openPlayer(book.id)}
-                  onMouseEnter={() => setHoveredBook(book.id)}
-                  onMouseLeave={() => setHoveredBook(null)}
-                  className="group text-left w-full"
-                >
-                  <div className="book-cover aspect-[3/5] relative">
-                    <BookCover
-                      book={book}
-                      className="absolute inset-0"
-                      imgClassName="w-full h-full object-cover"
-                    />
-                    {/* gradient overlay */}
-                    <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/10 to-transparent" />
+        {loading ? (
+          <div className="text-center py-20" style={{ color: 'var(--aria-fg-dim)' }}>
+            <p className="text-sm">Loading your library…</p>
+          </div>
+        ) : audiobooks.length === 0 ? (
+          <div className="text-center py-20">
+            <BookOpen size={40} strokeWidth={1} className="mx-auto mb-4 opacity-30" style={{ color: 'var(--aria-fg-dim)' }} />
+            <p className="text-sm" style={{ color: 'var(--aria-fg-muted)' }}>
+              No audiobooks yet.
+            </p>
+            <p className="text-xs mt-2" style={{ color: 'var(--aria-fg-dim)' }}>
+              Feed ARIA a book (PDF, URL, or pasted text) from the Feed menu —
+              anything long enough becomes an audiobook automatically.
+            </p>
+          </div>
+        ) : (
+          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-3 gap-5 sm:gap-7">
+            {audiobooks.map((book, i) => {
+              const hasProgress = book.progressChapter > 0 || book.progressCharOffset > 0;
+              return (
+                <ScrollReveal key={book.id} delay={i * 80}>
+                  <div
+                    className="group text-left w-full relative"
+                    onMouseEnter={() => setHoveredBook(book.id)}
+                    onMouseLeave={() => setHoveredBook(null)}
+                  >
+                    <div className="book-cover aspect-[3/5] relative cursor-pointer" onClick={() => handleOpen(book)}>
+                      <BookCover
+                        title={book.title}
+                        accent={book.accent}
+                        className="absolute inset-0"
+                      />
+                      {/* gradient overlay */}
+                      <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/10 to-transparent" />
 
-                    {/* play button on hover */}
-                    <div
-                      className={cn(
-                        "absolute inset-0 flex items-center justify-center transition-all duration-500",
-                        hoveredBook === book.id
-                          ? "opacity-100 backdrop-blur-[2px] bg-black/30"
-                          : "opacity-0"
+                      {/* play button on hover */}
+                      <div
+                        className={`absolute inset-0 flex items-center justify-center transition-all duration-500 ${
+                          hoveredBook === book.id
+                            ? "opacity-100 backdrop-blur-[2px] bg-black/30"
+                            : "opacity-0"
+                        }`}
+                      >
+                        <span className="w-14 h-14 rounded-full bg-[var(--aria-fg)] text-[var(--aria-bg)] flex items-center justify-center shadow-[0_0_30px_rgba(245,158,11,0.5)] group-hover:scale-110 transition-transform duration-500">
+                          <Play className="w-5 h-5 fill-current ml-0.5" />
+                        </span>
+                      </div>
+
+                      {/* now playing / progress badge */}
+                      {hasProgress && (
+                        <div className="absolute top-3 right-3 status-pill !py-1 !px-2.5 !text-[9px]">
+                          <span className="status-dot" />
+                          In progress
+                        </div>
                       )}
-                    >
-                      <span className="w-14 h-14 rounded-full bg-[var(--aria-fg)] text-[var(--aria-bg)] flex items-center justify-center shadow-[0_0_30px_rgba(245,158,11,0.5)] group-hover:scale-110 transition-transform duration-500">
-                        <Play className="w-5 h-5 fill-current ml-0.5" />
-                      </span>
+
+                      {/* delete button (top-left, hover only) */}
+                      {confirmDelete === book.id ? (
+                        <div className="absolute top-3 left-3 flex items-center gap-1">
+                          <button
+                            onClick={(e) => { e.stopPropagation(); handleDelete(book.id); }}
+                            className="px-2 py-1 rounded-lg text-[10px] font-medium bg-[rgba(239,68,68,0.2)] border border-[rgba(239,68,68,0.4)] text-[#ef4444]"
+                          >
+                            Delete
+                          </button>
+                          <button
+                            onClick={(e) => { e.stopPropagation(); setConfirmDelete(null); }}
+                            className="px-2 py-1 rounded-lg text-[10px] font-medium bg-[var(--aria-card)] border border-[var(--aria-border)] text-[var(--aria-fg-muted)]"
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                      ) : (
+                        <button
+                          onClick={(e) => { e.stopPropagation(); setConfirmDelete(book.id); }}
+                          className={`absolute top-3 left-3 w-8 h-8 rounded-full flex items-center justify-center transition-all ${
+                            hoveredBook === book.id ? "opacity-100" : "opacity-0"
+                          } bg-black/50 text-[var(--aria-fg-muted)] hover:text-[#ef4444]`}
+                          title="Delete audiobook"
+                          aria-label="Delete audiobook"
+                        >
+                          <Trash2 size={14} />
+                        </button>
+                      )}
                     </div>
 
-                    {/* progress bar */}
-                    {pct > 0 && (
-                      <div className="absolute bottom-0 left-0 right-0 h-1 bg-black/40">
-                        <div
-                          className="h-full bg-gradient-to-r from-[#f59e0b] to-[#fcd34d]"
-                          style={{ width: `${pct}%` }}
-                        />
-                      </div>
-                    )}
-
-                    {/* now playing badge */}
-                    {p && pct > 0 && pct < 100 && (
-                      <div className="absolute top-3 right-3 status-pill !py-1 !px-2.5 !text-[9px]">
-                        <NowPlayingBars active />
-                        {Math.round(pct)}%
-                      </div>
-                    )}
-                  </div>
-
-                  <div className="mt-3.5">
-                    <h3 className="font-serif text-lg leading-snug text-[var(--aria-fg)] group-hover:text-[var(--aria-accent-glow)] transition-colors">
-                      {book.title}
-                    </h3>
-                    <p className="text-xs text-[var(--aria-fg-muted)] mt-0.5">
-                      {book.author} · narrated by {book.narrator}
-                    </p>
-                    <div className="flex items-center gap-3 mt-2 text-[11px] text-[var(--aria-fg-dim)]">
-                      <span className="flex items-center gap-1">
-                        <Star className="w-3 h-3 fill-[var(--aria-accent)] text-[var(--aria-accent)]" />
-                        {book.rating}
-                      </span>
-                      <span className="flex items-center gap-1">
-                        <Clock className="w-3 h-3" />
-                        {formatDuration(book.totalDuration)}
-                      </span>
-                      <span>{book.chapters.length} ch.</span>
+                    <div className="mt-3.5">
+                      <h3 className="font-serif text-lg leading-snug text-[var(--aria-fg)] group-hover:text-[var(--aria-accent-glow)] transition-colors">
+                        {book.title}
+                      </h3>
+                      <p className="text-xs text-[var(--aria-fg-muted)] mt-0.5">
+                        {book.author ? `by ${book.author}` : 'Author unknown'}
+                      </p>
+                      {hasProgress && (
+                        <p className="text-[11px] mt-1 text-[var(--aria-accent-glow)]">
+                          Ch. {book.progressChapter + 1} · {formatDuration(book.progressCharOffset)}
+                        </p>
+                      )}
                     </div>
                   </div>
-                </button>
-              </ScrollReveal>
-            );
-          })}
-        </div>
+                </ScrollReveal>
+              );
+            })}
+          </div>
+        )}
       </div>
     </div>
   );

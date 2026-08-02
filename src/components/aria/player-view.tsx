@@ -21,15 +21,13 @@ import {
   Plus,
   Trash2,
   Clock,
-  Star,
   CheckCircle2,
-  Headphones,
 } from "lucide-react";
 import { useAudioEngine } from "@/hooks/use-audio-engine";
 import { usePlayerStore } from "@/lib/player-store";
-import { BOOKS, formatTime, formatDuration } from "@/lib/audiobooks";
+import { formatTime, formatDuration } from "@/lib/audiobooks";
 import { cn } from "@/lib/utils";
-import { AmbientGlow, GradientText, StatusPill, AriaDivider } from "./primitives";
+import { AmbientGlow, StatusPill, AriaDivider } from "./primitives";
 import { DecorativeWaveform, NowPlayingBars } from "./waveform";
 import { BookCover } from "./book-cover";
 import { toast } from "@/hooks/use-toast";
@@ -38,7 +36,8 @@ export function PlayerView() {
   // drive the audio engine
   useAudioEngine();
 
-  const book = usePlayerStore((s) => (s.currentBookId ? BOOKS.find((b) => b.id === s.currentBookId) : undefined));
+  const book = usePlayerStore((s) => s.currentAudiobook);
+  const chapters = usePlayerStore((s) => s.chapters);
   const chapterIndex = usePlayerStore((s) => s.chapterIndex);
   const isPlaying = usePlayerStore((s) => s.isPlaying);
   const currentTime = usePlayerStore((s) => s.currentTime);
@@ -59,7 +58,7 @@ export function PlayerView() {
   const closePlayer = usePlayerStore((s) => s.closePlayer);
 
   if (!book) return null;
-  const chapter = book.chapters[chapterIndex];
+  const chapter = chapters[chapterIndex];
   if (!chapter) return null;
 
   const progressPct = duration > 0 ? (currentTime / duration) * 100 : 0;
@@ -107,9 +106,9 @@ export function PlayerView() {
               )}
             >
               <BookCover
-                book={book}
+                title={book.title}
+                accent={book.accent}
                 className="absolute inset-0"
-                imgClassName="w-full h-full object-cover"
               />
               <div className="absolute inset-0 bg-gradient-to-t from-black/60 via-transparent to-transparent" />
 
@@ -136,33 +135,18 @@ export function PlayerView() {
 
           {/* Book meta */}
           <div className="text-center lg:text-left w-full">
-            <div className="flex items-center justify-center lg:justify-start gap-2 mb-2">
-              {book.genres.map((g) => (
-                <span key={g} className="font-mono text-[10px] uppercase tracking-[0.12em] text-[var(--aria-fg-dim)]">
-                  {g}
-                </span>
-              ))}
-            </div>
             <h1 className="font-serif text-2xl sm:text-3xl leading-tight text-[var(--aria-fg)]">
               {book.title}
             </h1>
             <p className="text-sm text-[var(--aria-fg-muted)] mt-1">
-              by <span className="text-[var(--aria-fg)]">{book.author}</span>
-            </p>
-            <p className="text-xs text-[var(--aria-fg-dim)] mt-1 flex items-center gap-1.5 justify-center lg:justify-start">
-              <Headphones className="w-3.5 h-3.5" />
-              Narrated by {book.narrator}
+              {book.author ? <>by <span className="text-[var(--aria-fg)]">{book.author}</span></> : <span className="italic">Author unknown</span>}
             </p>
             <div className="flex items-center gap-3 mt-3 justify-center lg:justify-start text-[11px] text-[var(--aria-fg-dim)]">
               <span className="flex items-center gap-1">
-                <Star className="w-3 h-3 fill-[var(--aria-accent)] text-[var(--aria-accent)]" />
-                {book.rating}
-              </span>
-              <span className="flex items-center gap-1">
                 <Clock className="w-3 h-3" />
-                {formatDuration(book.totalDuration)}
+                {formatDuration(chapter.estimatedSeconds)}
               </span>
-              <span>{book.chapters.length} chapters</span>
+              <span>{chapters.length} chapters</span>
             </div>
           </div>
         </div>
@@ -172,13 +156,13 @@ export function PlayerView() {
           {/* Chapter info */}
           <div>
             <div className="font-mono text-[11px] tracking-[0.2em] uppercase text-[var(--aria-accent-glow)] mb-1.5">
-              Chapter {chapterIndex + 1} of {book.chapters.length}
+              Chapter {chapterIndex + 1} of {chapters.length}
             </div>
             <h2 className="font-serif text-3xl sm:text-4xl leading-tight">
               {chapter.title}
             </h2>
-            <p className="text-sm text-[var(--aria-fg-muted)] mt-2 leading-relaxed max-w-xl">
-              {chapter.summary}
+            <p className="text-sm text-[var(--aria-fg-muted)] mt-2 leading-relaxed max-w-xl line-clamp-3">
+              {chapter.text.slice(0, 200)}{chapter.text.length > 200 ? '…' : ''}
             </p>
           </div>
 
@@ -648,28 +632,29 @@ function PanelHeader({
 
 function ChapterListPanel() {
   const toggle = usePlayerStore((s) => s.toggleChapterList);
-  const book = usePlayerStore((s) => (s.currentBookId ? BOOKS.find((b) => b.id === s.currentBookId) : undefined));
+  const book = usePlayerStore((s) => s.currentAudiobook);
+  const chapters = usePlayerStore((s) => s.chapters);
   const chapterIndex = usePlayerStore((s) => s.chapterIndex);
   const goToChapter = usePlayerStore((s) => s.goToChapter);
-  const progress = usePlayerStore((s) => s.progress);
-  const completed = book ? progress[book.id]?.completedChapters ?? [] : [];
 
   if (!book) return null;
+
+  const totalSeconds = chapters.reduce((sum, ch) => sum + ch.estimatedSeconds, 0);
 
   return (
     <>
       <PanelHeader
         title="Chapters"
-        subtitle={`${book.chapters.length} chapters · ${formatDuration(book.totalDuration)}`}
+        subtitle={`${chapters.length} chapters · ${formatDuration(totalSeconds)}`}
         onClose={toggle}
       />
       <div className="flex-1 overflow-y-auto px-3 py-3">
-        {book.chapters.map((ch, i) => {
+        {chapters.map((ch, i) => {
           const active = i === chapterIndex;
-          const done = completed.includes(ch.id);
+          const done = i < chapterIndex;
           return (
             <button
-              key={ch.id}
+              key={ch.index}
               onClick={() => {
                 goToChapter(i);
                 toggle();
@@ -700,10 +685,10 @@ function ChapterListPanel() {
                   </span>
                   {active && <NowPlayingBars active />}
                 </div>
-                <p className="text-xs text-[var(--aria-fg-muted)] truncate mt-0.5">{ch.summary}</p>
+                <p className="text-xs text-[var(--aria-fg-muted)] truncate mt-0.5">{ch.text.slice(0, 80)}{ch.text.length > 80 ? '…' : ''}</p>
               </div>
               <span className="font-mono text-[10px] text-[var(--aria-fg-dim)] shrink-0">
-                {formatTime(ch.duration)}
+                {formatTime(ch.estimatedSeconds)}
               </span>
             </button>
           );
@@ -719,9 +704,10 @@ function BookmarksPanel() {
   const removeBookmark = usePlayerStore((s) => s.removeBookmark);
   const jumpToBookmark = usePlayerStore((s) => s.jumpToBookmark);
   const addBookmark = usePlayerStore((s) => s.addBookmark);
-  const currentBookId = usePlayerStore((s) => s.currentBookId);
+  const currentAudiobook = usePlayerStore((s) => s.currentAudiobook);
+  const chapters = usePlayerStore((s) => s.chapters);
 
-  const bookMarks = bookmarks.filter((b) => b.bookId === currentBookId);
+  const bookMarks = bookmarks.filter((b) => b.bookId === currentAudiobook?.id);
   const allMarks = bookmarks;
 
   return (
@@ -756,8 +742,7 @@ function BookmarksPanel() {
           </div>
         ) : (
           bookMarks.map((b) => {
-            const book = BOOKS.find((bk) => bk.id === b.bookId);
-            const ch = book?.chapters[b.chapterIndex];
+            const ch = chapters[b.chapterIndex];
             return (
               <div
                 key={b.id}

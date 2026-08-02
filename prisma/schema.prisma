@@ -40,6 +40,7 @@ model User {
   usage           Usage[]
   dailyDigests    DailyDigest[]
   quotes          Quote[]
+  audiobooks      Audiobook[]
 }
 
 model Conversation {
@@ -216,6 +217,25 @@ model Quote {
   author    String?
   note      String?
   createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, createdAt])
+}
+
+// Audiobooks — auto-created when a user feeds ARIA book-length content.
+// Links to Knowledge.documentId (the source text). Chapters are derived
+// at request time from the real Knowledge text, not stored separately.
+model Audiobook {
+  id                 String   @id @default(cuid())
+  userId             String
+  documentId         String   // links to Knowledge.documentId — the source text
+  title              String
+  author             String?
+  accent             String   @default("#f59e0b")
+  createdAt          DateTime @default(now())
+  progressChapter    Int      @default(0)
+  progressCharOffset Int      @default(0) // resume position within the chapter's text
 
   user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 

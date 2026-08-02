@@ -452,7 +452,14 @@ export async function POST(req: NextRequest) {
       ? `\n\n--- SAVED QUOTES ---\n${recentQuotes.map(q => `"${q.text}"${q.bookTitle ? ` — ${q.bookTitle}${q.author ? ` by ${q.author}` : ''}` : ''}`).join('\n')}`
       : ''
 
-    const fullToolContext = [toolContext, knowledgeContext, quoteContext].filter(Boolean).join('\n\n')
+    // Pull the user's audiobook library so ARIA knows what books they've fed her
+    // and can answer "what audiobooks do I have?" from real data, not hallucination.
+    const audiobooks = await db.audiobook.findMany({ where: { userId }, select: { title: true, author: true }, orderBy: { createdAt: 'desc' }, take: 15 }).catch(() => [])
+    const audiobookContext = audiobooks.length
+      ? `\n\n--- USER'S AUDIOBOOK LIBRARY ---\n${audiobooks.map(a => `"${a.title}"${a.author ? ` by ${a.author}` : ''}`).join('\n')}`
+      : ''
+
+    const fullToolContext = [toolContext, knowledgeContext, quoteContext, audiobookContext].filter(Boolean).join('\n\n')
 
     // === DEEP THINKING DETECTION ===
     // Moved here (before buildAriaSystemPrompt) so the signal can reach the

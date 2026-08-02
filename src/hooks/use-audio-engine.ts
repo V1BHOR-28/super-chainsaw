@@ -2,29 +2,38 @@
 
 import { useEffect, useRef } from "react";
 import { usePlayerStore } from "@/lib/player-store";
-import { BOOKS } from "@/lib/audiobooks";
 
 /**
- * Audio engine — drives playback for the player view.
+ * Audio engine — drives real playback via the Web Speech API.
  *
  * Strategy:
- *  - A simulated clock (requestAnimationFrame) advances `currentTime` for
- *    EVERY chapter so the progress bar / chapter durations are always
- *    consistent and every chapter is "listenable" (we don't have real audio
- *    for all 40+ chapters).
- *  - For chapters that DO have a real narration file (book 1 ch.1), a hidden
- *    <audio> element plays the narration in a loop underneath, as atmospheric
- *    accompaniment. The simulation remains the single source of truth for the
- *    timeline so seeking / skipping / chapter duration all stay coherent.
- *  - Syncs play/pause, rate, volume, sleep timer, chapter-end, and Media
- *    Session API into/out of the store.
+ *  - Each chapter's text is split into paragraph-sized utterances (~1000-1500
+ *    chars) and queued sequentially via utterance.onend triggering the next.
+ *  - A virtual elapsed-time clock (requestAnimationFrame) advances
+ *    `currentTime` based on `estimatedSeconds` from deriveChapters(), gated
+ *    on `speechSynthesis.speaking` being true so the progress bar doesn't
+ *    drift far from what's actually being read.
+ *  - isPlaying → resume() if paused mid-utterance, or start the queue if stopped;
+ *    pause → speechSynthesis.pause(). Chrome has a known bug where pause/resume
+ *    can behave inconsistently after ~15s — as a fallback, cancel() + re-queue
+ *    from the last known paragraph.
+ *  - Progress is persisted via PATCH /api/audiobooks/[id] every few seconds
+ *    so it survives across devices/sessions.
  */
 export function useAudioEngine() {
-  const audioRef = useRef<HTMLAudioElement | null>(null);
   const rafRef = useRef<number | null>(null);
   const lastTickRef = useRef<number>(0);
 
-  const currentBookId = usePlayerStore((s) => s.currentBookId);
+  // Track which paragraph utterance we're on within the current chapter,
+  // and the char offset where the current paragraph starts (for progress saving).
+  const paragraphIndexRef = useRef<number>(0);
+  const paragraphStartOffsetRef = useRef<number>(0);
+
+  // The full list of paragraph utterances for the current chapter.
+  const paragraphsRef = useRef<string[]>([]);
+
+  const currentAudiobook = usePlayerStore((s) => s.currentAudiobook);
+  const chapters = usePlayerStore((s) => s.chapters);
   const chapterIndex = usePlayerStore((s) => s.chapterIndex);
   const isPlaying = usePlayerStore((s) => s.isPlaying);
   const playbackRate = usePlayerStore((s) => s.playbackRate);
@@ -37,139 +46,258 @@ export function useAudioEngine() {
   const pause = usePlayerStore((s) => s.pause);
   const nextChapter = usePlayerStore((s) => s.nextChapter);
 
-  // create audio element once (for narration ambience)
-  useEffect(() => {
-    const a = new Audio();
-    a.preload = "metadata";
-    a.loop = true;
-    audioRef.current = a;
-    return () => {
-      a.pause();
-      a.src = "";
-    };
-  }, []);
+  /** Split chapter text into paragraph-sized chunks for speech synthesis.
+   *  Caps each utterance around 1200 chars to stay within browser limits. */
+  function splitIntoParagraphs(text: string): string[] {
+    const rawParas = text.split(/\n\s*\n/).map(p => p.trim()).filter(Boolean);
+    const result: string[] = [];
+    for (const para of rawParas) {
+      if (para.length <= 1200) {
+        result.push(para);
+      } else {
+        // Further split long paragraphs at sentence boundaries
+        const sentences = para.match(/[^.!?]+[.!?]+\s*/g) || [para];
+        let current = "";
+        for (const sentence of sentences) {
+          if ((current + sentence).length > 1200 && current.length > 0) {
+            result.push(current.trim());
+            current = sentence;
+          } else {
+            current += sentence;
+          }
+        }
+        if (current.trim().length > 0) result.push(current.trim());
+      }
+    }
+    return result.length > 0 ? result : [text.slice(0, 1200)];
+  }
 
-  // when book/chapter changes: set duration + load narration if available
-  useEffect(() => {
-    if (!currentBookId) return;
-    const book = BOOKS.find((b) => b.id === currentBookId);
-    if (!book) return;
-    const chapter = book.chapters[chapterIndex];
+  /** Strip markdown/whitespace artifacts that don't read well in TTS. */
+  function cleanForSpeech(text: string): string {
+    return text
+      .replace(/```[\s\S]*?```/g, ' (code block) ')
+      .replace(/`([^`]+)`/g, '$1')
+      .replace(/!\[[^\]]*\]\([^)]*\)/g, '')
+      .replace(/\[([^\]]+)\]\([^)]*\)/g, '$1')
+      .replace(/[#*_>~]/g, '')
+      .replace(/\s+/g, ' ')
+      .trim();
+  }
+
+  /** Pick a preferred voice — same approach as message-bubble.tsx's speak(). */
+  function getPreferredVoice(): SpeechSynthesisVoice | undefined {
+    if (typeof window === "undefined" || !window.speechSynthesis) return undefined;
+    const voices = window.speechSynthesis.getVoices();
+    return voices.find(v =>
+      v.name.includes('Female') || v.name.includes('Samantha') || v.name.includes('Google US English')
+    ) || voices.find(v => v.lang.startsWith('en'));
+  }
+
+  /** Speak the next paragraph in the queue. Called recursively via onend. */
+  function speakNextParagraph() {
+    if (typeof window === "undefined" || !window.speechSynthesis) return;
+    const paras = paragraphsRef.current;
+    const idx = paragraphIndexRef.current;
+
+    if (idx >= paras.length) {
+      // Chapter finished — advance to next chapter
+      const state = usePlayerStore.getState();
+      if (state.chapterIndex < state.chapters.length - 1) {
+        state.nextChapter();
+        // The chapter-change effect below will pick up the new chapter and
+        // start speaking if isPlaying is still true.
+        setTimeout(() => {
+          if (usePlayerStore.getState().isPlaying) {
+            startChapterPlayback();
+          }
+        }, 50);
+      } else {
+        // Finished the whole book
+        state.pause();
+      }
+      return;
+    }
+
+    const text = cleanForSpeech(paras[idx]);
+    if (!text) {
+      // Skip empty paragraphs
+      paragraphIndexRef.current++;
+      speakNextParagraph();
+      return;
+    }
+
+    const utterance = new SpeechSynthesisUtterance(text);
+    utterance.rate = usePlayerStore.getState().playbackRate;
+    utterance.pitch = 1.0;
+    utterance.volume = usePlayerStore.getState().muted ? 0 : usePlayerStore.getState().volume;
+
+    const voice = getPreferredVoice();
+    if (voice) utterance.voice = voice;
+
+    utterance.onend = () => {
+      // Advance to the next paragraph
+      paragraphStartOffsetRef.current += paras[idx].length;
+      paragraphIndexRef.current++;
+      // Only continue if still playing
+      if (usePlayerStore.getState().isPlaying) {
+        speakNextParagraph();
+      }
+    };
+
+    utterance.onerror = () => {
+      // On error, pause playback
+      usePlayerStore.getState().pause();
+    };
+
+    window.speechSynthesis.speak(utterance);
+  }
+
+  /** Start playback of the current chapter from the beginning (or from a
+   *  saved paragraph index if resuming). */
+  function startChapterPlayback() {
+    if (typeof window === "undefined" || !window.speechSynthesis) return;
+    const state = usePlayerStore.getState();
+    const chapter = state.chapters[state.chapterIndex];
     if (!chapter) return;
 
-    setDuration(chapter.duration);
+    // Cancel any in-flight speech
+    window.speechSynthesis.cancel();
 
-    const a = audioRef.current;
-    if (book.sampleAudio && chapterIndex === 0 && a) {
-      a.src = book.sampleAudio;
-      a.load();
-      if (isPlaying) {
-        a.play().catch(() => {});
-      }
-    } else if (a) {
-      a.pause();
-      a.removeAttribute("src");
-      a.load();
-    }
-  }, [currentBookId, chapterIndex]);
+    // Split chapter into paragraphs
+    paragraphsRef.current = splitIntoParagraphs(chapter.text);
+    paragraphIndexRef.current = 0;
+    paragraphStartOffsetRef.current = 0;
 
-  // play / pause the narration ambience
+    // Small delay to let cancel() settle
+    setTimeout(() => {
+      speakNextParagraph();
+    }, 100);
+  }
+
+  // When chapter changes: update duration
   useEffect(() => {
-    const a = audioRef.current;
-    if (!a || !currentBookId) return;
-    const book = BOOKS.find((b) => b.id === currentBookId);
-    const hasNarration = book?.sampleAudio && chapterIndex === 0;
-    if (!hasNarration) return;
+    if (!currentAudiobook) return;
+    const chapter = chapters[chapterIndex];
+    if (!chapter) return;
+    setDuration(chapter.estimatedSeconds);
+    // Reset paragraph tracking for the new chapter
+    paragraphIndexRef.current = 0;
+    paragraphStartOffsetRef.current = 0;
+    paragraphsRef.current = [];
+  }, [currentAudiobook, chapterIndex, chapters, setDuration]);
+
+  // Play / pause control
+  useEffect(() => {
+    if (typeof window === "undefined" || !window.speechSynthesis || !currentAudiobook) return;
+
     if (isPlaying) {
-      a.play().catch(() => pause());
+      // If speechSynthesis is paused, resume it
+      if (window.speechSynthesis.paused) {
+        window.speechSynthesis.resume();
+      } else if (!window.speechSynthesis.speaking) {
+        // Not speaking and not paused — start fresh
+        startChapterPlayback();
+      }
+      // If already speaking and not paused, nothing to do (it's already going)
     } else {
-      a.pause();
+      // Pause
+      if (window.speechSynthesis.speaking && !window.speechSynthesis.paused) {
+        window.speechSynthesis.pause();
+      }
     }
-  }, [isPlaying, currentBookId, chapterIndex]);
+  }, [isPlaying, currentAudiobook, chapterIndex]);
 
-  // playbackRate → audio element
+  // When playbackRate changes: can't change live for in-flight utterances,
+  // but the next paragraph queued will pick up the new rate. If not currently
+  // speaking, no action needed.
   useEffect(() => {
-    const a = audioRef.current;
-    if (a) a.playbackRate = playbackRate;
+    // No-op — rate is read fresh in speakNextParagraph() for each new utterance.
+    // Mid-utterance rate changes aren't supported by the Web Speech API.
   }, [playbackRate]);
 
-  // volume / muted → audio element
+  // volume / muted — applied to the next queued utterance
   useEffect(() => {
-    const a = audioRef.current;
-    if (a) {
-      a.volume = muted ? 0 : volume;
-      a.muted = muted;
-    }
+    // No-op — volume is read fresh in speakNextParagraph() for each new utterance.
   }, [volume, muted]);
 
-  // simulated clock — the single source of truth for currentTime
+  // Virtual elapsed-time clock — gated on speechSynthesis.speaking so the
+  // progress bar tracks real playback, not a free-running timer.
   useEffect(() => {
-    if (!currentBookId || !isPlaying) {
+    if (!currentAudiobook || !isPlaying) {
       if (rafRef.current) cancelAnimationFrame(rafRef.current);
       return;
     }
-    const book = BOOKS.find((b) => b.id === currentBookId);
-    if (!book) return;
 
     lastTickRef.current = performance.now();
     const tick = (now: number) => {
       const dt = (now - lastTickRef.current) / 1000;
       lastTickRef.current = now;
-      const state = usePlayerStore.getState();
-      const ch = book.chapters[state.chapterIndex];
-      if (!ch) return;
-      const newTime = state.currentTime + dt * state.playbackRate;
-      if (newTime >= ch.duration) {
-        setCurrentTime(ch.duration);
-        nextChapter();
-        return;
+
+      // Only advance the clock if speech synthesis is actually speaking
+      // (not paused, not idle). This prevents drift when the browser
+      // throttles or pauses speech.
+      if (typeof window !== "undefined" && window.speechSynthesis && window.speechSynthesis.speaking && !window.speechSynthesis.paused) {
+        const state = usePlayerStore.getState();
+        const ch = state.chapters[state.chapterIndex];
+        if (ch) {
+          const newTime = state.currentTime + dt * state.playbackRate;
+          if (newTime >= ch.estimatedSeconds) {
+            setCurrentTime(ch.estimatedSeconds);
+            // Chapter end is handled by the speech synthesis onend chain
+          } else {
+            setCurrentTime(newTime);
+          }
+        }
       }
-      setCurrentTime(newTime);
       rafRef.current = requestAnimationFrame(tick);
     };
     rafRef.current = requestAnimationFrame(tick);
     return () => {
       if (rafRef.current) cancelAnimationFrame(rafRef.current);
     };
-  }, [isPlaying, currentBookId, playbackRate, setCurrentTime, nextChapter]);
+  }, [isPlaying, currentAudiobook, playbackRate, setCurrentTime]);
 
-  // persist progress periodically
+  // Persist progress to server periodically (every 5 seconds while playing)
   useEffect(() => {
-    if (!currentBookId) return;
-    const persist = () => {
+    if (!currentAudiobook) return;
+    const persist = async () => {
       const s = usePlayerStore.getState();
-      const book = BOOKS.find((b) => b.id === currentBookId);
-      if (!book) return;
-      const ch = book.chapters[s.chapterIndex];
-      if (!ch) return;
-      const prevProg = s.progress[currentBookId];
-      const completed =
-        s.currentTime >= ch.duration - 1
-          ? Array.from(new Set([...(prevProg?.completedChapters ?? []), ch.id]))
-          : prevProg?.completedChapters ?? [];
-      usePlayerStore.setState((state) => ({
-        progress: {
-          ...state.progress,
-          [currentBookId]: {
-            bookId: currentBookId,
-            chapterIndex: s.chapterIndex,
-            time: s.currentTime,
-            completedChapters: completed,
-            lastListenedAt: Date.now(),
-          },
-        },
-      }));
+      if (!s.currentAudiobook) return;
+      try {
+        await fetch(`/api/audiobooks/${s.currentAudiobook.id}`, {
+          method: 'PATCH',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            progressChapter: s.chapterIndex,
+            progressCharOffset: Math.floor(s.currentTime),
+          }),
+        });
+      } catch {
+        // best-effort — don't fail playback over progress save errors
+      }
     };
-    const id = setInterval(persist, 4000);
+    const id = setInterval(persist, 5000);
     return () => clearInterval(id);
-  }, [currentBookId]);
+  }, [currentAudiobook]);
 
-  // sleep timer watcher
+  // Save progress on unmount / view change
+  useEffect(() => {
+    return () => {
+      if (typeof window !== "undefined" && window.speechSynthesis) {
+        window.speechSynthesis.cancel();
+      }
+    };
+  }, []);
+
+  // Sleep timer watcher
   useEffect(() => {
     if (!sleepTimerEndsAt) return;
     const id = setInterval(() => {
       if (Date.now() >= sleepTimerEndsAt) {
         pause();
+        if (typeof window !== "undefined" && window.speechSynthesis) {
+          window.speechSynthesis.cancel();
+        }
         usePlayerStore.getState().clearSleepTimer();
       }
     }, 1000);
@@ -178,17 +306,14 @@ export function useAudioEngine() {
 
   // Media Session API for hardware media keys
   useEffect(() => {
-    if (!("mediaSession" in navigator) || !currentBookId) return;
-    const book = BOOKS.find((b) => b.id === currentBookId);
-    if (!book) return;
-    const ch = book.chapters[chapterIndex];
-    if (!ch) return;
+    if (typeof window === "undefined" || !("mediaSession" in navigator) || !currentAudiobook) return;
+    const chapter = chapters[chapterIndex];
+    if (!chapter) return;
     try {
       navigator.mediaSession.metadata = new MediaMetadata({
-        title: `${ch.title} — ${book.title}`,
-        artist: book.author,
-        album: "ARIA Books",
-        artwork: [{ src: book.cover, sizes: "768x1344", type: "image/png" }],
+        title: `${chapter.title} — ${currentAudiobook.title}`,
+        artist: currentAudiobook.author || "Unknown author",
+        album: "ARIA Audiobooks",
       });
       navigator.mediaSession.setActionHandler("play", () =>
         usePlayerStore.getState().play()
@@ -211,7 +336,7 @@ export function useAudioEngine() {
     } catch {
       /* ignore */
     }
-  }, [currentBookId, chapterIndex]);
+  }, [currentAudiobook, chapterIndex, chapters]);
 
-  return audioRef;
+  return null;
 }

@@ -388,6 +388,29 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Failed to store any chunks. Check database connection.' }, { status: 500 })
     }
 
+    // === AUTO-CREATE AUDIOBOOK for book-length content ===
+    // If the extracted text is long enough to be a real book (>8000 chars —
+    // long enough to exclude short documents/articles uploaded for chat context),
+    // create a linked Audiobook row so it appears in the audiobook library.
+    // This applies to PDFs, URLs, and pasted text alike — the user's intent
+    // is "when I feed ARIA something book-length, make it an audiobook."
+    if (content.length > 8000) {
+      try {
+        await db.audiobook.create({
+          data: {
+            userId,
+            documentId,
+            title: title!,
+            author: null, // no reliable author extraction from arbitrary uploads
+          },
+        })
+        console.log(`[knowledge.autoAudiobook] Created audiobook for "${title}" (${content.length} chars)`)
+      } catch (e) {
+        console.error('[knowledge.autoAudiobook]', e)
+        // best-effort — the knowledge upload itself already succeeded, don't fail the request over this
+      }
+    }
+
     // === AUTO-GENERATE BOOK SUMMARY + QUOTES ===
     // After storing chunks, generate a 3-sentence summary and extract notable
     // quotes using a lightweight LLM call. Store as special "summary" and

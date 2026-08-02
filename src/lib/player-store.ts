@@ -2,7 +2,7 @@
 
 import { create } from "zustand";
 import { persist, createJSONStorage } from "zustand/middleware";
-import { BOOKS, type Book, type Chapter } from "@/lib/audiobooks";
+import type { DerivedChapter } from "@/lib/audiobook-chapters";
 
 export interface Bookmark {
   id: string;
@@ -14,12 +14,14 @@ export interface Bookmark {
   createdAt: number;
 }
 
-export interface BookProgress {
-  bookId: string;
-  chapterIndex: number;
-  time: number; // seconds within current chapter
-  completedChapters: string[];
-  lastListenedAt: number;
+/** The audiobook metadata needed by the player UI. Fetched from /api/audiobooks
+ *  and /api/audiobooks/[id]/chapters, not looked up from static data. */
+export interface CurrentAudiobook {
+  id: string;
+  title: string;
+  author: string | null;
+  accent: string;
+  documentId: string;
 }
 
 type View = "landing" | "player";
@@ -28,17 +30,18 @@ interface PlayerState {
   // View
   view: View;
   setView: (v: View) => void;
-  openPlayer: (bookId: string, chapterIndex?: number) => void;
+  openPlayer: (audiobook: CurrentAudiobook, chapters: DerivedChapter[], chapterIndex?: number) => void;
   closePlayer: () => void;
 
-  // Current book & chapter
-  currentBookId: string | null;
+  // Current audiobook & chapters (fetched from API, not static data)
+  currentAudiobook: CurrentAudiobook | null;
+  chapters: DerivedChapter[];
   chapterIndex: number;
 
   // Playback
   isPlaying: boolean;
-  currentTime: number; // within current chapter (seconds)
-  duration: number; // current chapter duration
+  currentTime: number; // virtual elapsed time within current chapter (seconds)
+  duration: number; // current chapter's estimatedSeconds
   playbackRate: number;
   volume: number;
   muted: boolean;
@@ -50,11 +53,8 @@ interface PlayerState {
   sleepTimerMinutes: number | null; // null = off
   sleepTimerEndsAt: number | null;
 
-  // Bookmarks
+  // Bookmarks (client-side convenience — not synced to server)
   bookmarks: Bookmark[];
-
-  // Progress per book
-  progress: Record<string, BookProgress>;
 
   // Actions
   play: () => void;
@@ -82,9 +82,7 @@ interface PlayerState {
   removeBookmark: (id: string) => void;
   jumpToBookmark: (b: Bookmark) => void;
 
-  getBook: () => Book | undefined;
-  getChapter: () => Chapter | undefined;
-  getProgress: (bookId: string) => BookProgress | undefined;
+  getChapter: () => DerivedChapter | undefined;
 }
 
 export const usePlayerStore = create<PlayerState>()(
@@ -92,21 +90,15 @@ export const usePlayerStore = create<PlayerState>()(
     (set, get) => ({
       view: "landing",
       setView: (v) => set({ view: v }),
-      openPlayer: (bookId, chapterIndex) => {
-        const book = BOOKS.find((b) => b.id === bookId);
-        if (!book) return;
-        const existing = get().progress[bookId];
-        const idx =
-          chapterIndex !== undefined
-            ? chapterIndex
-            : existing?.chapterIndex ?? 0;
-        const time = chapterIndex !== undefined ? 0 : existing?.time ?? 0;
+      openPlayer: (audiobook, chapters, chapterIndex) => {
+        const idx = chapterIndex !== undefined ? chapterIndex : 0;
         set({
           view: "player",
-          currentBookId: bookId,
+          currentAudiobook: audiobook,
+          chapters,
           chapterIndex: idx,
-          currentTime: time,
-          duration: book.chapters[idx]?.duration ?? 0,
+          currentTime: 0,
+          duration: chapters[idx]?.estimatedSeconds ?? 0,
           isPlaying: false,
         });
         if (typeof window !== "undefined") {
@@ -120,7 +112,8 @@ export const usePlayerStore = create<PlayerState>()(
         }
       },
 
-      currentBookId: null,
+      currentAudiobook: null,
+      chapters: [],
       chapterIndex: 0,
 
       isPlaying: false,
@@ -137,7 +130,6 @@ export const usePlayerStore = create<PlayerState>()(
       sleepTimerEndsAt: null,
 
       bookmarks: [],
-      progress: {},
 
       play: () => set({ isPlaying: true }),
       pause: () => set({ isPlaying: false }),
@@ -150,25 +142,21 @@ export const usePlayerStore = create<PlayerState>()(
       toggleMute: () => set((s) => ({ muted: !s.muted })),
 
       nextChapter: () => {
-        const { currentBookId, chapterIndex } = get();
-        const book = BOOKS.find((b) => b.id === currentBookId);
-        if (!book) return;
-        if (chapterIndex < book.chapters.length - 1) {
+        const { chapters, chapterIndex } = get();
+        if (chapterIndex < chapters.length - 1) {
           const next = chapterIndex + 1;
           set({
             chapterIndex: next,
             currentTime: 0,
-            duration: book.chapters[next].duration,
+            duration: chapters[next].estimatedSeconds,
           });
         } else {
-          // finished — mark complete, pause
+          // finished — pause
           set({ isPlaying: false });
         }
       },
       prevChapter: () => {
-        const { currentBookId, chapterIndex, currentTime } = get();
-        const book = BOOKS.find((b) => b.id === currentBookId);
-        if (!book) return;
+        const { chapters, chapterIndex, currentTime } = get();
         // if more than 5s in, restart current chapter
         if (currentTime > 5) {
           set({ currentTime: 0 });
@@ -179,18 +167,17 @@ export const usePlayerStore = create<PlayerState>()(
           set({
             chapterIndex: prev,
             currentTime: 0,
-            duration: book.chapters[prev].duration,
+            duration: chapters[prev].estimatedSeconds,
           });
         }
       },
       goToChapter: (index) => {
-        const { currentBookId } = get();
-        const book = BOOKS.find((b) => b.id === currentBookId);
-        if (!book || index < 0 || index >= book.chapters.length) return;
+        const { chapters } = get();
+        if (index < 0 || index >= chapters.length) return;
         set({
           chapterIndex: index,
           currentTime: 0,
-          duration: book.chapters[index].duration,
+          duration: chapters[index].estimatedSeconds,
           isPlaying: true,
         });
       },
@@ -232,15 +219,14 @@ export const usePlayerStore = create<PlayerState>()(
         set({ sleepTimerMinutes: null, sleepTimerEndsAt: null }),
 
       addBookmark: (note) => {
-        const { currentBookId, chapterIndex, currentTime } = get();
-        const book = BOOKS.find((b) => b.id === currentBookId);
-        if (!book) return;
-        const ch = book.chapters[chapterIndex];
+        const { currentAudiobook, chapters, chapterIndex, currentTime } = get();
+        if (!currentAudiobook) return;
+        const ch = chapters[chapterIndex];
         if (!ch) return;
         const bm: Bookmark = {
           id: `bm-${Date.now()}`,
-          bookId: currentBookId!,
-          chapterId: ch.id,
+          bookId: currentAudiobook.id,
+          chapterId: ch.title,
           chapterIndex,
           time: currentTime,
           note: note || `${ch.title} · ${Math.floor(currentTime / 60)}:${String(
@@ -253,29 +239,25 @@ export const usePlayerStore = create<PlayerState>()(
       removeBookmark: (id) =>
         set((s) => ({ bookmarks: s.bookmarks.filter((b) => b.id !== id) })),
       jumpToBookmark: (b) => {
-        get().openPlayer(b.bookId, b.chapterIndex);
-        // give player a tick to mount then seek
-        setTimeout(() => {
-          set({ currentTime: b.time, isPlaying: true });
-        }, 80);
+        const { chapters } = get();
+        set({
+          chapterIndex: b.chapterIndex,
+          currentTime: b.time,
+          duration: chapters[b.chapterIndex]?.estimatedSeconds ?? 0,
+          isPlaying: true,
+        });
       },
 
-      getBook: () => {
-        const id = get().currentBookId;
-        return BOOKS.find((b) => b.id === id);
-      },
       getChapter: () => {
-        const book = get().getBook();
-        return book?.chapters[get().chapterIndex];
+        const { chapters, chapterIndex } = get();
+        return chapters[chapterIndex];
       },
-      getProgress: (bookId) => get().progress[bookId],
     }),
     {
       name: "aria-audiobooks",
       storage: createJSONStorage(() => localStorage),
       partialize: (s) => ({
         bookmarks: s.bookmarks,
-        progress: s.progress,
         playbackRate: s.playbackRate,
         volume: s.volume,
       }),
