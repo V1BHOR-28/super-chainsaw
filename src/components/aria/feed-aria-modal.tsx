@@ -21,7 +21,7 @@ const STATE_LABELS: Record<FeedState, string> = {
 }
 
 export function FeedAriaModal() {
-  const { feedAriaOpen, setFeedAriaOpen } = useAriaStore()
+  const { feedAriaOpen, setFeedAriaOpen, setActiveWorkspace } = useAriaStore()
   const [tab, setTab] = useState<FeedTab>('text')
   const [textContent, setTextContent] = useState('')
   const [url, setUrl] = useState('')
@@ -226,15 +226,18 @@ export function FeedAriaModal() {
       }
 
       setState('done')
-      toast.success(`"${data.title}" uploaded with ${data.chapterCount} chapters. Audiobook generation will begin shortly.`)
+      toast.success(`"${data.title}" uploaded with ${data.chapterCount} chapters! Opening audiobook library…`)
 
       setFile(null)
       setEpubUploading(false)
       if (fileInputRef.current) fileInputRef.current.value = ''
 
+      // Close the Feed ARIA modal and switch to the Audiobooks workspace
+      // so the user sees their book appear in the library with generation progress.
       setTimeout(() => {
         setState('idle')
-        setTab('library')
+        setFeedAriaOpen(false)
+        setActiveWorkspace('audiobooks')
       }, 2000)
     } catch (err) {
       setState('idle')
@@ -324,7 +327,7 @@ export function FeedAriaModal() {
             {([
               { id: 'text' as const, label: 'Paste Text', icon: FileText },
               { id: 'url' as const, label: 'From URL', icon: Link2 },
-              { id: 'file' as const, label: 'Upload PDF', icon: FileUp },
+              { id: 'file' as const, label: 'Upload EPUB', icon: FileUp },
               { id: 'quotes' as const, label: 'Quotes', icon: Quote },
               { id: 'library' as const, label: 'Library', icon: BookMarked },
             ]).map(t => {
@@ -433,26 +436,27 @@ export function FeedAriaModal() {
               </div>
             )}
 
-            {/* FILE TAB (PDF / TXT upload) */}
+            {/* FILE TAB (EPUB upload) */}
             {tab === 'file' && (
               <div className="space-y-4">
                 <input
                   ref={fileInputRef}
                   type="file"
-                  accept=".epub,.txt,.md,text/plain,application/epub+zip"
+                  accept=".epub,application/epub+zip"
                   className="hidden"
                   onChange={(e) => {
                     const f = e.target.files?.[0]
                     if (f) {
                       // EPUBs are constrained to 50MB by /api/audiobooks/upload-epub.
                       // Reject them client-side to save a round-trip and a confusing 413.
+                      // Only accept EPUB files
                       const isEpub = f.name.toLowerCase().endsWith('.epub') || f.type === 'application/epub+zip'
-                      if (isEpub && f.size > 50 * 1024 * 1024) {
-                        toast.error('EPUB too large (50MB max)')
+                      if (!isEpub) {
+                        toast.error('Only EPUB files are supported. PDF is no longer accepted.')
                         return
                       }
-                      if (f.size > 70 * 1024 * 1024) {
-                        toast.error('File too large (max 70MB)')
+                      if (f.size > 50 * 1024 * 1024) {
+                        toast.error('EPUB too large (50MB max)')
                         return
                       }
                       setFile(f)
@@ -489,10 +493,10 @@ export function FeedAriaModal() {
                   ) : (
                     <div className="text-center">
                       <div className="text-[14px] font-medium" style={{ color: 'var(--aria-fg)' }}>
-                        Drop a PDF or text file here
+                        Drop an EPUB file here
                       </div>
                       <div className="text-[11px] mt-1" style={{ color: 'var(--aria-fg-dim)' }}>
-                        PDF, TXT, or Markdown · Max 70MB
+                        EPUB files only · Max 50MB
                       </div>
                     </div>
                   )}
@@ -552,9 +556,9 @@ export function FeedAriaModal() {
                   {state !== 'idle' && state !== 'done' ? (
                     <span className="flex items-center gap-2"><Loader2 size={16} className="animate-spin" /> {STATE_LABELS[state]}</span>
                   ) : state === 'done' ? (
-                    <span>✓ {STATE_LABELS.done}</span>
+                    <span>✓ Uploaded! Generating audiobook…</span>
                   ) : (
-                    <span>Feed ARIA</span>
+                    <span>Upload & Generate Audiobook</span>
                   )}
                 </button>
               </div>
