@@ -683,7 +683,7 @@ function ChapterListPanel() {
           const done = i < chapterIndex;
           return (
             <button
-              key={ch.order}
+              key={ch.chapterOrder}
               onClick={() => {
                 goToChapter(i);
                 toggle();

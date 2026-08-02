@@ -56,7 +56,7 @@ export async function POST(req: NextRequest) {
         prepStatus: 'pending',
         chapters: {
           create: chapters.map((ch, i) => ({
-            order: i,
+            chapterOrder: i,
             title: ch.title.slice(0, 200),
             rawText: ch.rawText,
             cleanedText: '', // will be filled by the prep agent

@@ -26,7 +26,7 @@ export interface CurrentAudiobook {
 /** A chapter row from the database — carries TOC title, order, audio URL. */
 export interface PlayerChapter {
   id: string;
-  order: number;
+  chapterOrder: number;
   title: string;
   cleanedText: string;
   status: string; // pending | generating | ready | failed

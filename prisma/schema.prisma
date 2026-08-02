@@ -259,9 +259,10 @@ model Audiobook {
 model AudiobookChapter {
   id              String   @id @default(cuid())
   audiobookId     String
-  // `order` is the chapter's position in the book (0-indexed), derived from
-  // the PDF's outline/TOC. Used for sorting and navigation.
-  order           Int
+  // `chapterOrder` is the chapter's position in the book (0-indexed), derived
+  // from the PDF's outline/TOC. Used for sorting and navigation.
+  // (Named chapterOrder instead of `order` to avoid SQL reserved word issues.)
+  chapterOrder    Int
   title           String
   // Raw text extracted directly from the PDF pages for this chapter.
   rawText         String   @default("")
@@ -277,6 +278,6 @@ model AudiobookChapter {
 
   audiobook Audiobook @relation(fields: [audiobookId], references: [id], onDelete: Cascade)
 
-  @@unique([audiobookId, order])
+  @@unique([audiobookId, chapterOrder])
   @@index([audiobookId])
 }

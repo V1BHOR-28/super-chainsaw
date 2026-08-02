@@ -91,7 +91,7 @@ export async function POST(
       const combined = new Blob(audioBuffers, { type: 'audio/mpeg' })
 
       const blob = await put(
-        `audiobooks/${chapter.audiobookId}/chapter-${chapter.order}.mp3`,
+        `audiobooks/${chapter.audiobookId}/chapter-${chapter.chapterOrder}.mp3`,
         combined,
         { access: 'public', contentType: 'audio/mpeg' }
       )

@@ -5,7 +5,7 @@ import { getAuthenticatedUserId } from '@/lib/user'
 
 export interface ChapterRow {
   id: string
-  order: number
+  chapterOrder: number
   title: string
   cleanedText: string
   status: string // pending | generating | ready | failed
@@ -45,10 +45,10 @@ export async function GET(
 
     const chapterRows = await db.audiobookChapter.findMany({
       where: { audiobookId: id },
-      orderBy: { order: 'asc' },
+      orderBy: { chapterOrder: 'asc' },
       select: {
         id: true,
-        order: true,
+        chapterOrder: true,
         title: true,
         cleanedText: true,
         status: true,

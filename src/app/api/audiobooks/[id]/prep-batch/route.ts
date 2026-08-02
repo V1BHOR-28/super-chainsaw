@@ -91,8 +91,8 @@ export async function POST(
         title: true,
         status: true,
         chapters: {
-          orderBy: { order: 'asc' },
-          select: { id: true, order: true, title: true, rawText: true, cleanedText: true, status: true, audioUrl: true },
+          orderBy: { chapterOrder: 'asc' },
+          select: { id: true, chapterOrder: true, title: true, rawText: true, cleanedText: true, status: true, audioUrl: true },
         },
       },
     })
@@ -129,7 +129,7 @@ export async function POST(
       try {
         // Step 1: Clean if not yet cleaned
         if (!chapter.cleanedText) {
-          console.log(`[audiobook.prep-batch] ${audiobook.id}: cleaning chapter ${chapter.order + 1}/${total}`)
+          console.log(`[audiobook.prep-batch] ${audiobook.id}: cleaning chapter ${chapter.chapterOrder + 1}/${total}`)
           const cleaned = await cleanChapterText(chapter.rawText)
           await db.audiobookChapter.update({
             where: { id: chapter.id },
@@ -144,14 +144,14 @@ export async function POST(
 
         // Step 2: Generate TTS audio if cleaned but not yet generated
         if (chapter.cleanedText && !chapter.audioUrl && chapter.status !== 'generating') {
-          console.log(`[audiobook.prep-batch] ${audiobook.id}: generating TTS for chapter ${chapter.order + 1}/${total}`)
+          console.log(`[audiobook.prep-batch] ${audiobook.id}: generating TTS for chapter ${chapter.chapterOrder + 1}/${total}`)
           await db.audiobookChapter.update({ where: { id: chapter.id }, data: { status: 'generating' } })
 
           try {
             const { audioBlob, durationSeconds } = await generateChapterAudio(chapter.cleanedText)
 
             const blob = await put(
-              `audiobooks/${audiobook.id}/chapter-${chapter.order}.mp3`,
+              `audiobooks/${audiobook.id}/chapter-${chapter.chapterOrder}.mp3`,
               audioBlob,
               { access: 'public', contentType: 'audio/mpeg' }
             )
@@ -165,17 +165,17 @@ export async function POST(
               },
             })
 
-            console.log(`[audiobook.prep-batch] ${audiobook.id}: chapter ${chapter.order + 1} ready (${durationSeconds}s)`)
+            console.log(`[audiobook.prep-batch] ${audiobook.id}: chapter ${chapter.chapterOrder + 1} ready (${durationSeconds}s)`)
             processed++
           } catch (genErr) {
-            console.error(`[audiobook.prep-batch] ${audiobook.id}: TTS failed for chapter ${chapter.order + 1}:`, genErr)
+            console.error(`[audiobook.prep-batch] ${audiobook.id}: TTS failed for chapter ${chapter.chapterOrder + 1}:`, genErr)
             await db.audiobookChapter.update({ where: { id: chapter.id }, data: { status: 'failed' } })
             // Continue to next chapter — one failure shouldn't block the whole book
             processed++
           }
         }
       } catch (e) {
-        console.error(`[audiobook.prep-batch] ${audiobook.id}: processing failed for chapter ${chapter.order + 1}:`, e)
+        console.error(`[audiobook.prep-batch] ${audiobook.id}: processing failed for chapter ${chapter.chapterOrder + 1}:`, e)
         processed++
       }
     }
