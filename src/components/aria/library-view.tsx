@@ -22,6 +22,8 @@ interface AudiobookListItem {
   chapterCount: number;
   narratedCount: number;
   chaptersReady: boolean;
+  prepProgress?: number;
+  prepTotal?: number;
 }
 
 /**
@@ -60,6 +62,59 @@ export function LibraryView() {
   useEffect(() => {
     fetchAudiobooks();
   }, [fetchAudiobooks]);
+
+  // Drive chapter preparation for audiobooks that aren't ready yet.
+  // Polls POST /api/audiobooks/[id]/prep-batch every 3 seconds for one
+  // audiobook at a time (sequential, not parallel — avoids overwhelming
+  // the LLM provider with concurrent chapter-cleaning calls).
+  // Stops polling for an audiobook once its response is { done: true }.
+  const [preppingId, setPreppingId] = useState<string | null>(null);
+
+  useEffect(() => {
+    // Find audiobooks that still need prep
+    const pending = audiobooks.filter(b => !b.chaptersReady);
+    if (pending.length === 0) {
+      setPreppingId(null);
+      return;
+    }
+
+    // If we're not currently prepping anything, start with the first pending one
+    if (!preppingId || !audiobooks.find(b => b.id === preppingId && !b.chaptersReady)) {
+      setPreppingId(pending[0].id);
+      return;
+    }
+
+    const poll = async () => {
+      try {
+        const res = await fetch(`/api/audiobooks/${preppingId}/prep-batch`, { method: 'POST' });
+        if (!res.ok) return;
+        const data = await res.json();
+
+        // Update the audiobook's state in the local list
+        setAudiobooks(prev => prev.map(b => {
+          if (b.id !== preppingId) return b;
+          return {
+            ...b,
+            chaptersReady: data.done === true,
+            prepProgress: data.progress,
+            prepTotal: data.total,
+            // When done, refresh chapter count from the total
+            chapterCount: data.done === true ? (data.total ?? b.chapterCount) : b.chapterCount,
+          };
+        }));
+
+        // If this one is done, move to the next pending audiobook
+        if (data.done === true) {
+          setPreppingId(null); // triggers re-evaluation on next render
+        }
+      } catch (err) {
+        console.error('[library-view] prep-batch poll failed for', preppingId, err);
+      }
+    };
+
+    const interval = setInterval(poll, 3000);
+    return () => clearInterval(interval);
+  }, [audiobooks, preppingId]);
 
   const handleOpen = async (book: AudiobookListItem) => {
     try {
@@ -255,7 +310,9 @@ export function LibraryView() {
                         {!book.chaptersReady ? (
                           <p className="text-[11px] text-[var(--aria-accent-glow)] flex items-center gap-1">
                             <span className="status-dot" />
-                            Preparing your audiobook…
+                            {book.prepTotal && book.prepTotal > 0
+                              ? `Preparing… (${book.prepProgress ?? 0}/${book.prepTotal} chapters)`
+                              : 'Preparing your audiobook…'}
                           </p>
                         ) : (
                           <>

@@ -1,21 +1,17 @@
 /**
  * audiobook-prep-agent.ts — LLM-assisted chapter detection + text cleaning.
  *
- * Replaces the regex-only deriveChapters() + cleanForNarration() pair with a
- * two-pass LLM approach, falling back to the regex path per-chapter or
- * whole-book if the LLM path fails.
+ * Two-pass design, now split into independently-callable functions so the
+ * worker endpoint can resume from a stored progress point:
  *
- * Pass A — chapter boundary detection: sends the model a structural sample
- *   (first ~500 chars of every ~3000-char block) so it can recognize heading
- *   conventions the fixed regex misses ("ONE", roman numerals, unheaded
- *   sections, etc.). Returns a JSON array of { approximateCharOffset, chapterTitle }.
- *   Falls back to deriveChapters() if the LLM call fails.
+ * Pass A — detectChapterBoundaries(fullText): returns chapter boundaries
+ *   (index, title, startOffset, endOffset). Stored in Audiobook.chapterBoundaries
+ *   so it never needs to re-run on a resume.
  *
- * Pass B — per-chapter cleaning: sends each chapter's raw text to an LLM
- *   instructed to fix hyphenated word-breaks, mid-sentence line wraps, repeated
- *   running headers/footers, OCR artifacts, and page numbers — WITHOUT
- *   summarizing or shortening the prose. Falls back to cleanForNarration()
- *   per-chapter if the LLM call fails.
+ * Pass B — cleanChapterBatch(fullText, boundaries, startIndex, batchSize):
+ *   runs LLM cleaning for only `batchSize` chapters starting at `startIndex`,
+ *   not the whole book. Keeps the existing per-chapter LLM cleaning logic
+ *   and its regex-fallback-on-failure behavior exactly as before.
  *
  * Uses generateWithFallback with model 'llama-3.3-70b-versatile' (larger, more
  * precise for quality-sensitive tasks) — matching the model choice used for
@@ -30,6 +26,15 @@ export interface PreparedChapter {
   index: number
   title: string
   cleanedText: string
+}
+
+/** A chapter boundary — the result of pass A. Stored in Audiobook.chapterBoundaries
+ *  as JSON so it survives across batched worker invocations. */
+export interface ChapterBoundary {
+  index: number
+  title: string
+  startOffset: number
+  endOffset: number
 }
 
 /** Structural sample for Pass A — first ~500 chars of every ~3000-char block.
@@ -49,9 +54,14 @@ function buildStructuralSample(fullText: string): string {
   return blocks.slice(0, 60).join('\n---\n')
 }
 
-/** Pass A — LLM-based chapter boundary detection.
- *  Returns a list of { offset, title } boundaries, or null on failure. */
-async function detectChapterBoundariesLLM(fullText: string): Promise<{ offset: number; title: string }[] | null> {
+/**
+ * Pass A — detect chapter boundaries via LLM (or fall back to regex).
+ * Returns a list of ChapterBoundary objects with index, title, startOffset, endOffset.
+ *
+ * This is the ONLY function that runs pass A. Once its result is stored in
+ * Audiobook.chapterBoundaries, it never needs to re-run on a resume.
+ */
+export async function detectChapterBoundaries(fullText: string): Promise<ChapterBoundary[]> {
   const sample = buildStructuralSample(fullText)
 
   const prompt = `You are a book structure analyzer. Below is a structural sample of a book — the first ~500 characters of every ~3000-character block, with character offsets marked.
@@ -81,30 +91,82 @@ Return ONLY the JSON array, no other text.`
   if (!jsonText) {
     // Fallback to generateWithFallback (Groq/Pollinations)
     const raw = await generateWithFallback(prompt, { model: 'llama-3.3-70b-versatile' })
-    if (!raw) return null
+    if (!raw) {
+      // All LLM providers failed — fall back to regex chaptering
+      console.log('[audiobook-prep] Pass A: all LLM providers failed, falling back to regex')
+      return boundariesFromDerived(fullText)
+    }
     // Extract JSON from the response (may be wrapped in markdown code fences)
     const jsonMatch = raw.match(/\[[\s\S]*\]/)
     jsonText = jsonMatch ? jsonMatch[0] : null
   }
 
-  if (!jsonText) return null
+  if (!jsonText) {
+    console.log('[audiobook-prep] Pass A: no JSON in LLM response, falling back to regex')
+    return boundariesFromDerived(fullText)
+  }
 
   try {
-    const boundaries = JSON.parse(jsonText)
-    if (!Array.isArray(boundaries)) return null
-    if (boundaries.length === 0) return null
+    const rawBoundaries = JSON.parse(jsonText)
+    if (!Array.isArray(rawBoundaries) || rawBoundaries.length === 0) {
+      console.log('[audiobook-prep] Pass A: LLM returned empty/invalid array, falling back to regex')
+      return boundariesFromDerived(fullText)
+    }
 
     // Validate and normalize
-    const valid = boundaries
+    const valid = rawBoundaries
       .filter((b: any) => typeof b.offset === 'number' && typeof b.title === 'string')
       .map((b: any) => ({ offset: Math.max(0, Math.floor(b.offset)), title: String(b.title).slice(0, 80) }))
       .sort((a: any, b: any) => a.offset - b.offset)
 
-    if (valid.length < 2) return null // need at least 2 boundaries for meaningful chaptering
-    return valid
+    if (valid.length < 2) {
+      console.log('[audiobook-prep] Pass A: LLM found < 2 boundaries, falling back to regex')
+      return boundariesFromDerived(fullText)
+    }
+
+    // Convert to ChapterBoundary with startOffset/endOffset
+    const boundaries: ChapterBoundary[] = valid.map((b: any, i: number) => ({
+      index: i,
+      title: b.title,
+      startOffset: b.offset,
+      endOffset: i + 1 < valid.length ? valid[i + 1].offset : fullText.length,
+    }))
+
+    console.log(`[audiobook-prep] Pass A: LLM detected ${boundaries.length} chapters`)
+    return boundaries
   } catch {
-    return null
+    console.log('[audiobook-prep] Pass A: JSON parse failed, falling back to regex')
+    return boundariesFromDerived(fullText)
   }
+}
+
+/** Convert deriveChapters() (regex) output to ChapterBoundary format. */
+function boundariesFromDerived(fullText: string): ChapterBoundary[] {
+  const derived = deriveChapters(fullText)
+  const boundaries: ChapterBoundary[] = []
+
+  // deriveChapters doesn't expose offsets, so we reconstruct them by
+  // finding where each chapter's text starts in the full text.
+  let searchFrom = 0
+  for (const d of derived) {
+    const startOffset = d.text.length > 0 ? fullText.indexOf(d.text.slice(0, 100), searchFrom) : -1
+    const actualStart = startOffset >= 0 ? startOffset : searchFrom
+    boundaries.push({
+      index: d.index,
+      title: d.title,
+      startOffset: actualStart,
+      endOffset: actualStart + d.text.length,
+    })
+    searchFrom = actualStart + Math.max(1, d.text.length)
+  }
+
+  // Fix endOffset of last chapter to be the full text length
+  if (boundaries.length > 0) {
+    boundaries[boundaries.length - 1].endOffset = fullText.length
+  }
+
+  console.log(`[audiobook-prep] Pass A: regex fallback produced ${boundaries.length} chapters`)
+  return boundaries
 }
 
 /** Pass B — LLM-based per-chapter cleaning.
@@ -137,50 +199,38 @@ ${rawText}`
 }
 
 /**
- * prepareAudiobookChapters — runs both passes and returns the final chapter
- * list, ready to insert as AudiobookChapter rows.
+ * Pass B (batched) — clean a bounded range of chapters via LLM.
  *
- * Pass A: detect chapter boundaries via LLM (or fall back to deriveChapters).
- * Pass B: clean each chapter's text via LLM (or fall back to cleanForNarration
- *         per-chapter).
+ * Runs LLM cleaning for only `batchSize` chapters starting at `startIndex`,
+ * not the whole book. Keeps the existing per-chapter LLM cleaning logic
+ * and its regex-fallback-on-failure behavior exactly as before — just calls
+ * it in a bounded loop instead of over the whole chapter list at once.
+ *
+ * Returns the prepared chapters for this batch only.
  */
-export async function prepareAudiobookChapters(fullText: string): Promise<PreparedChapter[]> {
-  // === Pass A: chapter boundary detection ===
-  let boundaries: { offset: number; title: string }[] | null = null
-
-  try {
-    boundaries = await detectChapterBoundariesLLM(fullText)
-  } catch (e) {
-    console.error('[audiobook-prep] Pass A (LLM chapter detection) failed:', e instanceof Error ? e.message : String(e))
-    boundaries = null
-  }
-
-  let segments: { title: string; text: string }[]
-
-  if (boundaries && boundaries.length >= 2) {
-    // Use LLM-detected boundaries to split the full text
-    segments = boundaries.map((b, i) => {
-      const start = b.offset
-      const end = i + 1 < boundaries.length ? boundaries[i + 1].offset : fullText.length
-      return { title: b.title, text: fullText.slice(start, end).trim() }
-    }).filter(s => s.text.length > 0)
-    console.log(`[audiobook-prep] Pass A: LLM detected ${segments.length} chapters`)
-  } else {
-    // Fallback: regex-based chaptering
-    const derived = deriveChapters(fullText)
-    segments = derived.map(d => ({ title: d.title, text: d.text }))
-    console.log(`[audiobook-prep] Pass A: fell back to regex, ${segments.length} chapters`)
-  }
-
-  // === Pass B: per-chapter cleaning ===
+export async function cleanChapterBatch(
+  fullText: string,
+  boundaries: ChapterBoundary[],
+  startIndex: number,
+  batchSize: number
+): Promise<PreparedChapter[]> {
+  const endIndex = Math.min(startIndex + batchSize, boundaries.length)
   const prepared: PreparedChapter[] = []
 
-  for (let i = 0; i < segments.length; i++) {
-    const seg = segments[i]
+  for (let i = startIndex; i < endIndex; i++) {
+    const boundary = boundaries[i]
+    const rawText = fullText.slice(boundary.startOffset, boundary.endOffset).trim()
+
+    if (!rawText) {
+      // Skip empty chapters
+      prepared.push({ index: i, title: boundary.title, cleanedText: '' })
+      continue
+    }
+
     let cleanedText: string | null = null
 
     try {
-      cleanedText = await cleanChapterLLM(seg.text)
+      cleanedText = await cleanChapterLLM(rawText)
     } catch (e) {
       console.error(`[audiobook-prep] Pass B (LLM cleaning) failed for chapter ${i + 1}:`, e instanceof Error ? e.message : String(e))
       cleanedText = null
@@ -188,17 +238,17 @@ export async function prepareAudiobookChapters(fullText: string): Promise<Prepar
 
     if (!cleanedText) {
       // Fallback: regex-based cleaning for this chapter
-      cleanedText = cleanForNarration(seg.text)
+      cleanedText = cleanForNarration(rawText)
       console.log(`[audiobook-prep] Pass B: chapter ${i + 1} fell back to regex cleaning`)
     }
 
     prepared.push({
       index: i,
-      title: seg.title,
+      title: boundary.title,
       cleanedText,
     })
   }
 
-  console.log(`[audiobook-prep] Complete: ${prepared.length} chapters prepared`)
+  console.log(`[audiobook-prep] Pass B: cleaned chapters ${startIndex + 1}-${endIndex} of ${boundaries.length}`)
   return prepared
 }

@@ -236,6 +236,11 @@ model Audiobook {
   accent             String   @default("#f59e0b")
   fullText           String?  // complete untruncated source text (bypasses the 200K RAG cap); nullable for backfill of existing rows
   chaptersReady      Boolean  @default(false) // false while the LLM prep agent is running
+  // Resumable prep state — tracks progress across batched invocations so
+  // the worker endpoint can resume from where the last call left off.
+  chapterBoundaries  Json?    // result of pass A (chapter detection), stored so it never re-runs
+  prepStatus         String   @default("pending") // pending | detecting | cleaning | ready | failed
+  prepChaptersCleaned Int     @default(0) // how many chapters have completed pass B (cleaning) so far
   createdAt          DateTime @default(now())
   progressChapter    Int      @default(0)
   progressCharOffset Int      @default(0) // resume position within the chapter's text

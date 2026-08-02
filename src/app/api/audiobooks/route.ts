@@ -3,7 +3,6 @@ export const runtime = "nodejs"
 import { db } from '@/lib/db'
 import { getAuthenticatedUserId } from '@/lib/user'
 import { isCurrentUserAdmin } from '@/lib/usage'
-import { prepareAudiobookChapters } from '@/lib/audiobook-prep-agent'
 
 /**
  * Auto-backfill: for admin users, check if any existing Knowledge documents
@@ -49,8 +48,10 @@ async function autoBackfillMissingAudiobooks(userId: string): Promise<void> {
       const bookTitle = chunks[0].title.replace(/\s+—\s+Part\s+\d+\/\d+$/, '')
 
       try {
-        // Create the audiobook row immediately with fullText + chaptersReady=false
-        const audiobook = await db.audiobook.create({
+        // Create the audiobook row with fullText + prepStatus='pending'.
+        // Chapter prep does NOT happen here — it runs via POST /api/audiobooks/[id]/prep-batch,
+        // driven by the client while the library view is open.
+        await db.audiobook.create({
           data: {
             userId: doc.userId,
             documentId: doc.documentId!,
@@ -58,32 +59,11 @@ async function autoBackfillMissingAudiobooks(userId: string): Promise<void> {
             author: null,
             fullText,
             chaptersReady: false,
+            prepStatus: 'pending',
           },
         })
 
-        // Fire-and-forget background chapter prep (same pattern as knowledge route)
-        prepareAudiobookChapters(fullText)
-          .then(async (prepared) => {
-            if (prepared.length > 0) {
-              await db.audiobookChapter.createMany({
-                data: prepared.map((ch) => ({
-                  audiobookId: audiobook.id,
-                  chapterIndex: ch.index,
-                  title: ch.title,
-                  cleanedText: ch.cleanedText,
-                  status: 'pending',
-                })),
-              })
-            }
-            await db.audiobook.update({ where: { id: audiobook.id }, data: { chaptersReady: true } })
-            console.log(`[audiobooks.autoBackfill] Background prep complete for "${bookTitle}" (${prepared.length} chapters)`)
-          })
-          .catch(async (e) => {
-            console.error(`[audiobooks.autoBackfill] Background prep failed for "${bookTitle}":`, e instanceof Error ? e.message : String(e))
-            await db.audiobook.update({ where: { id: audiobook.id }, data: { chaptersReady: true } })
-          })
-
-        console.log(`[audiobooks.autoBackfill] Created audiobook for "${bookTitle}" (${fullText.length} chars, prep running in background)`)
+        console.log(`[audiobooks.autoBackfill] Created audiobook for "${bookTitle}" (${fullText.length} chars, prep pending client-driven batches)`)
       } catch (e) {
         console.error(`[audiobooks.autoBackfill] Failed for ${doc.documentId}:`, e)
       }

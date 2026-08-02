@@ -6,9 +6,6 @@ import { getAuthenticatedUserId } from '@/lib/user'
 import { generateEmbedding, embeddingToPgVector } from '@/lib/embeddings'
 import { hasHitUploadLimit, recordUpload } from '@/lib/usage'
 import { chunkText } from '@/lib/chunk-text'
-import { deriveChapters } from '@/lib/audiobook-chapters'
-import { cleanForNarration } from '@/lib/narration-clean'
-import { prepareAudiobookChapters } from '@/lib/audiobook-prep-agent'
 
 /**
  * GET /api/knowledge — list all knowledge entries.
@@ -402,14 +399,16 @@ export async function POST(req: NextRequest) {
     // If the extracted text is long enough to be a real book (>8000 chars —
     // long enough to exclude short documents/articles uploaded for chat context),
     // create a linked Audiobook row with the FULL untruncated text (bypasses the
-    // 200K RAG cap on `content`), then kick off chapter preparation as a
-    // fire-and-forget background call (LLM-based, takes real time for a full book).
-    // This applies to PDFs, URLs, and pasted text alike.
+    // 200K RAG cap on `content`). Chapter preparation does NOT happen here — it
+    // runs in batched, resumable calls via POST /api/audiobooks/[id]/prep-batch,
+    // driven by the client while the library view is open. This avoids the
+    // Vercel fire-and-forget problem (unawaited promises are killed when the
+    // serverless function sends its HTTP response).
     if (content.length > 8000) {
       try {
         // Use rawFullText if available (untruncated); fall back to content if not
         const audiobookFullText = rawFullText || content
-        const audiobook = await db.audiobook.create({
+        await db.audiobook.create({
           data: {
             userId,
             documentId,
@@ -417,44 +416,14 @@ export async function POST(req: NextRequest) {
             author: null,
             fullText: audiobookFullText,
             chaptersReady: false,
+            prepStatus: 'pending',
           },
         })
 
         if (audiobookFullText.length !== content.length) {
           console.log(`[knowledge.autoAudiobook] Full text ${audiobookFullText.length} chars vs. RAG-capped ${content.length} chars for "${title}"`)
         }
-
-        // Fire-and-forget: prepare chapters in the background (LLM-based, takes time).
-        // Don't await — the upload request returns immediately, chapters populate
-        // as they're ready. Matches the fire-and-forget pattern used by the
-        // auto-summary generation later in this file.
-        prepareAudiobookChapters(audiobookFullText)
-          .then(async (prepared) => {
-            if (prepared.length === 0) {
-              console.warn(`[knowledge.autoAudiobook] No chapters prepared for "${title}"`)
-              await db.audiobook.update({ where: { id: audiobook.id }, data: { chaptersReady: true } })
-              return
-            }
-            await db.audiobookChapter.createMany({
-              data: prepared.map((ch) => ({
-                audiobookId: audiobook.id,
-                chapterIndex: ch.index,
-                title: ch.title,
-                cleanedText: ch.cleanedText,
-                status: 'pending',
-              })),
-            })
-            await db.audiobook.update({ where: { id: audiobook.id }, data: { chaptersReady: true } })
-            console.log(`[knowledge.autoAudiobook] Background prep complete for "${title}" (${prepared.length} chapters)`)
-          })
-          .catch(async (e) => {
-            console.error(`[knowledge.autoAudiobook] Background prep failed for "${title}":`, e instanceof Error ? e.message : String(e))
-            // Mark as ready so the UI doesn't hang on "Preparing..." forever,
-            // even though prep failed — the user can still see the book exists.
-            await db.audiobook.update({ where: { id: audiobook.id }, data: { chaptersReady: true } })
-          })
-
-        console.log(`[knowledge.autoAudiobook] Created audiobook for "${title}" (${audiobookFullText.length} chars, chapter prep running in background)`)
+        console.log(`[knowledge.autoAudiobook] Created audiobook for "${title}" (${audiobookFullText.length} chars, prep pending client-driven batches)`)
       } catch (e) {
         console.error('[knowledge.autoAudiobook]', e)
         // best-effort — the knowledge upload itself already succeeded, don't fail the request over this
