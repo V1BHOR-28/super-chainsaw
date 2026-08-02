@@ -259,6 +259,8 @@ model Audiobook {
 model AudiobookChapter {
   id              String   @id @default(cuid())
   audiobookId     String
+  // Kept for backward compatibility with existing rows. New code uses chapterOrder.
+  chapterIndex    Int      @default(0)
   // `chapterOrder` is the chapter's position in the book (0-indexed), derived
   // from the PDF's outline/TOC. Used for sorting and navigation.
   chapterOrder    Int      @default(0)
