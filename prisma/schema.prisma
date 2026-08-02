@@ -234,7 +234,7 @@ model Audiobook {
   title              String
   author             String?
   accent             String   @default("#f59e0b")
-  fullText           String   // complete untruncated source text (bypasses the 200K RAG cap)
+  fullText           String?  // complete untruncated source text (bypasses the 200K RAG cap); nullable for backfill of existing rows
   chaptersReady      Boolean  @default(false) // false while the LLM prep agent is running
   createdAt          DateTime @default(now())
   progressChapter    Int      @default(0)
