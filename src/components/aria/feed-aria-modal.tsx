@@ -595,7 +595,6 @@ export function FeedAriaModal() {
                     <BookMarked size={32} strokeWidth={1} className="mx-auto mb-3 opacity-30" />
                     <p className="text-[13px]">Nothing in ARIA's library yet.</p>
                     <p className="text-[12px] mt-1">Feed her some knowledge to get started.</p>
-                    <SurpriseButton />
                   </div>
                 ) : (
                   knowledge.map(k => (
@@ -624,6 +623,12 @@ export function FeedAriaModal() {
                     </div>
                   ))
                 )}
+                {/* Surprise Me is always available — not just an empty-state nudge.
+                    Pulling it out of the knowledge.length === 0 conditional means the
+                    user can keep discovering new books even after their library has items. */}
+                <div className="flex justify-center pt-2">
+                  <SurpriseButton />
+                </div>
               </div>
             )}
           </div>
