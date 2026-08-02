@@ -10,8 +10,13 @@ const VOICE = 'en-US-AriaNeural' // warm, natural — reasonable default; consid
 
 /** Split very long chapter text into sub-segments aligned on paragraph
  *  boundaries, so Edge TTS doesn't choke on a single massive input.
- *  ~3000 chars per segment is well within Edge TTS's practical limits. */
-function splitForTts(text: string, maxLen = 3000): string[] {
+ *
+ *  Raised from 3000 to 5000 chars/segment — Edge TTS handles this reliably
+ *  (the practical failure point is well above this), and fewer segments
+ *  means fewer MP3-boundary concatenation artifacts per chapter.
+ *  If a chapter is short enough to fit in one segment (<5000 chars), no
+ *  concatenation happens at all — the audio is a single clean MP3. */
+function splitForTts(text: string, maxLen = 5000): string[] {
   const paragraphs = text.split(/\n\n+/).map(p => p.trim()).filter(Boolean)
   const segments: string[] = []
   let current = ''
@@ -50,18 +55,39 @@ export async function POST(
     await db.audiobookChapter.update({ where: { id: chapter.id }, data: { status: 'generating' } })
 
     try {
-      // Split long chapters into sub-segments, generate each, then concatenate
+      // Split long chapters into sub-segments, generate each, then concatenate.
+      // Each segment's synthesize() returns { audio: Blob, subtitle: WordBoundary[] }.
+      // We accumulate the subtitle timing across segments to compute the REAL
+      // audio duration (offset + duration of the last word boundary) instead
+      // of estimating from word count.
       const segments = splitForTts(chapter.cleanedText)
       const audioBuffers: Blob[] = []
+      let totalDurationHundredsOfNs = 0 // accumulated duration in 100-nanosecond units
 
       for (const segment of segments) {
         const tts = new EdgeTTS(segment, VOICE)
         const result = await tts.synthesize()
         // result.audio is a Blob (MP3 data) per edge-tts-universal's types
         audioBuffers.push(result.audio)
+
+        // Accumulate real duration from word boundary timing.
+        // Each segment's subtitle offsets are relative to that segment's start,
+        // so we add the segment's max(offset + duration) to the running total.
+        if (result.subtitle && result.subtitle.length > 0) {
+          const lastWord = result.subtitle[result.subtitle.length - 1]
+          const segmentDuration = (lastWord.offset ?? 0) + (lastWord.duration ?? 0)
+          totalDurationHundredsOfNs += segmentDuration
+        }
       }
 
-      // Concatenate all segment Blobs into one MP3 file
+      // Concatenate all segment Blobs into one MP3 file.
+      // NOTE: raw Blob concatenation of MP3 streams can produce minor audible
+      // artifacts at segment boundaries (clicks/gaps). This is a known limitation
+      // of not having ffmpeg available in Vercel's serverless environment for
+      // proper audio-frame-aligned stitching. We mitigate by using larger segments
+      // (5000 chars vs the previous 3000) so fewer boundaries exist per chapter.
+      // A proper fix would require either a Vercel-compatible ffmpeg layer or
+      // switching to a TTS service that handles long-form synthesis natively.
       const combined = new Blob(audioBuffers, { type: 'audio/mpeg' })
 
       const blob = await put(
@@ -70,18 +96,23 @@ export async function POST(
         { access: 'public', contentType: 'audio/mpeg' }
       )
 
-      // Estimate duration from text length (~155 wpm) since we can't easily
-      // read MP3 duration without an audio parsing library. This is close
-      // enough for the progress bar.
-      const wordCount = chapter.cleanedText.split(/\s+/).length
-      const estimatedDuration = Math.round((wordCount / 155) * 60)
+      // Compute actual duration from accumulated word-boundary timing.
+      // 100-nanosecond units → seconds: divide by 10,000,000.
+      // Fall back to word-count estimate only if subtitle data was missing.
+      let durationSeconds: number
+      if (totalDurationHundredsOfNs > 0) {
+        durationSeconds = Math.round(totalDurationHundredsOfNs / 10_000_000)
+      } else {
+        const wordCount = chapter.cleanedText.split(/\s+/).length
+        durationSeconds = Math.round((wordCount / 155) * 60)
+      }
 
       await db.audiobookChapter.update({
         where: { id: chapter.id },
         data: {
           status: 'ready',
           audioUrl: blob.url,
-          durationSeconds: estimatedDuration,
+          durationSeconds,
         },
       })
 

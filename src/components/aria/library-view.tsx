@@ -21,6 +21,7 @@ interface AudiobookListItem {
   progressCharOffset: number;
   chapterCount: number;
   narratedCount: number;
+  chaptersReady: boolean;
 }
 
 /**
@@ -251,15 +252,24 @@ export function LibraryView() {
                         {book.author ? `by ${book.author}` : 'Author unknown'}
                       </p>
                       <div className="flex items-center gap-2 mt-1">
-                        {hasProgress && (
-                          <p className="text-[11px] text-[var(--aria-accent-glow)]">
-                            Ch. {book.progressChapter + 1} · {formatDuration(book.progressCharOffset)}
+                        {!book.chaptersReady ? (
+                          <p className="text-[11px] text-[var(--aria-accent-glow)] flex items-center gap-1">
+                            <span className="status-dot" />
+                            Preparing your audiobook…
                           </p>
-                        )}
-                        {book.chapterCount > 0 && (
-                          <p className="text-[11px] text-[var(--aria-fg-dim)]">
-                            {book.narratedCount}/{book.chapterCount} narrated
-                          </p>
+                        ) : (
+                          <>
+                            {hasProgress && (
+                              <p className="text-[11px] text-[var(--aria-accent-glow)]">
+                                Ch. {book.progressChapter + 1} · {formatDuration(book.progressCharOffset)}
+                              </p>
+                            )}
+                            {book.chapterCount > 0 && (
+                              <p className="text-[11px] text-[var(--aria-fg-dim)]">
+                                {book.narratedCount}/{book.chapterCount} narrated
+                              </p>
+                            )}
+                          </>
                         )}
                       </div>
                     </div>

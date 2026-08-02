@@ -8,6 +8,7 @@ import { hasHitUploadLimit, recordUpload } from '@/lib/usage'
 import { chunkText } from '@/lib/chunk-text'
 import { deriveChapters } from '@/lib/audiobook-chapters'
 import { cleanForNarration } from '@/lib/narration-clean'
+import { prepareAudiobookChapters } from '@/lib/audiobook-prep-agent'
 
 /**
  * GET /api/knowledge — list all knowledge entries.
@@ -133,7 +134,7 @@ function isUrlSafe(urlStr: string): boolean {
   return true
 }
 
-async function fetchUrlContent(url: string): Promise<{ title: string; content: string; truncated: boolean }> {
+async function fetchUrlContent(url: string): Promise<{ title: string; content: string; truncated: boolean; raw: string }> {
   if (!isUrlSafe(url)) {
     throw new Error('This URL cannot be fetched (blocked for security reasons).')
   }
@@ -177,7 +178,7 @@ async function fetchUrlContent(url: string): Promise<{ title: string; content: s
     const cleaned = rawText.replace(/^\s+/, '').replace(/\s+$/, '')
     const { text: content, truncated } = refineText(cleaned)
     if (!content || content.length < 50) throw new Error('Could not extract meaningful text from the page.')
-    return { title: titleFromUrl(url), content, truncated }
+    return { title: titleFromUrl(url), content, truncated, raw: cleaned }
   }
 
   const res = await fetch(url, {
@@ -193,7 +194,7 @@ async function fetchUrlContent(url: string): Promise<{ title: string; content: s
   const bodyText = $('article, main, [role=main]').first().text() || $('body').text()
   const { text: content, truncated } = refineText(bodyText)
   if (!content || content.length < 50) throw new Error('Could not extract meaningful text from the page.')
-  return { title: title.slice(0, 200), content, truncated }
+  return { title: title.slice(0, 200), content, truncated, raw: bodyText }
 }
 
 /**
@@ -209,12 +210,13 @@ async function fetchUrlContent(url: string): Promise<{ title: string; content: s
  * "Setting up fake worker failed: Cannot find module pdf.worker.mjs" errors
  * on Vercel's serverless runtime.
  */
-async function parsePdf(file: Blob): Promise<{ text: string; truncated: boolean }> {
+async function parsePdf(file: Blob): Promise<{ text: string; truncated: boolean; raw: string }> {
   const arrayBuffer = await file.arrayBuffer()
   const uint8 = new Uint8Array(arrayBuffer)
   const { extractText } = await import('unpdf')
   const { text } = await extractText(uint8, { mergePages: true })
-  return refineText(text)
+  const refined = refineText(text)
+  return { ...refined, raw: text }
 }
 
 /**
@@ -242,6 +244,7 @@ export async function POST(req: NextRequest) {
 
     let title: string | undefined
     let content: string
+    let rawFullText: string = '' // untruncated text for audiobook use (bypasses the 200K RAG cap)
     let source: string
     let sourceUrl: string | undefined
     let truncated = false
@@ -261,10 +264,13 @@ export async function POST(req: NextRequest) {
       if (fileName.endsWith('.pdf') || file.type === 'application/pdf') {
         const pdf = await parsePdf(file)
         content = pdf.text
+        rawFullText = pdf.raw
         truncated = pdf.truncated
         source = 'pdf'
       } else if (fileName.endsWith('.txt') || fileName.endsWith('.md') || file.type.startsWith('text/')) {
-        const refined = refineText(await file.text())
+        const fileText = await file.text()
+        rawFullText = fileText
+        const refined = refineText(fileText)
         content = refined.text
         truncated = refined.truncated
         source = 'file'
@@ -276,6 +282,7 @@ export async function POST(req: NextRequest) {
       const type = body.type
       forceReupload = body.forceReupload === true
       if (type === 'text') {
+        rawFullText = body.content || ''
         const refined = refineText(body.content || '')
         content = refined.text
         truncated = refined.truncated
@@ -286,6 +293,7 @@ export async function POST(req: NextRequest) {
         if (!url) return NextResponse.json({ error: 'URL is required' }, { status: 400 })
         const fetched = await fetchUrlContent(url)
         content = fetched.content
+        rawFullText = fetched.raw
         truncated = fetched.truncated
         title = fetched.title
         source = 'url'
@@ -393,34 +401,60 @@ export async function POST(req: NextRequest) {
     // === AUTO-CREATE AUDIOBOOK for book-length content ===
     // If the extracted text is long enough to be a real book (>8000 chars —
     // long enough to exclude short documents/articles uploaded for chat context),
-    // create a linked Audiobook row AND materialize its chapters as
-    // AudiobookChapter rows (each tracking its own TTS generation status).
-    // This applies to PDFs, URLs, and pasted text alike — the user's intent
-    // is "when I feed ARIA something book-length, make it an audiobook."
+    // create a linked Audiobook row with the FULL untruncated text (bypasses the
+    // 200K RAG cap on `content`), then kick off chapter preparation as a
+    // fire-and-forget background call (LLM-based, takes real time for a full book).
+    // This applies to PDFs, URLs, and pasted text alike.
     if (content.length > 8000) {
       try {
+        // Use rawFullText if available (untruncated); fall back to content if not
+        const audiobookFullText = rawFullText || content
         const audiobook = await db.audiobook.create({
           data: {
             userId,
             documentId,
             title: title!,
-            author: null, // no reliable author extraction from arbitrary uploads
+            author: null,
+            fullText: audiobookFullText,
+            chaptersReady: false,
           },
         })
-        // Derive chapters from the full text and save them with narration-ready
-        // cleaned text. Audio is NOT generated here — that happens lazily, per
-        // chapter, on first play (see /api/audiobooks/[id]/chapters/[chapterId]/generate).
-        const derivedChapters = deriveChapters(content)
-        await db.audiobookChapter.createMany({
-          data: derivedChapters.map((ch) => ({
-            audiobookId: audiobook.id,
-            chapterIndex: ch.index,
-            title: ch.title,
-            cleanedText: cleanForNarration(ch.text),
-            status: 'pending',
-          })),
-        })
-        console.log(`[knowledge.autoAudiobook] Created audiobook for "${title}" (${content.length} chars, ${derivedChapters.length} chapters)`)
+
+        if (audiobookFullText.length !== content.length) {
+          console.log(`[knowledge.autoAudiobook] Full text ${audiobookFullText.length} chars vs. RAG-capped ${content.length} chars for "${title}"`)
+        }
+
+        // Fire-and-forget: prepare chapters in the background (LLM-based, takes time).
+        // Don't await — the upload request returns immediately, chapters populate
+        // as they're ready. Matches the fire-and-forget pattern used by the
+        // auto-summary generation later in this file.
+        prepareAudiobookChapters(audiobookFullText)
+          .then(async (prepared) => {
+            if (prepared.length === 0) {
+              console.warn(`[knowledge.autoAudiobook] No chapters prepared for "${title}"`)
+              await db.audiobook.update({ where: { id: audiobook.id }, data: { chaptersReady: true } })
+              return
+            }
+            await db.audiobookChapter.createMany({
+              data: prepared.map((ch) => ({
+                audiobookId: audiobook.id,
+                chapterIndex: ch.index,
+                title: ch.title,
+                cleanedText: ch.cleanedText,
+                status: 'pending',
+              })),
+            })
+            await db.audiobook.update({ where: { id: audiobook.id }, data: { chaptersReady: true } })
+            console.log(`[knowledge.autoAudiobook] Background prep complete for "${title}" (${prepared.length} chapters)`)
+          })
+          .catch(async (e) => {
+            console.error(`[knowledge.autoAudiobook] Background prep failed for "${title}":`, e instanceof Error ? e.message : String(e))
+            // Mark as ready so the UI doesn't hang on "Preparing..." forever,
+            // even though prep failed — the user can still see the book exists.
+            await db.audiobook.update({ where: { id: audiobook.id }, data: { chaptersReady: true } })
+          })
+
+        console.log(`[knowledge.autoAudiobook] Created audiobook for "${title}" (${audiobookFullText.length} chars, chapter prep running in background)`)
       } catch (e) {
         console.error('[knowledge.autoAudiobook]', e)
         // best-effort — the knowledge upload itself already succeeded, don't fail the request over this
