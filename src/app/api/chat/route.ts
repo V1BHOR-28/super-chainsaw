@@ -1016,7 +1016,7 @@ export async function POST(req: NextRequest) {
                 const bookTitle = bookTitleMatch ? bookTitleMatch[1].replace(/\s+—\s+Part\s+\d+\/\d+$/, '') : 'a book'
 
                 // Create a journal entry — ARIA's reflection on the discussion
-                const journalEntry = `Discussed "${bookTitle}" with ${userName || 'the user'}. My take: ${fullText.slice(0, 200).trim()}...`
+                const journalEntry = `Discussed "${bookTitle}" with ${user?.name || 'the user'}. My take: ${fullText.slice(0, 200).trim()}...`
 
                 // Check if ARIA already has a journal entry for this book
                 const existingJournal = await db.memory.findFirst({
@@ -1049,8 +1049,11 @@ export async function POST(req: NextRequest) {
                 }
               }
             } catch (e) {
-              // Journal is best-effort — don't fail the chat
-              console.warn('[chat.journal] Failed:', e instanceof Error ? e.message : String(e))
+              // Journal is best-effort — don't fail the chat response.
+              // Logged as error (not warn) so it's visible under the Error filter
+              // in Vercel logs — a silent failure here went unnoticed for a long
+              // time because it was categorized as a general warning.
+              console.error('[chat.journal] Failed:', e instanceof Error ? e.message : String(e))
             }
           }
         } catch (e) {
