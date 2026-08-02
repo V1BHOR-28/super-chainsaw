@@ -266,7 +266,7 @@ model AudiobookChapter {
   chapterOrder    Int      @default(0)
   title           String
   // Raw HTML content extracted from the EPUB spine for this chapter.
-  rawHtml         String   @default("")
+  rawHtml         String   @default("") 
   // Raw text extracted from the HTML (tags stripped). Kept for debugging.
   rawText         String   @default("")
   // Narration-ready text after LLM cleaning (strips page numbers, headers,

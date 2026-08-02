@@ -6,10 +6,9 @@ const nextConfig: NextConfig = {
   },
   reactStrictMode: false,
   // Force Node.js runtime for all API routes (Prisma requires Node.js, not Edge)
-  experimental: {
-    // Next.js 16: serverComponentsExternalPackages replaces serverExternalPackages
-    serverComponentsExternalPackages: ["@prisma/client", "bcryptjs", "resend", "nodemailer"],
-  },
+  // Next.js 16: serverExternalPackages is the new top-level key (replaces
+  // experimental.serverComponentsExternalPackages from Next.js 15)
+  serverExternalPackages: ["@prisma/client", "bcryptjs", "resend", "nodemailer", "epub2", "bluebird", "cheerio"],
 };
 
 export default nextConfig;
