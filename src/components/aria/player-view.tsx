@@ -29,7 +29,7 @@ import { useAriaStore } from "@/lib/store";
 import { formatTime, formatDuration } from "@/lib/audiobooks";
 import { cn } from "@/lib/utils";
 import { AmbientGlow, StatusPill, AriaDivider } from "./primitives";
-import { DecorativeWaveform, NowPlayingBars } from "./waveform";
+import { NowPlayingBars } from "./waveform";
 import { BookCover } from "./book-cover";
 import { toast } from "@/hooks/use-toast";
 
@@ -139,19 +139,6 @@ export function PlayerView() {
                 className="absolute inset-0"
               />
               <div className="absolute inset-0 bg-gradient-to-t from-black/60 via-transparent to-transparent" />
-
-              {/* now playing badge — shown only on mobile where the header pill is hidden */}
-              <div className="sm:hidden absolute top-3 left-3 status-pill !py-1 !px-2.5 !text-[9px]">
-                <span className="status-dot" />
-                {isPlaying ? "Playing" : "Paused"}
-              </div>
-
-              {/* visualizer overlay at bottom */}
-              {isPlaying && (
-                <div className="absolute bottom-3 left-3 right-3">
-                  <DecorativeWaveform bars={40} active height={28} />
-                </div>
-              )}
             </div>
 
             {/* glow ring behind cover */}
