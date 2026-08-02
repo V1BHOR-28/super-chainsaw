@@ -333,9 +333,30 @@ export function LibraryView() {
                             )}
                           </>
                         ) : book.status === 'FAILED' ? (
-                          <p className="text-[11px] text-[#ef4444]">
-                            Generation failed
-                          </p>
+                          <div className="flex items-center gap-2">
+                            <p className="text-[11px] text-[#ef4444]">
+                              Generation failed
+                            </p>
+                            <button
+                              onClick={(e) => {
+                                e.stopPropagation()
+                                fetch(`/api/audiobooks/${book.id}/prep-batch`, { method: 'POST' })
+                                  .then(res => res.json())
+                                  .then(data => {
+                                    if (data.status && data.status !== 'FAILED') {
+                                      setAudiobooks(prev => prev.map(b =>
+                                        b.id === book.id ? { ...b, status: data.status } : b
+                                      ))
+                                    }
+                                  })
+                                  .catch(() => {})
+                              }}
+                              className="text-[10px] underline"
+                              style={{ color: 'var(--aria-accent-glow)' }}
+                            >
+                              Retry
+                            </button>
+                          </div>
                         ) : (
                           <p className="text-[11px] text-[var(--aria-accent-glow)] flex items-center gap-1">
                             <span className="status-dot" />

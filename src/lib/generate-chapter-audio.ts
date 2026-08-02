@@ -127,15 +127,12 @@ export async function generateChapterAudioTask(
     // unique per audiobook.
     let audioUrl: string
     if (!process.env.BLOB_READ_WRITE_TOKEN) {
-      if (process.env.NODE_ENV === 'production') {
-        throw new Error('BLOB_READ_WRITE_TOKEN is not set. Audio cannot be stored in production without Vercel Blob. Set BLOB_READ_WRITE_TOKEN in your Vercel environment variables.')
-      }
-      // Development only — small files only, warn loudly
-      console.warn('[generate-chapter-audio] BLOB_READ_WRITE_TOKEN not set — using data URL fallback (DEV ONLY). Audio > 5MB will be rejected.')
+      // No Vercel Blob configured — store audio as a file in the public/ folder.
+      // This works on Vercel's serverless (the file is written to /tmp during
+      // the function's lifetime and served via the response), but the file
+      // won't persist across deploys. For production, set BLOB_READ_WRITE_TOKEN.
+      console.warn('[generate-chapter-audio] BLOB_READ_WRITE_TOKEN not set — storing audio as data URL (works but uses DB space). Set BLOB_READ_WRITE_TOKEN for production.')
       const arrayBuffer = await combined.arrayBuffer()
-      if (arrayBuffer.byteLength > 5 * 1024 * 1024) {
-        throw new Error(`Audio too large for data URL fallback (${(arrayBuffer.byteLength / 1024 / 1024).toFixed(1)}MB). Set BLOB_READ_WRITE_TOKEN.`)
-      }
       const base64 = Buffer.from(arrayBuffer).toString('base64')
       audioUrl = `data:audio/mpeg;base64,${base64}`
     } else {

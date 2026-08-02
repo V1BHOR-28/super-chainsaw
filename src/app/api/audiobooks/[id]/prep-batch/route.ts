@@ -82,7 +82,18 @@ export async function POST(
       return NextResponse.json({ done: true, status: 'COMPLETED', progress: audiobook.chapters.length, total: audiobook.chapters.length })
     }
     if (audiobook.status === 'FAILED') {
-      return NextResponse.json({ done: true, status: 'FAILED' })
+      // Allow retry — reset failed chapters back to pending and set status to GENERATING.
+      // This lets the user click "Retry" on a failed audiobook to re-attempt generation.
+      console.log(`[audiobook.prep-batch] ${audiobook.id}: retrying FAILED audiobook — resetting failed chapters to pending`)
+      await db.audiobookChapter.updateMany({
+        where: { audiobookId: audiobook.id, status: 'failed' },
+        data: { status: 'pending' },
+      })
+      await db.audiobook.update({ where: { id: audiobook.id }, data: { status: 'GENERATING' } })
+      // Update local copies
+      audiobook.chapters = audiobook.chapters.map(c =>
+        c.status === 'failed' ? { ...c, status: 'pending' } : c
+      )
     }
     // COMPLETED_WITH_ERRORS is also a terminal state — treat like COMPLETED for polling.
     if (audiobook.status === 'COMPLETED_WITH_ERRORS') {
