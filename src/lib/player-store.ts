@@ -29,6 +29,7 @@ export interface PlayerChapter {
   chapterOrder: number;
   title: string;
   cleanedText: string;
+  rawText?: string;
   status: string; // pending | generating | ready | failed
   audioUrl: string | null;
   durationSeconds: number | null;

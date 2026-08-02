@@ -32,6 +32,13 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Please upload an .epub file. PDF files are no longer supported.' }, { status: 400 })
     }
 
+    // Reject oversized EPUBs early to avoid loading them fully into memory.
+    // Vercel Hobby would 413 the request anyway, but this gives a clear message.
+    const MAX_EPUB_SIZE = 50 * 1024 * 1024
+    if (file.size > MAX_EPUB_SIZE) {
+      return NextResponse.json({ error: `EPUB too large (${(file.size / 1024 / 1024).toFixed(1)}MB). Maximum is 50MB.` }, { status: 413 })
+    }
+
     // Parse the EPUB server-side
     const arrayBuffer = await file.arrayBuffer()
     const buffer = Buffer.from(arrayBuffer)

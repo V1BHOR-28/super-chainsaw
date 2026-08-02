@@ -24,7 +24,6 @@ import {
   Clock,
   CheckCircle2,
 } from "lucide-react";
-import { useAudioEngine } from "@/hooks/use-audio-engine";
 import { usePlayerStore } from "@/lib/player-store";
 import { useAriaStore } from "@/lib/store";
 import { formatTime, formatDuration } from "@/lib/audiobooks";
@@ -35,8 +34,8 @@ import { BookCover } from "./book-cover";
 import { toast } from "@/hooks/use-toast";
 
 export function PlayerView() {
-  // drive the audio engine
-  useAudioEngine();
+  // useAudioEngine is mounted at the workspace root (audiobook-workspace.tsx)
+  // so playback survives view switches and is not duplicated here.
 
   const book = usePlayerStore((s) => s.currentAudiobook);
   const chapters = usePlayerStore((s) => s.chapters);

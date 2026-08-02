@@ -64,10 +64,14 @@ export async function callGeminiForExtraction(prompt: string): Promise<string | 
  */
 export async function generateWithFallback(
   prompt: string,
-  opts?: { model?: string }
+  opts?: { model?: string; maxTokens?: number }
 ): Promise<string | null> {
   const messages = [{ role: 'user' as const, content: prompt }]
   const groqModel = opts?.model ?? 'llama-3.1-8b-instant' // default stays small/fast
+  // Default max_tokens stays at 800 to preserve existing behavior for short
+  // background tasks (conversation-summary, memory-detect). Chapter cleaning
+  // passes a larger value sized to its input — see cleanChapterLLM.
+  const maxTokens = opts?.maxTokens ?? 800
 
   const callGroq = async (): Promise<string> => {
     if (!process.env.GROQ_API_KEY) throw new Error('Groq: no API key')
@@ -80,7 +84,7 @@ export async function generateWithFallback(
       body: JSON.stringify({
         model: groqModel,
         messages,
-        max_tokens: 800,
+        max_tokens: maxTokens,
       }),
       signal: AbortSignal.timeout(25000),
     })
@@ -101,7 +105,7 @@ export async function generateWithFallback(
         'HTTP-Referer': 'https://ariav2-seven.vercel.app',
         'X-Title': 'ARIA',
       },
-      body: JSON.stringify({ model, messages, max_tokens: 800 }),
+      body: JSON.stringify({ model, messages, max_tokens: maxTokens }),
       signal: AbortSignal.timeout(25000),
     })
     if (!res.ok) throw new Error(`OpenRouter ${res.status}`)
@@ -117,7 +121,7 @@ export async function generateWithFallback(
     const res = await fetch('https://text.pollinations.ai/openai', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: 'openai', messages, max_tokens: 800 }),
+      body: JSON.stringify({ model: 'openai', messages, max_tokens: maxTokens }),
       signal: AbortSignal.timeout(25000),
     })
     if (!res.ok) throw new Error(`Pollinations ${res.status}`)

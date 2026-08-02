@@ -3,6 +3,7 @@ export const runtime = "nodejs"
 import { db } from '@/lib/db'
 import { getAuthenticatedUserId } from '@/lib/user'
 import { isCurrentUserAdmin } from '@/lib/usage'
+import { detectChapterBoundaries } from '@/lib/audiobook-prep-agent'
 
 /**
  * Auto-backfill: for admin users, check if any existing Knowledge documents
@@ -48,9 +49,32 @@ async function autoBackfillMissingAudiobooks(userId: string): Promise<void> {
       const bookTitle = chunks[0].title.replace(/\s+—\s+Part\s+\d+\/\d+$/, '')
 
       try {
-        // Create the audiobook row with fullText + prepStatus='pending'.
-        // Chapter prep does NOT happen here — it runs via POST /api/audiobooks/[id]/prep-batch,
-        // driven by the client while the library view is open.
+        // Detect chapter boundaries from the full text so the audiobook
+        // has chapters to clean + generate TTS for. Without this, prep-batch
+        // immediately marks the audiobook as FAILED (zero chapters).
+        let boundaries: { index: number; title: string; startOffset: number; endOffset: number }[] = []
+        try {
+          boundaries = await detectChapterBoundaries(fullText)
+        } catch (detectErr) {
+          console.error(`[audiobooks.autoBackfill] detectChapterBoundaries failed for "${bookTitle}":`, detectErr instanceof Error ? detectErr.message : String(detectErr))
+        }
+
+        if (boundaries.length === 0) {
+          console.log(`[audiobooks.autoBackfill] No chapters detected for "${bookTitle}", skipping`)
+          continue
+        }
+
+        // Create chapters from boundaries. Slice fullText per boundary.
+        const chaptersData = boundaries.map((b) => ({
+          chapterOrder: b.index,
+          chapterIndex: b.index, // keep both in sync for backward compat
+          title: b.title,
+          rawHtml: '',
+          rawText: fullText.slice(b.startOffset, b.endOffset),
+          cleanedText: '', // will be filled by prep-batch
+          status: 'pending' as const,
+        }))
+
         await db.audiobook.create({
           data: {
             userId: doc.userId,
@@ -60,10 +84,11 @@ async function autoBackfillMissingAudiobooks(userId: string): Promise<void> {
             fullText,
             status: 'PENDING',
             prepStatus: 'pending',
+            chapters: { create: chaptersData },
           },
         })
 
-        console.log(`[audiobooks.autoBackfill] Created audiobook for "${bookTitle}" (${fullText.length} chars, prep pending client-driven batches)`)
+        console.log(`[audiobooks.autoBackfill] Created audiobook for "${bookTitle}" (${fullText.length} chars, ${chaptersData.length} chapters, prep pending client-driven batches)`)
       } catch (e) {
         console.error(`[audiobooks.autoBackfill] Failed for ${doc.documentId}:`, e)
       }

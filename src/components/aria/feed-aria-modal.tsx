@@ -444,6 +444,13 @@ export function FeedAriaModal() {
                   onChange={(e) => {
                     const f = e.target.files?.[0]
                     if (f) {
+                      // EPUBs are constrained to 50MB by /api/audiobooks/upload-epub.
+                      // Reject them client-side to save a round-trip and a confusing 413.
+                      const isEpub = f.name.toLowerCase().endsWith('.epub') || f.type === 'application/epub+zip'
+                      if (isEpub && f.size > 50 * 1024 * 1024) {
+                        toast.error('EPUB too large (50MB max)')
+                        return
+                      }
                       if (f.size > 70 * 1024 * 1024) {
                         toast.error('File too large (max 70MB)')
                         return

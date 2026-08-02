@@ -21,7 +21,7 @@ interface AudiobookListItem {
   progressCharOffset: number;
   chapterCount: number;
   narratedCount: number;
-  status: string; // PENDING | GENERATING | COMPLETED | FAILED
+  status: string; // PENDING | GENERATING | COMPLETED | COMPLETED_WITH_ERRORS | FAILED
   prepProgress?: number;
   prepTotal?: number;
 }
@@ -117,8 +117,10 @@ export function LibraryView() {
   }, [audiobooks, preppingId]);
 
   const handleOpen = async (book: AudiobookListItem) => {
-    // Don't allow opening the player until the audiobook is COMPLETED
-    if (book.status !== 'COMPLETED') {
+    // Don't allow opening the player until the audiobook is at least partially ready.
+    // COMPLETED_WITH_ERRORS means some chapters failed but the rest are playable —
+    // still allow playback, the failed chapters will use live-narration fallback.
+    if (book.status !== 'COMPLETED' && book.status !== 'COMPLETED_WITH_ERRORS') {
       toast({ title: "Still generating", description: "This audiobook isn't ready to play yet." });
       return;
     }
@@ -312,8 +314,13 @@ export function LibraryView() {
                         {book.author ? `by ${book.author}` : 'Author unknown'}
                       </p>
                       <div className="flex items-center gap-2 mt-1">
-                        {book.status === 'COMPLETED' ? (
+                        {book.status === 'COMPLETED' || book.status === 'COMPLETED_WITH_ERRORS' ? (
                           <>
+                            {book.status === 'COMPLETED_WITH_ERRORS' && (
+                              <p className="text-[11px] text-[#f59e0b]" title="Some chapters failed to generate and will use live narration instead">
+                                Partially ready
+                              </p>
+                            )}
                             {hasProgress && (
                               <p className="text-[11px] text-[var(--aria-accent-glow)]">
                                 Ch. {book.progressChapter + 1} · {formatDuration(book.progressCharOffset)}

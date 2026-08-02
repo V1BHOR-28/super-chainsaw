@@ -278,6 +278,7 @@ model AudiobookChapter {
   audioUrl        String?
   durationSeconds Int?
   createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
 
   audiobook Audiobook @relation(fields: [audiobookId], references: [id], onDelete: Cascade)
 

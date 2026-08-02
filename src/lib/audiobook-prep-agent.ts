@@ -224,10 +224,20 @@ CRITICAL RULES:
 Chapter text:
 ${rawText}`
 
-  const result = await generateWithFallback(prompt, { model: 'llama-3.3-70b-versatile' })
-  if (!result || result.length < rawText.length * 0.5) {
-    // If the LLM output is suspiciously short (less than half the input), it
-    // probably summarized instead of cleaning — reject and fall back to regex.
+  // Roughly 4 chars per token for English; cap at 4000 to stay under Groq's
+  // output context limit for llama-3.3-70b-versatile (8K output context).
+  // Sized to the input so the model has room to return the full cleaned
+  // text instead of being truncated at the old hardcoded 800-token cap.
+  const estimatedInputTokens = Math.ceil(rawText.length / 4)
+  const maxTokens = Math.min(4000, Math.max(800, estimatedInputTokens * 2))
+
+  const result = await generateWithFallback(prompt, {
+    model: 'llama-3.3-70b-versatile',
+    maxTokens,
+  })
+  if (!result || result.length < rawText.length * 0.8) {
+    // If the LLM output is suspiciously short (less than 80% of the input),
+    // it probably summarized or was truncated — reject and fall back to regex.
     return null
   }
   return result

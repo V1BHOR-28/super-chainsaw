@@ -8,6 +8,7 @@ export interface ChapterRow {
   chapterOrder: number
   title: string
   cleanedText: string
+  rawText: string
   status: string // pending | generating | ready | failed
   audioUrl: string | null
   durationSeconds: number | null
@@ -51,6 +52,7 @@ export async function GET(
         chapterOrder: true,
         title: true,
         cleanedText: true,
+        rawText: true,        // needed by feed-aria-modal to build fullText for RAG indexing
         status: true,
         audioUrl: true,
         durationSeconds: true,
