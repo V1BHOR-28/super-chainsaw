@@ -106,6 +106,12 @@ async function autoBackfillMissingAudiobooks(userId: string): Promise<void> {
  */
 export async function GET() {
   try {
+    // Startup check: warn if BLOB_READ_WRITE_TOKEN is missing in production.
+    // Audiobook generation will fail when chapters are ready for TTS.
+    if (!process.env.BLOB_READ_WRITE_TOKEN && process.env.NODE_ENV === 'production') {
+      console.error('[audiobooks] BLOB_READ_WRITE_TOKEN is not set in production. Audiobook generation will fail when chapters are ready for TTS.')
+    }
+
     const userId = await getAuthenticatedUserId()
     if (!userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 

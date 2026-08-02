@@ -11,6 +11,7 @@
     "db:push": "prisma db push",
     "db:generate": "prisma generate",
     "db:migrate": "prisma migrate dev",
+    "db:deploy": "prisma migrate deploy",
     "db:reset": "prisma migrate reset",
     "verify:memory": "tsx scripts/verify-memory.ts",
     "db:indexes": "tsx scripts/add-vector-indexes.ts",

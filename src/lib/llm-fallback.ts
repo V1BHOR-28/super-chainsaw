@@ -117,6 +117,9 @@ export async function generateWithFallback(
 
   // Pollinations — keyless backstop (same as the chat route's callPollinations).
   // Always available, no API key needed, no rate limits. The safety net.
+  // NOTE: The POST /openai endpoint now returns 402 for large anonymous requests
+  // (chapter cleaning needs ~1576 output tokens). The GET endpoint below is the
+  // true backstop — it doesn't enforce the pollen budget.
   const callPollinations = async (): Promise<string> => {
     const res = await fetch('https://text.pollinations.ai/openai', {
       method: 'POST',
@@ -131,11 +134,33 @@ export async function generateWithFallback(
     return content.trim()
   }
 
+  // Pollinations GET endpoint — the POST /openai endpoint now returns 402 for
+  // large anonymous requests (chapter cleaning needs ~1576 output tokens).
+  // The GET endpoint (text.pollinations.ai/{prompt}) does NOT enforce the
+  // pollen budget for anonymous requests — it's the original free API.
+  // URL-encode the prompt and cap its length to stay under URL length limits.
+  const callPollinationsGet = async (): Promise<string> => {
+    // Cap prompt to 60000 chars (well under URL length limits for most servers).
+    // For chapter cleaning, this covers chapters up to ~15K chars (plenty).
+    const cappedPrompt = prompt.slice(0, 60000)
+    const encoded = encodeURIComponent(cappedPrompt)
+    const res = await fetch(`https://text.pollinations.ai/${encoded}`, {
+      method: 'GET',
+      signal: AbortSignal.timeout(60000), // GET can be slower for long outputs
+    })
+    if (!res.ok) throw new Error(`Pollinations GET ${res.status}`)
+    const text = await res.text()
+    if (!text?.trim()) throw new Error('Pollinations GET empty')
+    return text.trim()
+  }
+
   const providers: Array<() => Promise<string>> = []
   // Groq is the fastest + cheapest — primary path (works from Vercel/production).
   if (process.env.GROQ_API_KEY) providers.push(callGroq)
-  // Pollinations is the keyless backstop — always available, no key needed.
+  // Pollinations POST is the first keyless backstop.
   providers.push(callPollinations)
+  // Pollinations GET is the true keyless backstop — doesn't enforce pollen budget.
+  providers.push(callPollinationsGet)
 
   if (providers.length === 0) {
     console.error('[llm-fallback] No providers available (GROQ_API_KEY unset and Pollinations unreachable)')
@@ -158,4 +183,11 @@ export async function generateWithFallback(
     console.error(`[llm-fallback] All providers failed (${tried}) — ${reasons}`)
     return null
   }
+}
+
+// Warn once at module load if no LLM API keys are set — Pollinations POST
+// now returns 402 for large requests, so the GET endpoint is the only free
+// backstop. Quality will be lower without Groq or OpenRouter.
+if (!process.env.GROQ_API_KEY && !process.env.OPENROUTER_API_KEY && !process.env.GEMINI_API_KEY) {
+  console.warn('[llm-fallback] No GROQ_API_KEY, OPENROUTER_API_KEY, or GEMINI_API_KEY set. Falling back to Pollinations GET only — chapter cleaning and chat quality will be reduced.')
 }
