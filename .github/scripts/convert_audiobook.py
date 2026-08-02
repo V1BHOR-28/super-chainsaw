@@ -124,8 +124,77 @@ def split_for_tts(text: str, max_len: int = MAX_SEGMENT_CHARS) -> list:
     return segments
 
 
+# Patterns that identify front/back matter to skip.
+# Matched against the first heading or first 120 chars of text (lowercase).
+FRONTMATTER_PATTERNS = [
+    r"^copyright",
+    r"^all rights reserved",
+    r"^published by",
+    r"^table of contents",
+    r"^contents$",
+    r"^dedication",
+    r"^this book is dedicated",
+    r"^about the author",
+    r"^about this book",
+    r"^note on the text",
+    r"^editor.s note",
+    r"^translator.s note",
+    r"^preface\s*$",
+    r"^foreword\s*$",
+    r"^acknowledgements?\s*$",
+    r"^this ebook",
+    r"^project gutenberg",
+    r"^produced by",
+    r"gutenberg literary archive",
+    r"^title page\s*$",
+    r"^half.?title",
+    r"^colophon",
+]
+
+
+def _is_frontmatter(text: str, heading: str = "") -> bool:
+    """Return True if the text looks like front/back matter, not a real chapter."""
+    probe = (heading or text[:120]).lower().strip()
+    return any(re.search(pat, probe) for pat in FRONTMATTER_PATTERNS)
+
+
+def _split_on_headings(html_content: str, base_order: int) -> list:
+    """
+    Split a single large HTML file on <h2>/<h3> boundaries.
+    Used when an EPUB stores the whole book in one file.
+    Returns a list of chapter dicts with title, text, order.
+    """
+    soup = BeautifulSoup(html_content, "html.parser")
+    headings = soup.find_all(["h2", "h3"])
+    if not headings:
+        return []
+
+    chapters = []
+    for i, heading in enumerate(headings):
+        title = heading.get_text().strip()[:200]
+        # Collect all sibling content until the next heading
+        content_parts = []
+        for sibling in heading.find_next_siblings():
+            if sibling.name in ("h2", "h3"):
+                break
+            content_parts.append(str(sibling))
+        chunk_html = str(heading) + "".join(content_parts)
+        text = clean_text(chunk_html)
+        if len(text) < 50:
+            continue
+        if _is_frontmatter(text, title):
+            continue
+        chapters.append({"title": title, "text": text, "order": base_order + len(chapters)})
+
+    return chapters
+
+
 def parse_epub(epub_path: str):
-    """Parse EPUB and return (title, author, chapters)."""
+    """Parse EPUB and return (title, author, chapters).
+
+    Uses the spine (reading order) rather than raw manifest iteration,
+    filters front/back matter, and splits single-file EPUBs on headings.
+    """
     book = epub.read_epub(epub_path)
 
     title_meta = book.get_metadata("DC", "title")
@@ -133,41 +202,91 @@ def parse_epub(epub_path: str):
     author_meta = book.get_metadata("DC", "creator")
     author = author_meta[0][0] if author_meta else "Unknown"
 
-    # Build TOC map: href → title
+    # Build a map from item id → EpubItem for spine lookup
+    id_to_item = {item.id: item for item in book.get_items_of_type(ebooklib.ITEM_DOCUMENT)}
+
+    # Build TOC map: href (without fragment) → display title
     toc_map = {}
-    for item in book.toc:
-        if isinstance(item, epub.Link):
-            href = item.href.split("#")[0]
-            toc_map[href] = item.title
-        elif isinstance(item, tuple):
-            section, sub_items = item
-            if hasattr(section, "href"):
-                toc_map[section.href.split("#")[0]] = section.title
-            for sub in sub_items:
-                if hasattr(sub, "href"):
-                    toc_map[sub.href.split("#")[0]] = sub.title
+    def _walk_toc(items):
+        for item in items:
+            if isinstance(item, epub.Link):
+                toc_map[item.href.split("#")[0]] = item.title
+            elif isinstance(item, tuple):
+                section, children = item
+                if hasattr(section, "href"):
+                    toc_map[section.href.split("#")[0]] = section.title
+                _walk_toc(children)
+    _walk_toc(book.toc)
+
+    # Get reading order from spine. book.spine is a list of (id, linear) tuples.
+    # Fall back to iterating all document items if spine is empty.
+    if book.spine:
+        spine_ids = [item_id for item_id, _ in book.spine]
+        ordered_items = [id_to_item[sid] for sid in spine_ids if sid in id_to_item]
+    else:
+        ordered_items = list(id_to_item.values())
 
     chapters = []
     order = 0
-    for item in book.get_items_of_type(ebooklib.ITEM_DOCUMENT):
+
+    for item in ordered_items:
         html_content = item.get_content().decode("utf-8", errors="ignore")
         text = clean_text(html_content)
+
+        # Skip nearly-empty items (cover images, empty wrappers, etc.)
         if len(text) < 50:
             continue
 
         href = item.get_name().split("#")[0]
-        chapter_title = toc_map.get(href, "")
-        if not chapter_title:
-            soup = BeautifulSoup(html_content, "html.parser")
-            heading = soup.find(["h1", "h2", "h3"])
-            if heading:
-                chapter_title = heading.get_text().strip()[:200]
-        if not chapter_title:
-            chapter_title = f"Chapter {order + 1}"
+
+        # Determine candidate title from TOC map or first heading
+        soup = BeautifulSoup(html_content, "html.parser")
+        heading_tag = soup.find(["h1", "h2", "h3"])
+        heading_text = heading_tag.get_text().strip()[:200] if heading_tag else ""
+        chapter_title = toc_map.get(href, "") or heading_text or f"Chapter {order + 1}"
+
+        # Skip front/back matter
+        if _is_frontmatter(text, chapter_title):
+            print(f"[parse_epub] Skipping front/back matter: '{chapter_title[:60]}'")
+            continue
+
+        # If this item is very large (> 15,000 chars) and contains multiple headings,
+        # it's a single-file EPUB — split it on heading boundaries.
+        LARGE_FILE_THRESHOLD = 15_000
+        sub_headings = soup.find_all(["h2", "h3"])
+        if len(text) > LARGE_FILE_THRESHOLD and len(sub_headings) > 1:
+            print(f"[parse_epub] Large single-file item ({len(text)} chars, "
+                  f"{len(sub_headings)} headings) — splitting on headings")
+            sub_chapters = _split_on_headings(html_content, order)
+            if sub_chapters:
+                chapters.extend(sub_chapters)
+                order += len(sub_chapters)
+                continue
+            # If splitting yielded nothing, fall through and treat as one chapter
 
         chapters.append({"title": chapter_title[:200], "text": text, "order": order})
         order += 1
 
+    # If filtering was too aggressive and we ended up with nothing,
+    # retry without front-matter filtering (better to have all chapters
+    # including front matter than to have an empty audiobook).
+    if not chapters:
+        print("[parse_epub] All items were filtered as front-matter — retrying without filter")
+        order = 0
+        for item in ordered_items:
+            html_content = item.get_content().decode("utf-8", errors="ignore")
+            text = clean_text(html_content)
+            if len(text) < 50:
+                continue
+            href = item.get_name().split("#")[0]
+            soup = BeautifulSoup(html_content, "html.parser")
+            heading_tag = soup.find(["h1", "h2", "h3"])
+            heading_text = heading_tag.get_text().strip()[:200] if heading_tag else ""
+            chapter_title = toc_map.get(href, "") or heading_text or f"Chapter {order + 1}"
+            chapters.append({"title": chapter_title[:200], "text": text, "order": order})
+            order += 1
+
+    print(f"[parse_epub] '{title}' by {author}: {len(chapters)} chapters extracted")
     return title, author, chapters
 
 

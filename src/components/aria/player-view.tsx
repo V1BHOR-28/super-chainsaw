@@ -259,11 +259,6 @@ export function PlayerView() {
             <BookmarkButton bookId={book.id} chapterIndex={chapterIndex} time={currentTime} />
             <VolumeControl volume={volume} muted={muted} />
           </div>
-
-          {/* decorative waveform strip */}
-          <div className="hidden sm:block opacity-50 mt-2">
-            <DecorativeWaveform bars={80} active={isPlaying} height={36} />
-          </div>
         </div>
       </main>
 
