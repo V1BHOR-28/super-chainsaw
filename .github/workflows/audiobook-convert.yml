@@ -32,7 +32,7 @@ jobs:
 
       - name: Install Python dependencies
         run: |
-          pip install edge-tts ebooklib beautifulsoup4 requests
+          pip install edge-tts ebooklib beautifulsoup4 requests aiohttp
 
       - name: Run conversion
         env:
