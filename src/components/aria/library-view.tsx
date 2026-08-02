@@ -32,17 +32,25 @@ export function LibraryView() {
   const setActiveWorkspace = useAriaStore((s) => s.setActiveWorkspace);
   const [audiobooks, setAudiobooks] = useState<AudiobookListItem[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [hoveredBook, setHoveredBook] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
 
   const fetchAudiobooks = useCallback(async () => {
+    setLoading(true);
+    setError(null);
     try {
       const res = await fetch('/api/audiobooks');
-      if (!res.ok) return;
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body?.error || `Request failed (${res.status})`);
+      }
       const data = await res.json();
       setAudiobooks(data.audiobooks || []);
-    } catch {
-      // silent — empty state will show
+      setError(null);
+    } catch (err) {
+      console.error('[library-view] failed to load audiobooks', err);
+      setError(err instanceof Error ? err.message : 'Failed to load your library');
     } finally {
       setLoading(false);
     }
@@ -57,7 +65,10 @@ export function LibraryView() {
       // Fetch chapters for this audiobook before opening the player
       const res = await fetch(`/api/audiobooks/${book.id}/chapters`);
       if (!res.ok) {
-        toast({ title: "Could not load chapters", description: "Try again" });
+        const body = await res.json().catch(() => ({}));
+        const detail = body?.error || `Request failed (${res.status})`;
+        console.error('[library-view] could not load chapters for', book.id, detail);
+        toast({ title: "Could not load chapters", description: detail });
         return;
       }
       const data = await res.json();
@@ -75,19 +86,26 @@ export function LibraryView() {
       };
       // Resume from saved progress if available
       openPlayer(current, chapters, book.progressChapter || 0);
-    } catch {
-      toast({ title: "Could not open audiobook", description: "Try again" });
+    } catch (err) {
+      console.error('[library-view] failed to open audiobook', book.id, err);
+      const detail = err instanceof Error ? err.message : 'Try again';
+      toast({ title: "Could not open audiobook", description: detail });
     }
   };
 
   const handleDelete = async (id: string) => {
     try {
       const res = await fetch(`/api/audiobooks/${id}`, { method: 'DELETE' });
-      if (!res.ok) throw new Error('failed');
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        throw new Error(body?.error || `Request failed (${res.status})`);
+      }
       setAudiobooks(prev => prev.filter(b => b.id !== id));
       toast({ title: "Audiobook removed" });
-    } catch {
-      toast({ title: "Could not delete", description: "Try again" });
+    } catch (err) {
+      console.error('[library-view] failed to delete audiobook', id, err);
+      const detail = err instanceof Error ? err.message : 'Try again';
+      toast({ title: "Could not delete", description: detail });
     }
     setConfirmDelete(null);
   };
@@ -129,6 +147,19 @@ export function LibraryView() {
         {loading ? (
           <div className="text-center py-20" style={{ color: 'var(--aria-fg-dim)' }}>
             <p className="text-sm">Loading your library…</p>
+          </div>
+        ) : error ? (
+          <div className="text-center py-20">
+            <p className="text-sm" style={{ color: 'var(--aria-fg-muted)' }}>
+              Couldn&apos;t load your library — {error}
+            </p>
+            <button
+              onClick={fetchAudiobooks}
+              className="mt-3 text-sm underline"
+              style={{ color: 'var(--aria-accent-glow)' }}
+            >
+              Try again
+            </button>
           </div>
         ) : audiobooks.length === 0 ? (
           <div className="text-center py-20">
