@@ -27,12 +27,18 @@ jobs:
         with:
           python-version: '3.11'
 
+      - name: Cache Kokoro model weights
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/huggingface
+          key: kokoro-model-v1
+
       - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y ffmpeg
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg espeak-ng
 
       - name: Install Python dependencies
         run: |
-          pip install edge-tts ebooklib beautifulsoup4 requests aiohttp
+          pip install kokoro soundfile numpy ebooklib beautifulsoup4 requests aiohttp
 
       - name: Run conversion
         env:

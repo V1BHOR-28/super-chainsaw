@@ -3,18 +3,12 @@
 convert_audiobook.py — Convert an EPUB into audiobook chapter MP3s.
 
 Runs on a GitHub Actions runner (free, 45-minute timeout). Downloads the
-EPUB, parses it with ebooklib, generates TTS per chapter using edge-tts
-Python async API (NOT the CLI subprocess — avoids per-segment process
-spawn + WebSocket handshake overhead), uploads each MP3 to Vercel Blob
+EPUB, parses it with ebooklib, generates TTS per chapter using Kokoro
+(open-source neural TTS, Apache 2.0), uploads each MP3 to Vercel Blob
 concurrently, then calls the app's callback route.
 
-Speed improvements over the previous version:
-  1. edge_tts.Communicate async API instead of subprocess CLI calls
-     → no per-segment process spawn, reuses connection within a chapter
-  2. asyncio.gather() runs ALL chapter TTS + uploads concurrently
-     → 4-6x faster for multi-chapter books
-  3. Segment size increased from 3,000 to 4,800 chars
-     → fewer segments, fewer ffmpeg joins, fewer audio artifacts
+Kokoro produces significantly more natural narration than Edge TTS for
+long-form audiobook listening. It runs on CPU (no GPU required).
 
 Environment variables:
   JOB_ID                — The AudiobookJob ID
@@ -34,7 +28,9 @@ import tempfile
 import subprocess
 import requests
 
-import edge_tts
+import numpy as np
+import soundfile as sf
+from kokoro import KPipeline
 import ebooklib
 from ebooklib import epub
 from bs4 import BeautifulSoup
@@ -47,9 +43,14 @@ BLOB_TOKEN       = os.environ["BLOB_READ_WRITE_TOKEN"]
 APP_BASE_URL     = os.environ["APP_BASE_URL"]
 CALLBACK_SECRET  = os.environ["APP_CALLBACK_SECRET"]
 
-VOICE            = "en-US-AriaNeural"   # warm, natural female voice
-MAX_SEGMENT_CHARS = 4800                # edge-tts handles up to ~5000 safely
-MAX_CONCURRENT   = 4                    # chapters processed at the same time
+KOKORO_VOICE     = "af_heart"   # warm, natural — one of Kokoro's best voices for narration
+MAX_SEGMENT_CHARS = 500         # Kokoro works best with shorter, sentence-aligned segments
+MAX_CONCURRENT   = 2            # Kokoro on CPU is heavier than Edge TTS — keep concurrency lower
+
+# Initialise the pipeline once at module level so it's not re-loaded per chapter.
+print("[init] Loading Kokoro pipeline (this takes ~30s on first run)...")
+_pipeline = KPipeline(lang_code='a')  # 'a' = American English
+print("[init] Kokoro pipeline ready.")
 
 
 # ── Callback ─────────────────────────────────────────────────────────────────
@@ -290,57 +291,71 @@ def parse_epub(epub_path: str):
     return title, author, chapters
 
 
-# ── TTS generation (async, native API) ───────────────────────────────────────
-async def generate_chapter_audio(text: str, output_path: str) -> None:
+# ── TTS generation (Kokoro) ──────────────────────────────────────────────────
+def generate_chapter_audio_sync(text: str, output_path: str) -> None:
     """
-    Generate TTS audio for a chapter using the edge-tts Python async API.
+    Generate TTS audio for a chapter using Kokoro.
+    Synchronous — called via run_in_executor to avoid blocking the event loop.
 
-    No subprocess spawn. No per-call WebSocket handshake overhead.
-    For multi-segment chapters, segments are synthesised concurrently
-    then concatenated by ffmpeg.
+    Kokoro returns audio as numpy float32 arrays at 24kHz. We collect all
+    segments, concatenate them, then write a single WAV file and convert
+    to MP3 via ffmpeg.
     """
     segments = split_for_tts(text)
 
-    if len(segments) == 1:
-        communicate = edge_tts.Communicate(segments[0], VOICE)
-        await communicate.save(output_path)
-        return
+    all_audio = []
+    sample_rate = 24000  # Kokoro's native sample rate
 
-    # Multiple segments — generate all concurrently, then ffmpeg concat
-    tmp_dir = os.path.dirname(output_path)
-    base_name = os.path.basename(output_path)
-    seg_paths = [os.path.join(tmp_dir, f"seg_{base_name}_{i:04d}.mp3")
-                 for i in range(len(segments))]
+    for i, segment in enumerate(segments):
+        if not segment.strip():
+            continue
+        try:
+            # _pipeline() returns a generator of (graphemes, phonemes, audio_array) tuples.
+            segment_chunks = []
+            for _, _, audio in _pipeline(segment, voice=KOKORO_VOICE, speed=1.0):
+                if audio is not None and len(audio) > 0:
+                    segment_chunks.append(audio)
+            if segment_chunks:
+                all_audio.append(np.concatenate(segment_chunks))
+        except Exception as e:
+            print(f"[tts] Segment {i+1}/{len(segments)} failed: {e}", file=sys.stderr)
 
-    async def synthesise_segment(text_seg, path):
-        communicate = edge_tts.Communicate(text_seg, VOICE)
-        await communicate.save(path)
+    if not all_audio:
+        raise RuntimeError("Kokoro produced no audio for this chapter")
 
-    # Run all segments for this chapter concurrently
-    await asyncio.gather(*[synthesise_segment(seg, path)
-                           for seg, path in zip(segments, seg_paths)])
+    # Add 0.5s of silence between segments for natural paragraph breathing.
+    silence = np.zeros(int(sample_rate * 0.5), dtype=np.float32)
+    combined = np.concatenate(
+        [chunk for pair in zip(all_audio, [silence] * len(all_audio)) for chunk in pair]
+    )
 
-    # Concatenate with ffmpeg
-    concat_file = os.path.join(tmp_dir, f"concat_{base_name}.txt")
-    with open(concat_file, "w") as f:
-        for path in seg_paths:
-            f.write(f"file '{path}'\n")
+    # Write as WAV first (lossless intermediate), then convert to MP3 with ffmpeg.
+    wav_path = output_path.replace(".mp3", ".wav")
+    sf.write(wav_path, combined, sample_rate)
 
     result = subprocess.run(
-        ["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", concat_file,
-         "-c", "copy", output_path],
+        ["ffmpeg", "-y", "-i", wav_path, "-codec:a", "libmp3lame",
+         "-qscale:a", "4",   # VBR ~165kbps — good quality, reasonable file size
+         output_path],
         capture_output=True, text=True, timeout=120,
     )
 
-    # Clean up segment files and concat list
-    for path in seg_paths:
-        try: os.remove(path)
-        except: pass
-    try: os.remove(concat_file)
-    except: pass
+    try:
+        os.remove(wav_path)
+    except:
+        pass
 
     if result.returncode != 0:
-        raise RuntimeError(f"ffmpeg concat failed: {result.stderr[:500]}")
+        raise RuntimeError(f"ffmpeg MP3 conversion failed: {result.stderr[:500]}")
+
+
+async def generate_chapter_audio(text: str, output_path: str) -> None:
+    """
+    Async wrapper around the synchronous Kokoro generation.
+    Runs in a thread executor so it doesn't block asyncio.gather().
+    """
+    loop = asyncio.get_running_loop()
+    await loop.run_in_executor(None, generate_chapter_audio_sync, text, output_path)
 
 
 # ── Blob upload (async via asyncio executor) ──────────────────────────────────
