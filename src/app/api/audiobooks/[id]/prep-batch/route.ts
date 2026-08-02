@@ -11,10 +11,9 @@ import {
 } from '@/lib/audiobook-prep-agent'
 import { claimChapterForGeneration, generateChapterAudioTask } from '@/lib/generate-chapter-audio'
 
-const BATCH_SIZE = 1 // process ONE chapter per call (cleaning + TTS) to stay within 60s.
-// The LLM cleaning call has a 25s timeout and Kokoro TTS synthesis can take 10-30s
-// per chapter, so 1 chapter per call = ~35-55s, safely within the 60s budget.
-// Multiple chapters per call risks timeout → chapter stuck at 'generating' forever.
+const BATCH_SIZE = 3 // process up to 3 chapters per call (cleaning + TTS).
+// Regex cleaning is fast (<1s per chapter). Edge TTS takes ~10-20s per chapter.
+// 3 chapters = ~30-60s, within the 60s Vercel budget.
 
 // Stale-generation recovery threshold — a chapter stuck in 'generating' for
 // longer than this is assumed to have been orphaned by a function timeout
@@ -302,18 +301,12 @@ export async function POST(
     // route) may have changed rows we didn't touch in this call.
     const refreshedChapters = await db.audiobookChapter.findMany({
       where: { audiobookId: audiobook.id },
-      select: { audioUrl: true, status: true },
+      select: { audioUrl: true, status: true, cleanedText: true },
     })
 
-    // Check terminal state across all chapters. Three terminal outcomes:
-    //   - all chapters ready            → COMPLETED
-    //   - some ready, some failed       → COMPLETED_WITH_ERRORS (still playable, with a warning)
-    //   - none ready, all failed        → FAILED
-    // The old code only checked the first and last case, leaving mixed
-    // ready+failed states stuck in GENERATING forever (the client would
-    // keep polling, and the loop would keep re-attempting the failed chapter).
     const readyCount = refreshedChapters.filter(c => c.audioUrl).length
     const failedCount = refreshedChapters.filter(c => c.status === 'failed').length
+    const cleanedCount = refreshedChapters.filter(c => c.cleanedText && c.cleanedText.length > 0).length
     const pendingCount = refreshedChapters.filter(c => c.status === 'pending' || c.status === 'generating').length
 
     if (pendingCount === 0) {
@@ -322,8 +315,6 @@ export async function POST(
         console.log(`[audiobook.prep-batch] ${audiobook.id}: COMPLETED (${readyCount}/${total} chapters)`)
         return NextResponse.json({ done: true, status: 'COMPLETED', progress: readyCount, total })
       }
-      // Some chapters failed — mark COMPLETED_WITH_ERRORS so the user can
-      // still play the ready ones, with a warning badge on the failures.
       const status = readyCount > 0 ? 'COMPLETED_WITH_ERRORS' : 'FAILED'
       await db.audiobook.update({ where: { id: audiobook.id }, data: { status } })
       console.log(`[audiobook.prep-batch] ${audiobook.id}: ${status} (${readyCount} ready, ${failedCount} failed)`)
@@ -334,6 +325,7 @@ export async function POST(
       done: false,
       status: 'GENERATING',
       progress: readyCount,
+      cleanedCount,
       total,
     })
   } catch (err) {

@@ -49,6 +49,21 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'No readable chapters found in this EPUB.' }, { status: 400 })
     }
 
+    // Dedup: check if an audiobook with the same title already exists for this user.
+    // This prevents duplicate uploads from creating multiple copies.
+    const existing = await db.audiobook.findFirst({
+      where: { userId, title },
+      select: { id: true, status: true },
+    })
+    if (existing) {
+      return NextResponse.json({
+        audiobookId: existing.id,
+        title,
+        chapterCount: 0,
+        alreadyExists: true,
+      })
+    }
+
     const documentId = `epub-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
 
     // Create the Audiobook + AudiobookChapter rows

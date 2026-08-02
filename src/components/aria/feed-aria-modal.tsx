@@ -184,6 +184,20 @@ export function FeedAriaModal() {
         throw new Error(data.error || 'Failed to upload EPUB')
       }
 
+      // If this EPUB was already uploaded, don't create a duplicate.
+      if (data.alreadyExists) {
+        toast.info(`"${data.title}" is already in your library — opening it now.`)
+        setFile(null)
+        setEpubUploading(false)
+        if (fileInputRef.current) fileInputRef.current.value = ''
+        setTimeout(() => {
+          setState('idle')
+          setFeedAriaOpen(false)
+          setActiveWorkspace('audiobooks')
+        }, 1500)
+        return
+      }
+
       // Also store the full text as Knowledge for chat/RAG
       // (so ARIA can still reference the book in conversations)
       try {

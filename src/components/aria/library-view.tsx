@@ -93,12 +93,17 @@ export function LibraryView() {
         // Update the audiobook's state in the local list
         setAudiobooks(prev => prev.map(b => {
           if (b.id !== preppingId) return b;
+          // Show cleanedCount if no audio is ready yet (cleaning phase),
+          // otherwise show audio-ready count (generation phase).
+          const audioReady = data.progress ?? 0
+          const cleaned = data.cleanedCount ?? 0
+          const displayProgress = audioReady > 0 ? audioReady : cleaned
           return {
             ...b,
             status: data.status || b.status,
-            prepProgress: data.progress,
+            prepProgress: displayProgress,
             prepTotal: data.total,
-            narratedCount: data.progress ?? b.narratedCount,
+            narratedCount: audioReady,
             chapterCount: data.total ?? b.chapterCount,
           };
         }));
@@ -378,8 +383,8 @@ export function LibraryView() {
                           <p className="text-[11px] text-[var(--aria-accent-glow)] flex items-center gap-1">
                             <span className="status-dot" />
                             {book.prepTotal && book.prepTotal > 0
-                              ? `Generating… (${book.prepProgress ?? 0}/${book.prepTotal} chapters)`
-                              : 'Generating…'}
+                              ? `Processing… (${book.prepProgress ?? 0}/${book.prepTotal} chapters)`
+                              : 'Processing…'}
                           </p>
                         )}
                       </div>
