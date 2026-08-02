@@ -52,6 +52,13 @@ type AriaState = {
   toggleSidebar: () => void
   setSidebarCollapsed: (v: boolean) => void
 
+  // Active workspace — Chat (default) or the new Audiobooks feature.
+  // This only controls which top-level workspace renders in page.tsx;
+  // it is unrelated to the audiobook module's own internal library/player
+  // view state, which lives entirely inside player-store.ts.
+  activeWorkspace: 'chat' | 'audiobooks'
+  setActiveWorkspace: (w: 'chat' | 'audiobooks') => void
+
   activePanel: SidebarPanel
   setActivePanel: (p: SidebarPanel) => void
 
@@ -168,6 +175,9 @@ export const useAriaStore = create<AriaState>((set) => ({
   sidebarCollapsed: false,
   toggleSidebar: () => set((s) => ({ sidebarCollapsed: !s.sidebarCollapsed })),
   setSidebarCollapsed: (v) => set({ sidebarCollapsed: v }),
+
+  activeWorkspace: 'chat',
+  setActiveWorkspace: (w) => set({ activeWorkspace: w }),
 
   activePanel: 'conversations',
   setActivePanel: (p) => set({ activePanel: p }),

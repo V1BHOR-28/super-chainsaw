@@ -4,6 +4,7 @@ import { useEffect } from 'react'
 import { useSession } from 'next-auth/react'
 import { Sidebar } from '@/components/aria/sidebar'
 import { ChatArea } from '@/components/aria/chat-area'
+import { AudiobookWorkspace } from '@/components/aria/audiobook-workspace'
 import { SettingsModal } from '@/components/aria/settings-modal'
 import { FeedAriaModal } from '@/components/aria/feed-aria-modal'
 import { LandingPage } from '@/components/aria/landing-page'
@@ -23,6 +24,7 @@ export default function HomePage() {
     setConversations,
     setActiveConversation,
     setUsage,
+    activeWorkspace,
   } = useAriaStore()
 
   // ─── Auth state bootstrap ───
@@ -162,7 +164,13 @@ export default function HomePage() {
     <>
       <div className="flex h-dvh w-screen overflow-hidden">
         <Sidebar />
-        <ChatArea />
+        {activeWorkspace === 'audiobooks' ? (
+          <div className="flex-1 overflow-y-auto">
+            <AudiobookWorkspace />
+          </div>
+        ) : (
+          <ChatArea />
+        )}
         <SettingsModal />
         <FeedAriaModal />
       </div>

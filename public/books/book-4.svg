@@ -1,0 +1,31 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 1000" width="600" height="1000">
+  <defs>
+    <radialGradient id="g2" cx="30%" cy="20%" r="50%">
+      <stop offset="0%" stop-color="#f59e0b" stop-opacity="0.2"/>
+      <stop offset="100%" stop-color="transparent"/>
+    </radialGradient>
+    <linearGradient id="bg2" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#1c0f06"/>
+      <stop offset="60%" stop-color="#0c0a08"/>
+      <stop offset="100%" stop-color="#050403"/>
+    </linearGradient>
+    <pattern id="lines2" x="0" y="0" width="20" height="20" patternUnits="userSpaceOnUse" patternTransform="rotate(115)">
+      <line x1="0" y1="0" x2="0" y2="20" stroke="#f59e0b" stroke-opacity="0.05" stroke-width="19"/>
+    </pattern>
+  </defs>
+  <rect width="600" height="1000" fill="url(#bg2)"/>
+  <rect width="600" height="1000" fill="url(#lines2)"/>
+  <rect width="600" height="1000" fill="url(#g2)"/>
+  <circle cx="500" cy="100" r="80" fill="#f59e0b" opacity="0.15" filter="blur(20px)"/>
+  <circle cx="480" cy="90" r="30" fill="#f59e0b" opacity="0.4"/>
+  <!-- Envelope motif -->
+  <g transform="translate(250, 420)" opacity="0.25">
+    <rect x="0" y="0" width="100" height="70" fill="none" stroke="#f59e0b" stroke-width="1.5"/>
+    <path d="M0 0 L50 40 L100 0" fill="none" stroke="#f59e0b" stroke-width="1.5"/>
+  </g>
+  <text x="50" y="70" font-family="monospace" font-size="14" fill="#9ca3af" letter-spacing="3" opacity="0.6">ARIA BOOKS</text>
+  <text x="50" y="780" font-family="serif" font-size="48" fill="#fafaf9" font-weight="bold">Letters to</text>
+  <text x="50" y="840" font-family="serif" font-size="48" fill="#fafaf9" font-weight="bold">No One</text>
+  <text x="50" y="885" font-family="sans-serif" font-size="18" fill="#a8a29e">Iris Bellweather</text>
+  <text x="50" y="950" font-family="monospace" font-size="12" fill="#78716c" letter-spacing="2" opacity="0.7">EPISTOLARY · LITERARY FICTION</text>
+</svg>

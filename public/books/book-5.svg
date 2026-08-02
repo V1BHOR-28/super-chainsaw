@@ -1,0 +1,30 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 1000" width="600" height="1000">
+  <defs>
+    <radialGradient id="g3" cx="30%" cy="20%" r="50%">
+      <stop offset="0%" stop-color="#fbbf24" stop-opacity="0.2"/>
+      <stop offset="100%" stop-color="transparent"/>
+    </radialGradient>
+    <linearGradient id="bg3" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#1c0f06"/>
+      <stop offset="60%" stop-color="#0c0a08"/>
+      <stop offset="100%" stop-color="#050403"/>
+    </linearGradient>
+    <pattern id="lines3" x="0" y="0" width="20" height="20" patternUnits="userSpaceOnUse" patternTransform="rotate(115)">
+      <line x1="0" y1="0" x2="0" y2="20" stroke="#fbbf24" stroke-opacity="0.05" stroke-width="19"/>
+    </pattern>
+  </defs>
+  <rect width="600" height="1000" fill="url(#bg3)"/>
+  <rect width="600" height="1000" fill="url(#lines3)"/>
+  <rect width="600" height="1000" fill="url(#g3)"/>
+  <circle cx="500" cy="100" r="80" fill="#fbbf24" opacity="0.15" filter="blur(20px)"/>
+  <!-- Lighthouse beam motif -->
+  <g transform="translate(300, 450)" opacity="0.3">
+    <path d="M0 0 L120 -80 L120 80 Z" fill="#fbbf24" opacity="0.4"/>
+    <rect x="-10" y="-10" width="20" height="20" fill="#fbbf24"/>
+  </g>
+  <text x="50" y="70" font-family="monospace" font-size="14" fill="#9ca3af" letter-spacing="3" opacity="0.6">ARIA BOOKS</text>
+  <text x="50" y="770" font-family="serif" font-size="40" fill="#fafaf9" font-weight="bold">The Lighthouse</text>
+  <text x="50" y="820" font-family="serif" font-size="40" fill="#fafaf9" font-weight="bold">at World's End</text>
+  <text x="50" y="870" font-family="sans-serif" font-size="18" fill="#a8a29e">Henrik Sjöberg</text>
+  <text x="50" y="950" font-family="monospace" font-size="12" fill="#78716c" letter-spacing="2" opacity="0.7">MYSTERY · LITERARY HORROR</text>
+</svg>

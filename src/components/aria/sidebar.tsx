@@ -20,6 +20,7 @@ import {
   BookOpen,
   Check,
   MoreHorizontal,
+  Headphones,
 } from 'lucide-react'
 import { useAriaStore } from '@/lib/store'
 import { SidePanels } from '@/components/aria/side-panels'
@@ -50,6 +51,8 @@ export function Sidebar() {
     upsertReminder,
     setSignedOut,
     settings,
+    activeWorkspace,
+    setActiveWorkspace,
   } = useAriaStore()
 
   const [dropdownOpen, setDropdownOpen] = useState(false)
@@ -186,6 +189,34 @@ export function Sidebar() {
         >
           <div className="aria-logo-dot" />
           <span className="font-serif-aria text-2xl tracking-tight">ARIA</span>
+        </div>
+
+        {/* Workspace switcher — Chat vs Audiobooks */}
+        <div className="flex gap-2 mb-4">
+          <button
+            onClick={() => setActiveWorkspace('chat')}
+            className="flex-1 py-2.5 px-3 rounded-xl flex items-center justify-center gap-2 transition-all text-xs"
+            style={{
+              background: activeWorkspace === 'chat' ? 'rgba(245,158,11,0.1)' : 'var(--aria-card)',
+              border: `1px solid ${activeWorkspace === 'chat' ? 'rgba(245,158,11,0.3)' : 'var(--aria-border)'}`,
+              color: activeWorkspace === 'chat' ? 'var(--aria-accent-glow)' : 'var(--aria-fg-muted)',
+            }}
+          >
+            <MessageSquare size={13} />
+            Chat
+          </button>
+          <button
+            onClick={() => setActiveWorkspace('audiobooks')}
+            className="flex-1 py-2.5 px-3 rounded-xl flex items-center justify-center gap-2 transition-all text-xs"
+            style={{
+              background: activeWorkspace === 'audiobooks' ? 'rgba(245,158,11,0.1)' : 'var(--aria-card)',
+              border: `1px solid ${activeWorkspace === 'audiobooks' ? 'rgba(245,158,11,0.3)' : 'var(--aria-border)'}`,
+              color: activeWorkspace === 'audiobooks' ? 'var(--aria-accent-glow)' : 'var(--aria-fg-muted)',
+            }}
+          >
+            <Headphones size={13} />
+            Audiobooks
+          </button>
         </div>
 
         {/* New conversation + Feed ARIA */}

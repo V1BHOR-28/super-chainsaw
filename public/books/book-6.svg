@@ -1,0 +1,28 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 600 1000" width="600" height="1000">
+  <defs>
+    <radialGradient id="g4" cx="30%" cy="20%" r="50%">
+      <stop offset="0%" stop-color="#fcd34d" stop-opacity="0.2"/>
+      <stop offset="100%" stop-color="transparent"/>
+    </radialGradient>
+    <linearGradient id="bg4" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#1c0f06"/>
+      <stop offset="60%" stop-color="#0c0a08"/>
+      <stop offset="100%" stop-color="#050403"/>
+    </linearGradient>
+    <pattern id="lines4" x="0" y="0" width="20" height="20" patternUnits="userSpaceOnUse" patternTransform="rotate(115)">
+      <line x1="0" y1="0" x2="0" y2="20" stroke="#fcd34d" stroke-opacity="0.05" stroke-width="19"/>
+    </pattern>
+  </defs>
+  <rect width="600" height="1000" fill="url(#bg4)"/>
+  <rect width="600" height="1000" fill="url(#lines4)"/>
+  <rect width="600" height="1000" fill="url(#g4)"/>
+  <circle cx="500" cy="100" r="80" fill="#fcd34d" opacity="0.15" filter="blur(20px)"/>
+  <!-- Sun/planet motif -->
+  <circle cx="300" cy="450" r="70" fill="none" stroke="#fcd34d" stroke-width="2" opacity="0.4"/>
+  <circle cx="300" cy="450" r="50" fill="#fcd34d" opacity="0.2"/>
+  <text x="50" y="70" font-family="monospace" font-size="14" fill="#9ca3af" letter-spacing="3" opacity="0.6">ARIA BOOKS</text>
+  <text x="50" y="770" font-family="serif" font-size="42" fill="#fafaf9" font-weight="bold">Beneath the</text>
+  <text x="50" y="825" font-family="serif" font-size="42" fill="#fafaf9" font-weight="bold">Amber Sky</text>
+  <text x="50" y="875" font-family="sans-serif" font-size="18" fill="#a8a29e">Yuki Tanaka</text>
+  <text x="50" y="950" font-family="monospace" font-size="12" fill="#78716c" letter-spacing="2" opacity="0.7">SCIENCE FICTION · LITERARY</text>
+</svg>

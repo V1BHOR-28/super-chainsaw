@@ -535,3 +535,219 @@
     scroll-behavior: auto !important;
   }
 }
+
+/* ============ Audiobooks module (ported) ============ */
+
+.ambient-glow {
+  position: absolute;
+  border-radius: 50%;
+  filter: blur(100px);
+  pointer-events: none;
+  z-index: 0;
+}
+
+.gradient-text {
+  background: linear-gradient(135deg, #f59e0b 0%, #fcd34d 50%, #fbbf24 100%);
+  -webkit-background-clip: text;
+  background-clip: text;
+  -webkit-text-fill-color: transparent;
+  color: transparent;
+}
+
+.status-pill {
+  background: rgba(245, 158, 11, 0.08);
+  border: 1px solid rgba(245, 158, 11, 0.25);
+  border-radius: 999px;
+  padding: 6px 14px;
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  color: var(--aria-accent-glow);
+  text-transform: uppercase;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+.status-dot {
+  width: 6px;
+  height: 6px;
+  border-radius: 50%;
+  background: var(--aria-accent-bright);
+  box-shadow: 0 0 8px var(--aria-accent-bright);
+  animation: aria-pulse-dot 2s cubic-bezier(0.4, 0, 0.6, 1) infinite;
+}
+@keyframes aria-pulse-dot {
+  0%, 100% { opacity: 1; transform: scale(1); }
+  50% { opacity: 0.5; transform: scale(0.85); }
+}
+
+.aria-divider {
+  height: 1px;
+  background: linear-gradient(90deg, transparent, rgba(252, 211, 77, 0.12) 20%, rgba(252, 211, 77, 0.12) 80%, transparent);
+}
+
+.wave-bar {
+  display: inline-block;
+  width: 3px;
+  background: var(--aria-accent-bright);
+  border-radius: 2px;
+  margin: 0 1.5px;
+  animation: aria-wave 1.2s ease-in-out infinite;
+}
+@keyframes aria-wave {
+  0%, 100% { height: 6px; }
+  50% { height: 22px; }
+}
+
+.eq-bar {
+  width: 3px;
+  background: var(--aria-accent-glow);
+  border-radius: 2px;
+  animation: aria-eq 0.9s ease-in-out infinite;
+}
+.eq-bar:nth-child(2) { animation-delay: 0.15s; }
+.eq-bar:nth-child(3) { animation-delay: 0.3s; }
+.eq-bar:nth-child(4) { animation-delay: 0.45s; }
+@keyframes aria-eq {
+  0%, 100% { height: 4px; }
+  50% { height: 14px; }
+}
+
+.btn-ghost {
+  background: transparent;
+  color: var(--aria-fg);
+  padding: 14px 28px;
+  border-radius: 999px;
+  font-weight: 500;
+  font-size: 14px;
+  border: 1px solid var(--aria-border);
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  transition: all 0.3s ease;
+  cursor: pointer;
+}
+.btn-ghost:hover {
+  border-color: var(--aria-accent-bright);
+  color: var(--aria-accent-glow);
+  background: rgba(245, 158, 11, 0.05);
+}
+
+.fade-up {
+  opacity: 0;
+  transform: translateY(40px);
+  transition: opacity 1.1s cubic-bezier(0.2, 0.7, 0.2, 1),
+              transform 1.1s cubic-bezier(0.2, 0.7, 0.2, 1);
+}
+.fade-up.is-visible {
+  opacity: 1;
+  transform: translateY(0);
+}
+
+.book-cover {
+  position: relative;
+  border-radius: 12px;
+  overflow: hidden;
+  box-shadow: 0 20px 50px rgba(0, 0, 0, 0.6), 0 0 0 1px rgba(252, 211, 77, 0.08);
+  transition: all 0.5s cubic-bezier(0.2, 0.7, 0.2, 1);
+}
+.book-cover:hover {
+  transform: translateY(-6px);
+  box-shadow: 0 30px 70px rgba(0, 0, 0, 0.7), 0 0 0 1px rgba(245, 158, 11, 0.3), 0 0 40px rgba(245, 158, 11, 0.2);
+}
+
+.progress-track {
+  position: relative;
+  height: 4px;
+  background: rgba(252, 211, 77, 0.1);
+  border-radius: 999px;
+  overflow: hidden;
+  cursor: pointer;
+}
+.progress-track:hover {
+  height: 6px;
+}
+.progress-fill {
+  position: absolute;
+  inset: 0;
+  background: linear-gradient(90deg, #f59e0b, #fcd34d);
+  border-radius: 999px;
+  transition: width 0.1s linear;
+}
+.progress-thumb {
+  position: absolute;
+  top: 50%;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  background: var(--aria-accent-glow);
+  box-shadow: 0 0 12px var(--aria-accent-bright);
+  transform: translate(-50%, -50%);
+  opacity: 0;
+  transition: opacity 0.2s;
+}
+.progress-track:hover .progress-thumb {
+  opacity: 1;
+}
+
+.transport-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  color: var(--aria-fg);
+  transition: all 0.3s ease;
+  cursor: pointer;
+  background: transparent;
+  border: none;
+}
+.transport-btn:hover {
+  color: var(--aria-accent-glow);
+  background: rgba(245, 158, 11, 0.08);
+}
+.transport-btn-lg {
+  width: 64px;
+  height: 64px;
+  background: var(--aria-fg);
+  color: var(--aria-bg);
+}
+.transport-btn-lg:hover {
+  background: var(--aria-accent-glow);
+  color: var(--aria-bg);
+  box-shadow: 0 0 30px rgba(245, 158, 11, 0.5);
+  transform: scale(1.05);
+}
+
+.chapter-item {
+  padding: 14px 18px;
+  border-radius: 12px;
+  cursor: pointer;
+  transition: all 0.3s ease;
+  border: 1px solid transparent;
+  display: flex;
+  align-items: center;
+  gap: 14px;
+}
+.chapter-item:hover {
+  background: var(--aria-card);
+  border-color: var(--aria-border);
+}
+.chapter-item.active {
+  background: rgba(245, 158, 11, 0.08);
+  border-color: rgba(245, 158, 11, 0.3);
+}
+
+.glass-bubble {
+  background: rgba(22, 18, 16, 0.85);
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  border: 1px solid rgba(252, 211, 77, 0.12);
+  border-radius: 18px;
+  box-shadow: 0 10px 40px rgba(0, 0, 0, 0.5);
+}
+
+/* Float animation for the playing book cover */
+@keyframes aria-float-y {
+  0%, 100% { transform: translateY(0); }
+  50% { transform: translateY(-8px); }
+}
+
