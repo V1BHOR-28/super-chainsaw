@@ -26,16 +26,24 @@ export interface EpubParseResult {
   fullText: string
 }
 
+/** Extract text from HTML using cheerio — strips tags, scripts, styles. */
+function htmlToText(html: string): string {
+  const $ = cheerio.load(html)
+  $('script, style, nav, header, footer, aside, link, meta').remove()
+  return $('body').text().replace(/\s+/g, ' ').trim()
+}
+
 /**
  * Parse an EPUB file and extract its chapters with TOC titles and raw HTML.
  *
- * @param fileBuffer - The EPUB file as a Buffer (from a Blob/File upload)
- * @returns { title, author, chapters, fullText }
+ * This parser is designed to be robust across different EPUB structures:
+ * - EPUB2 with NCX toc
+ * - EPUB3 with nav document
+ * - EPUBs with non-standard manifest IDs
+ * - EPUBs where getChapterAsync fails (falls back to getChapterRawAsync)
+ * - EPUBs with no spine (falls back to iterating the manifest directly)
  */
 export async function parseEpub(fileBuffer: Buffer): Promise<EpubParseResult> {
-  // epub2's createAsync expects a file path, but we can use the underlying
-  // EPub constructor with a Buffer by writing to a temp file. On Vercel's
-  // serverless environment, /tmp is writable.
   const fs = await import('fs/promises')
   const path = await import('path')
   const os = await import('os')
@@ -49,17 +57,13 @@ export async function parseEpub(fileBuffer: Buffer): Promise<EpubParseResult> {
     const title = epub.metadata?.title || 'Untitled'
     const author = epub.metadata?.creator || epub.metadata?.author || null
 
-    // The `flow` is the spine — the reading order of the book.
-    // The `toc` has the chapter titles mapped to hrefs.
     const flow = epub.flow || []
     const toc = epub.toc || []
 
-    // Build a map of href → title from the TOC for quick lookup
+    // Build a map of href → title from the TOC
     const tocMap = new Map<string, string>()
     for (const item of toc) {
       if (item.title && item.href) {
-        // TOC hrefs can be "chapter.xhtml" or "chapter.xhtml#section"
-        // — normalize to just the filename for matching
         const hrefBase = item.href.split('#')[0]
         tocMap.set(hrefBase, item.title)
       }
@@ -68,50 +72,116 @@ export async function parseEpub(fileBuffer: Buffer): Promise<EpubParseResult> {
     const chapters: EpubChapter[] = []
     let fullText = ''
 
-    for (let i = 0; i < flow.length; i++) {
-      const item = flow[i]
-      if (!item.id) continue
+    // Try the spine (flow) first — this is the correct reading order
+    if (flow.length > 0) {
+      for (let i = 0; i < flow.length; i++) {
+        const item = flow[i]
+        if (!item.id) continue
 
-      try {
-        // Get the raw HTML for this spine item
-        const rawHtml = await epub.getChapterAsync(item.id)
+        let rawHtml: string | null = null
+
+        // Try getChapterAsync first (epub2's processed version)
+        try {
+          rawHtml = await epub.getChapterAsync(item.id)
+        } catch {
+          // Fall back to getChapterRawAsync (raw HTML without processing)
+          try {
+            rawHtml = await epub.getChapterRawAsync(item.id)
+          } catch (rawErr) {
+            console.error(`[epub-parser] Both getChapter and getChapterRaw failed for ${item.id}:`, rawErr instanceof Error ? rawErr.message : String(rawErr))
+          }
+        }
+
+        if (!rawHtml || rawHtml.trim().length === 0) {
+          // Try fetching via getFileAsync as a last resort
+          try {
+            const [fileBuffer] = await epub.getFileAsync(item.id)
+            if (fileBuffer) {
+              rawHtml = fileBuffer.toString('utf-8')
+            }
+          } catch {
+            // Give up on this chapter
+          }
+        }
 
         if (!rawHtml || rawHtml.trim().length === 0) continue
 
-        // Convert HTML to text using cheerio
-        const $ = cheerio.load(rawHtml)
-        // Remove scripts, styles, and other non-content elements
-        $('script, style, nav, header, footer, aside').remove()
-        const rawText = $('body').text().replace(/\s+/g, ' ').trim()
+        const rawText = htmlToText(rawHtml)
+        if (rawText.length < 10) continue
 
-        if (rawText.length < 10) continue // skip near-empty chapters
-
-        // Try to get the title from the TOC, fall back to the first heading
-        // in the HTML, or a generic "Chapter N"
+        // Get chapter title
         const hrefBase = (item.href || '').split('#')[0]
         let chapterTitle = tocMap.get(hrefBase) || ''
-
         if (!chapterTitle) {
-          // Try to extract from the HTML's first heading
-          const heading = $('h1, h2, h3, h4').first().text().trim()
+          const $ = cheerio.load(rawHtml)
+          const heading = $('h1, h2, h3, h4, title').first().text().trim()
           if (heading) chapterTitle = heading.slice(0, 200)
         }
-
-        if (!chapterTitle) {
-          chapterTitle = `Chapter ${i + 1}`
-        }
+        if (!chapterTitle) chapterTitle = `Chapter ${chapters.length + 1}`
 
         chapters.push({
           title: chapterTitle.slice(0, 200),
-          order: i,
-          rawHtml: rawHtml.slice(0, 500_000), // cap to prevent DB overflow
+          order: chapters.length,
+          rawHtml: rawHtml.slice(0, 500_000),
           rawText: rawText.slice(0, 500_000),
         })
-
         fullText += rawText + '\n\n'
-      } catch (chapterErr) {
-        console.error(`[epub-parser] Failed to get chapter ${item.id}:`, chapterErr instanceof Error ? chapterErr.message : String(chapterErr))
-        // Skip failed chapters — partial extraction is better than total failure
+      }
+    }
+
+    // If spine yielded zero chapters, fall back to iterating ALL manifest items
+    // that look like HTML content. This catches EPUBs where the spine is
+    // malformed or empty but the content files exist in the manifest.
+    if (chapters.length === 0 && epub.manifest) {
+      console.log('[epub-parser] Spine yielded 0 chapters, falling back to manifest iteration')
+      const manifestItems = Object.values(epub.manifest)
+      let order = 0
+      for (const item of manifestItems as any[]) {
+        const mediaType = item['media-type'] || item.mediaType || ''
+        const href = item.href || ''
+        // Only process HTML-like content
+        if (!mediaType.includes('html') && !mediaType.includes('xml') &&
+            !href.endsWith('.html') && !href.endsWith('.xhtml') && !href.endsWith('.htm')) {
+          continue
+        }
+        if (!item.id) continue
+
+        let rawHtml: string | null = null
+        try {
+          rawHtml = await epub.getChapterAsync(item.id)
+        } catch {
+          try {
+            rawHtml = await epub.getChapterRawAsync(item.id)
+          } catch {
+            try {
+              const [fileBuffer] = await epub.getFileAsync(item.id)
+              if (fileBuffer) rawHtml = fileBuffer.toString('utf-8')
+            } catch { /* skip */ }
+          }
+        }
+
+        if (!rawHtml || rawHtml.trim().length === 0) continue
+
+        const rawText = htmlToText(rawHtml)
+        if (rawText.length < 10) continue
+
+        const hrefBase = href.split('#')[0]
+        let chapterTitle = tocMap.get(hrefBase) || ''
+        if (!chapterTitle) {
+          const $ = cheerio.load(rawHtml)
+          const heading = $('h1, h2, h3, h4, title').first().text().trim()
+          if (heading) chapterTitle = heading.slice(0, 200)
+        }
+        if (!chapterTitle) chapterTitle = `Chapter ${order + 1}`
+
+        chapters.push({
+          title: chapterTitle.slice(0, 200),
+          order,
+          rawHtml: rawHtml.slice(0, 500_000),
+          rawText: rawText.slice(0, 500_000),
+        })
+        fullText += rawText + '\n\n'
+        order++
       }
     }
 
@@ -119,7 +189,6 @@ export async function parseEpub(fileBuffer: Buffer): Promise<EpubParseResult> {
 
     return { title, author, chapters, fullText }
   } finally {
-    // Clean up temp file
     try { await fs.unlink(tmpFile) } catch { /* best-effort */ }
   }
 }
