@@ -55,6 +55,16 @@ services:
         value: "10000"
       - key: ABM_SPEECHIFY_FREE_THRESHOLD_EUR
         value: "1000"
+      # Tolerate failed chunks instead of failing the whole job.
+      # Default 0.0 = ANY silenced chunk triggers full failure + refund.
+      # 0.5 = tolerate up to 50% silenced chunks (Gemini safety filter
+      # on Homeric violence, Bible content, etc. silences some chunks).
+      # The edge-tts fallback fills silenced gaps, so the audiobook is
+      # still complete — just with a different voice on those sections.
+      - key: ABM_GEMINI_REFUND_FAILED_RATIO
+        value: "0.5"
+      - key: ABM_GEMINI_MAX_FAILED_RATIO
+        value: "0.8"
 
       # ── Gemini LLM (text optimization) ──
       # Rewrites each chapter's text for better TTS quality before synthesis.
