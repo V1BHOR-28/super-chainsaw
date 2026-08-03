@@ -10,6 +10,7 @@ import { db } from '@/lib/db'
  * shared between this route and the workflow's environment.
  *
  * Body: { jobId, status, chapterUrls?, errorMessage? }
+ * chapterUrls is now: Array<{ order: number, title: string, url: string | null }>
  */
 export async function POST(req: NextRequest) {
   // Verify the callback secret
@@ -37,35 +38,41 @@ export async function POST(req: NextRequest) {
     })
 
     // If the job is complete and linked to an audiobook, update the audiobook
-    // and create AudiobookChapter rows from the chapter URLs.
+    // and create AudiobookChapter rows from the structured chapter results.
     if (status === 'complete' && job.audiobookId && chapterUrls?.length > 0) {
       // Delete any existing chapters (from a previous failed attempt)
       await db.audiobookChapter.deleteMany({
         where: { audiobookId: job.audiobookId },
       })
 
-      // Create chapter rows from the URLs
+      // chapterUrls is now: Array<{ order: number, title: string, url: string | null }>
+      // Only create rows for chapters that actually have audio (url is not null).
+      type ChapterResult = { order: number; title: string; url: string | null }
+      const results = chapterUrls as ChapterResult[]
+      const succeeded = results.filter(c => c.url)
+
       await db.audiobookChapter.createMany({
-        data: chapterUrls.map((url: string, i: number) => ({
+        data: succeeded.map((c) => ({
           audiobookId: job.audiobookId!,
-          chapterOrder: i,
-          chapterIndex: i,
-          title: `Chapter ${i + 1}`,
+          chapterOrder: c.order,
+          chapterIndex: c.order,
+          title: c.title,
           rawHtml: '',
           rawText: '',
           cleanedText: '',
           status: 'ready',
-          audioUrl: url,
+          audioUrl: c.url!,
         })),
       })
 
-      // Mark the audiobook as completed
+      // Mark the audiobook as completed (even if some chapters failed — the
+      // user can still play the ones that succeeded)
       await db.audiobook.update({
         where: { id: job.audiobookId },
         data: { status: 'COMPLETED' },
       })
 
-      console.log(`[audiobook.callback] Job ${jobId} complete: ${chapterUrls.length} chapters, audiobook ${job.audiobookId} marked COMPLETED`)
+      console.log(`[audiobook.callback] Job ${jobId} complete: ${succeeded.length}/${results.length} chapters, audiobook ${job.audiobookId} marked COMPLETED`)
     } else if (status === 'failed' && job.audiobookId) {
       await db.audiobook.update({
         where: { id: job.audiobookId },

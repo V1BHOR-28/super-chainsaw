@@ -36,7 +36,7 @@ import subprocess
 import time
 import requests
 
-from google.api_core.exceptions import ResourceExhausted
+from google.api_core.exceptions import ResourceExhausted, InternalServerError, ServiceUnavailable
 from google.cloud import texttospeech
 from google.cloud import storage
 import ebooklib
@@ -420,20 +420,21 @@ MAX_POLL_RETRIES = 5
 
 
 def _wait_for_operation(operation, seg_uri, timeout_s):
-    """Wait for a Long Audio operation with retry-on-rate-limit backoff."""
+    """Wait for a Long Audio operation with retry-on-transient-error backoff."""
     delay = 15  # start with a real gap, not an aggressive retry
     for attempt in range(MAX_POLL_RETRIES):
         try:
             operation.result(timeout=timeout_s)
             return
-        except ResourceExhausted as e:
+        except (ResourceExhausted, InternalServerError, ServiceUnavailable) as e:
             if attempt == MAX_POLL_RETRIES - 1:
-                raise RuntimeError(f"TTS operation still rate-limited after {MAX_POLL_RETRIES} retries for {seg_uri}: {e}")
-            print(f"[tts] Rate-limited polling {seg_uri}, waiting {delay}s (attempt {attempt + 1}/{MAX_POLL_RETRIES})", file=sys.stderr)
+                raise RuntimeError(f"TTS operation still failing after {MAX_POLL_RETRIES} retries for {seg_uri}: {e}")
+            print(f"[tts] Transient error polling {seg_uri} ({type(e).__name__}), waiting {delay}s (attempt {attempt + 1}/{MAX_POLL_RETRIES})", file=sys.stderr)
             time.sleep(delay)
             delay = min(delay * 2, 60)
         except Exception as e:
-            raise RuntimeError(f"TTS operation failed or timed out for {seg_uri}: {e}")
+            # Genuinely non-retryable (bad input, permission error, etc.) — fail immediately
+            raise RuntimeError(f"TTS operation failed (non-retryable) for {seg_uri}: {e}")
 
 
 def finish_synthesis_task(
@@ -629,23 +630,25 @@ async def main_async():
         ]
         results = await asyncio.gather(*finish_tasks)
 
-        # results is ordered by chapter.order (same order as chapters list)
-        # Filter out failures and build the URL list in chapter order
-        chapter_urls_by_order = {}
+        # Preserve real chapter order + title for every result, success or failure.
+        # This lets the app correctly label partial results instead of silently
+        # renumbering whatever succeeded as if it were sequential.
+        chapter_results = []
         for chapter, url in zip(chapters, results):
-            if url:
-                chapter_urls_by_order[chapter["order"]] = url
+            chapter_results.append({
+                "order": chapter["order"],
+                "title": chapter["title"],
+                "url": url,  # None if this chapter failed
+            })
+        chapter_results.sort(key=lambda c: c["order"])
 
-        # Produce a sorted list (gaps = failed chapters, skip them)
-        chapter_urls = [chapter_urls_by_order[i]
-                        for i in sorted(chapter_urls_by_order.keys())]
-
-        if not chapter_urls:
+        succeeded = [c for c in chapter_results if c["url"]]
+        if not succeeded:
             mark_status("failed", error_message="All chapters failed to generate")
             return
 
-        print(f"[convert] Done! {len(chapter_urls)}/{len(chapters)} chapters generated")
-        mark_status("complete", chapter_urls=chapter_urls)
+        print(f"[convert] Done! {len(succeeded)}/{len(chapters)} chapters generated")
+        mark_status("complete", chapter_urls=chapter_results)
 
 
 def main():
