@@ -1,30 +1,21 @@
 /**
  * abm-api.ts — Thin typed wrapper around the audiobook-maker Flask API.
  *
- * The Flask app runs on port 5601 as a mini-service. The Caddy gateway
- * forwards requests to it when the `XTransformPort=5601` query parameter
- * is present on a relative-path fetch. We NEVER use absolute URLs like
- * `http://localhost:5601` in frontend code — the gateway handles port
- * rewriting for us, and the `abm_cid` cookie (HttpOnly, SameSite=Lax)
- * is automatically carried on same-origin requests to identify the
- * client across calls.
+ * The Flask app runs on Render in production (ABM_SERVICE_URL env var on
+ * Vercel) and on port 5601 in the sandbox. A Next.js catch-all proxy route
+ * at /api/abm/[...path] forwards all requests to the Flask service, so
+ * the frontend uses relative paths only — no CORS, no absolute URLs.
  *
- * Endpoints wrapped:
- *   POST /api/analyze        (multipart form, field name "epub")
- *   POST /api/generate       (JSON body)
- *   GET  /api/job_status/:id
- *   GET  /api/download/:id
- *   GET  /api/voices
- *   GET  /api/my_jobs
+ * Endpoints wrapped (all prefixed with /api/abm/):
+ *   POST /api/abm/analyze        (multipart form, field name "epub")
+ *   POST /api/abm/generate       (JSON body)
+ *   GET  /api/abm/job_status/:id
+ *   GET  /api/abm/download/:id
+ *   GET  /api/abm/voices
+ *   GET  /api/abm/my_jobs
  */
 
-const ABM_PORT = "5601";
-
-/** Append the XTransformPort query param to a relative path. Preserves any existing query string. */
-function withPort(path: string): string {
-  const sep = path.includes("?") ? "&" : "?";
-  return `${path}${sep}XTransformPort=${ABM_PORT}`;
-}
+const ABM_BASE = "/api/abm";
 
 /* ──────────────────────────── Types ──────────────────────────── */
 
@@ -159,7 +150,7 @@ export function isPollingStatus(status: JobStatus | string | undefined): boolean
 export async function analyzeEpub(file: File): Promise<AnalyzeResponse> {
   const form = new FormData();
   form.append("epub", file);
-  const res = await fetch(withPort("/api/analyze"), {
+  const res = await fetch(`${ABM_BASE}/analyze`, {
     method: "POST",
     body: form,
     credentials: "include",
@@ -185,7 +176,7 @@ export async function generate(
   outputFormat: "mp3" | "m4b" | "zip" = "mp3",
   rate: string = "+0%",
 ): Promise<void> {
-  const res = await fetch(withPort("/api/generate"), {
+  const res = await fetch(`${ABM_BASE}/generate`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -209,7 +200,7 @@ export async function generate(
 
 /** Poll the status of a running or completed job. */
 export async function getJobStatus(jobId: string): Promise<JobStatusResponse> {
-  const res = await fetch(withPort(`/api/job_status/${jobId}`), {
+  const res = await fetch(`${ABM_BASE}/job_status/${jobId}`, {
     credentials: "include",
   });
   if (!res.ok) {
@@ -223,7 +214,7 @@ export async function getJobStatus(jobId: string): Promise<JobStatusResponse> {
 
 /** Fetch the voice catalog grouped by language code. */
 export async function getVoices(): Promise<VoicesResponse> {
-  const res = await fetch(withPort("/api/voices"), {
+  const res = await fetch(`${ABM_BASE}/voices`, {
     credentials: "include",
   });
   if (!res.ok) {
@@ -234,7 +225,7 @@ export async function getVoices(): Promise<VoicesResponse> {
 
 /** Fetch all jobs owned by this client (uses the abm_cid cookie for identity). */
 export async function getMyJobs(): Promise<MyJobsResponse> {
-  const res = await fetch(withPort("/api/my_jobs"), {
+  const res = await fetch(`${ABM_BASE}/my_jobs`, {
     credentials: "include",
   });
   if (!res.ok) {
@@ -244,16 +235,15 @@ export async function getMyJobs(): Promise<MyJobsResponse> {
 }
 
 /**
- * Returns the relative download URL for a finished job (with the
- * XTransformPort query param). Suitable for use directly as the `src`
- * of an <audio> element — the Flask app serves the MP3 with proper
- * streaming + range support.
+ * Returns the relative download URL for a finished job. Suitable for use
+ * directly as the `src` of an <audio> element — the Flask app serves the
+ * MP3 with proper streaming + range support.
  */
 export function getDownloadUrl(jobId: string): string {
-  return withPort(`/api/download/${jobId}`);
+  return `${ABM_BASE}/download/${jobId}`;
 }
 
 /** Returns the relative cover thumbnail URL for a job (may 404 if no cover). */
 export function getCoverUrl(jobId: string): string {
-  return withPort(`/api/cover/${jobId}`);
+  return `${ABM_BASE}/cover/${jobId}`;
 }

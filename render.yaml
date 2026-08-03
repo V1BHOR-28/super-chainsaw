@@ -1,0 +1,52 @@
+# Render Blueprint — audiobook-maker Flask service
+# https://render.com/docs/blueprint-spec
+# One-click deploy: connect your GitHub repo, Render reads this file and
+# creates the web service + persistent disk automatically.
+
+services:
+  - type: web
+    name: aria-audiobook-service
+    runtime: python
+    rootDir: mini-services/audiobook-maker
+    # Install all dependencies: requirements.txt (boto3, flask-compress, etc.)
+    # + the core deps the Flask app needs (flask, edge-tts, ebooklib, etc.)
+    buildCommand: |
+      pip install --upgrade pip
+      pip install -r requirements.txt
+      pip install flask edge-tts ebooklib beautifulsoup4 lxml Pillow pymupdf flask-compress defusedxml
+    startCommand: python audiobook_app.py
+    envVars:
+      - key: ABM_PORT
+        value: "5601"
+      - key: ABM_DATA_DIR
+        value: /opt/data
+      - key: PYTHON_VERSION
+        value: "3.11.9"
+      # Optional: enable Gemini TTS (premium voices) by setting these:
+      # - key: ABM_GEMINI_BACKEND
+      #   value: vertex
+      # - key: ABM_GEMINI_API_KEY
+      #   sync: false  # set manually in Render dashboard
+      # Optional: enable S3-compatible storage (Cloudflare R2, Backblaze B2, etc.)
+      # instead of local filesystem:
+      # - key: ABM_S3_ENDPOINT
+      #   sync: false
+      # - key: ABM_S3_ACCESS_KEY
+      #   sync: false
+      # - key: ABM_S3_SECRET_KEY
+      #   sync: false
+      # - key: ABM_S3_BUCKET
+      #   sync: false
+    # Persistent disk: jobs + generated audio survive deploys and restarts.
+    # 5 GB is the free tier minimum. Upgrade to 20 GB if you generate many books.
+    disk:
+      name: audiobook-data
+      mountPath: /opt/data
+      sizeGB: 5
+    # Health check: the Flask app responds to GET / with a 200 (redirect to /en/)
+    healthCheckPath: /
+    autoDeploy: true
+    # Free tier: 0.1 CPU, 512 MB RAM. Spins down after 15 min of inactivity
+    # (first request after spin-down takes ~30s to wake). Upgrade to Starter
+    # ($7/mo) for always-on + 2 GB RAM if you generate long books frequently.
+    plan: free
