@@ -2,13 +2,15 @@
 """
 convert_audiobook.py — Convert an EPUB into audiobook chapter MP3s.
 
-Runs on a GitHub Actions runner (free, 45-minute timeout). Downloads the
-EPUB, parses it with ebooklib, generates TTS per chapter using Kokoro
-(open-source neural TTS, Apache 2.0), uploads each MP3 to Vercel Blob
-concurrently, then calls the app's callback route.
+Runs on a GitHub Actions runner (45-minute timeout). Downloads the EPUB,
+parses it with ebooklib, generates TTS per chapter using Google Cloud
+Text-to-Speech Long Audio API (synthesize_long_audio), uploads each MP3
+to Vercel Blob concurrently, then calls the app's callback route.
 
-Kokoro produces significantly more natural narration than Edge TTS for
-long-form audiobook listening. It runs on CPU (no GPU required).
+Google Cloud TTS produces studio-quality narration via Journey voices,
+significantly more natural than Edge TTS or open-source alternatives.
+This is a paid GCP service — estimated cost is ~$0.000016 per character
+for Journey voices (check current pricing at cloud.google.com/text-to-speech/pricing).
 
 Environment variables:
   JOB_ID                — The AudiobookJob ID
@@ -17,6 +19,8 @@ Environment variables:
   BLOB_READ_WRITE_TOKEN — Vercel Blob token for uploads
   APP_BASE_URL          — The app's base URL
   APP_CALLBACK_SECRET   — Shared secret for the callback route
+  GCS_AUDIOBOOK_BUCKET  — GCS bucket name for TTS temp output
+  GCP_PROJECT_ID        — GCP project ID
 """
 
 import asyncio
@@ -26,11 +30,11 @@ import sys
 import json
 import tempfile
 import subprocess
+import time
 import requests
 
-import numpy as np
-import soundfile as sf
-from kokoro import KPipeline
+from google.cloud import texttospeech
+from google.cloud import storage
 import ebooklib
 from ebooklib import epub
 from bs4 import BeautifulSoup
@@ -43,14 +47,20 @@ BLOB_TOKEN       = os.environ["BLOB_READ_WRITE_TOKEN"]
 APP_BASE_URL     = os.environ["APP_BASE_URL"]
 CALLBACK_SECRET  = os.environ["APP_CALLBACK_SECRET"]
 
-KOKORO_VOICE     = "af_heart"   # warm, natural — one of Kokoro's best voices for narration
-MAX_SEGMENT_CHARS = 500         # Kokoro works best with shorter, sentence-aligned segments
-MAX_CONCURRENT   = 2            # Kokoro on CPU is heavier than Edge TTS — keep concurrency lower
+GCS_BUCKET         = os.environ["GCS_AUDIOBOOK_BUCKET"]
+GCP_PROJECT        = os.environ["GCP_PROJECT_ID"]
+GCP_REGION         = "us-central1"   # Long Audio API endpoint region
+TTS_VOICE          = "en-US-Journey-D"  # Natural, warm Journey voice — excellent for narration
+TTS_LANGUAGE       = "en-US"
+# Long Audio API limit: 1,000,000 bytes (~750K chars). Most chapters are well under this.
+# Only split if a chapter genuinely exceeds this — the goal is zero splits for normal chapters.
+MAX_CHARS_PER_TASK = 700_000
 
-# Initialise the pipeline once at module level so it's not re-loaded per chapter.
-print("[init] Loading Kokoro pipeline (this takes ~30s on first run)...")
-_pipeline = KPipeline(lang_code='a')  # 'a' = American English
-print("[init] Kokoro pipeline ready.")
+MAX_CONCURRENT   = 4  # Google Cloud TTS has low per-call overhead — higher concurrency is fine
+
+# Initialize GCP clients once at module level
+_tts_client     = texttospeech.TextToSpeechLongAudioSynthesizeClient()
+_storage_client = storage.Client()
 
 
 # ── Callback ─────────────────────────────────────────────────────────────────
@@ -84,7 +94,7 @@ def clean_text(html_content: str) -> str:
     return text
 
 
-def split_for_tts(text: str, max_len: int = MAX_SEGMENT_CHARS) -> list:
+def split_for_tts(text: str, max_len: int = MAX_CHARS_PER_TASK) -> list:
     """
     Split long text into segments for TTS.
 
@@ -291,67 +301,115 @@ def parse_epub(epub_path: str):
     return title, author, chapters
 
 
-# ── TTS generation (Kokoro) ──────────────────────────────────────────────────
+# ── TTS generation (Google Cloud Long Audio API) ────────────────────────────
 def generate_chapter_audio_sync(text: str, output_path: str) -> None:
     """
-    Generate TTS audio for a chapter using Kokoro.
-    Synchronous — called via run_in_executor to avoid blocking the event loop.
+    Generate TTS audio for a chapter using Google Cloud Text-to-Speech Long Audio API.
 
-    Kokoro returns audio as numpy float32 arrays at 24kHz. We collect all
-    segments, concatenate them, then write a single WAV file and convert
-    to MP3 via ffmpeg.
+    Uses synthesize_long_audio() which accepts full chapter-length text (up to ~750K
+    chars) and writes the result directly to GCS — no manual segmentation needed for
+    normal chapters. Only splits into multiple tasks for unusually long chapters.
+
+    The GCS output object is downloaded locally, then the temp GCS object is deleted
+    to avoid accumulating storage costs.
     """
-    segments = split_for_tts(text)
-
-    all_audio = []
-    sample_rate = 24000  # Kokoro's native sample rate
+    segments = split_for_tts(text, max_len=MAX_CHARS_PER_TASK)
+    mp3_parts = []
 
     for i, segment in enumerate(segments):
         if not segment.strip():
             continue
-        try:
-            # _pipeline() returns a generator of (graphemes, phonemes, audio_array) tuples.
-            segment_chunks = []
-            for _, _, audio in _pipeline(segment, voice=KOKORO_VOICE, speed=1.0):
-                if audio is not None and len(audio) > 0:
-                    segment_chunks.append(audio)
-            if segment_chunks:
-                all_audio.append(np.concatenate(segment_chunks))
-        except Exception as e:
-            print(f"[tts] Segment {i+1}/{len(segments)} failed: {e}", file=sys.stderr)
 
-    if not all_audio:
-        raise RuntimeError("Kokoro produced no audio for this chapter")
+        # Unique GCS output path for this synthesis task
+        gcs_output_uri = (
+            f"gs://{GCS_BUCKET}/tts-tmp/{JOB_ID}/chapter-part-{i:04d}.mp3"
+        )
 
-    # Add 0.5s of silence between segments for natural paragraph breathing.
-    silence = np.zeros(int(sample_rate * 0.5), dtype=np.float32)
-    combined = np.concatenate(
-        [chunk for pair in zip(all_audio, [silence] * len(all_audio)) for chunk in pair]
-    )
+        voice = texttospeech.VoiceSelectionParams(
+            language_code=TTS_LANGUAGE,
+            name=TTS_VOICE,
+        )
+        audio_config = texttospeech.AudioConfig(
+            audio_encoding=texttospeech.AudioEncoding.MP3,
+        )
+        input_text = texttospeech.SynthesisInput(text=segment)
 
-    # Write as WAV first (lossless intermediate), then convert to MP3 with ffmpeg.
-    wav_path = output_path.replace(".mp3", ".wav")
-    sf.write(wav_path, combined, sample_rate)
+        parent = f"projects/{GCP_PROJECT}/locations/{GCP_REGION}"
 
-    result = subprocess.run(
-        ["ffmpeg", "-y", "-i", wav_path, "-codec:a", "libmp3lame",
-         "-qscale:a", "4",   # VBR ~165kbps — good quality, reasonable file size
-         output_path],
-        capture_output=True, text=True, timeout=120,
-    )
+        print(f"[tts] Segment {i+1}/{len(segments)}: {len(segment)} chars → {gcs_output_uri}")
 
-    try:
-        os.remove(wav_path)
-    except:
-        pass
+        operation = _tts_client.synthesize_long_audio(
+            request=texttospeech.SynthesizeLongAudioRequest(
+                parent=parent,
+                input=input_text,
+                audio_config=audio_config,
+                voice=voice,
+                output_gcs_uri=gcs_output_uri,
+            )
+        )
 
-    if result.returncode != 0:
-        raise RuntimeError(f"ffmpeg MP3 conversion failed: {result.stderr[:500]}")
+        # Poll until the long-running operation completes
+        print(f"[tts] Waiting for operation {operation.operation.name}...")
+        timeout_s = 300
+        start = time.time()
+        while not operation.done():
+            if time.time() - start > timeout_s:
+                raise RuntimeError(
+                    f"TTS operation timed out after {timeout_s}s for segment {i+1}"
+                )
+            time.sleep(5)
+            operation.operation.refresh()  # re-check operation status
+
+        if operation.exception():
+            raise RuntimeError(
+                f"TTS operation failed for segment {i+1}: {operation.exception()}"
+            )
+
+        # Download the generated MP3 from GCS to a local temp file
+        gcs_object_path = gcs_output_uri.replace(f"gs://{GCS_BUCKET}/", "")
+        local_part_path = output_path.replace(".mp3", f"-part{i:04d}.mp3")
+
+        bucket = _storage_client.bucket(GCS_BUCKET)
+        blob = bucket.blob(gcs_object_path)
+        blob.download_to_filename(local_part_path)
+        mp3_parts.append(local_part_path)
+        print(f"[tts] Segment {i+1} downloaded ({os.path.getsize(local_part_path)} bytes)")
+
+        # Delete the temp GCS object immediately — no need to accumulate storage
+        blob.delete()
+        print(f"[tts] Cleaned up temp GCS object: {gcs_object_path}")
+
+    if not mp3_parts:
+        raise RuntimeError("Google Cloud TTS produced no audio for this chapter")
+
+    if len(mp3_parts) == 1:
+        # Single segment (the normal case for most chapters) — just rename
+        os.rename(mp3_parts[0], output_path)
+    else:
+        # Multiple segments (rare — only for very long chapters) — concat with ffmpeg
+        filelist_path = output_path.replace(".mp3", "-filelist.txt")
+        with open(filelist_path, "w") as f:
+            for part in mp3_parts:
+                f.write(f"file '{part}'\n")
+        result = subprocess.run(
+            ["ffmpeg", "-y", "-f", "concat", "-safe", "0",
+             "-i", filelist_path, "-c", "copy", output_path],
+            capture_output=True, text=True, timeout=120,
+        )
+        # Clean up part files and filelist
+        for part in mp3_parts:
+            try: os.remove(part)
+            except: pass
+        try: os.remove(filelist_path)
+        except: pass
+
+        if result.returncode != 0:
+            raise RuntimeError(f"ffmpeg concat failed: {result.stderr[:500]}")
 
 
 async def generate_chapter_audio(text: str, output_path: str) -> None:
     """
-    Async wrapper around the synchronous Kokoro generation.
+    Async wrapper around the synchronous Google Cloud TTS generation.
     Runs in a thread executor so it doesn't block asyncio.gather().
     """
     loop = asyncio.get_running_loop()

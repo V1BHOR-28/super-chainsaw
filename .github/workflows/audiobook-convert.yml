@@ -27,18 +27,17 @@ jobs:
         with:
           python-version: '3.11'
 
-      - name: Cache Kokoro model weights
-        uses: actions/cache@v4
-        with:
-          path: ~/.cache/huggingface
-          key: kokoro-model-v1
-
       - name: Install system dependencies
-        run: sudo apt-get update && sudo apt-get install -y ffmpeg espeak-ng
+        run: sudo apt-get update && sudo apt-get install -y ffmpeg
 
       - name: Install Python dependencies
         run: |
-          pip install kokoro soundfile numpy ebooklib beautifulsoup4 requests aiohttp
+          pip install google-cloud-texttospeech google-cloud-storage ebooklib beautifulsoup4 requests aiohttp
+
+      - name: Write GCP credentials
+        run: |
+          echo '${{ secrets.GOOGLE_APPLICATION_CREDENTIALS_JSON }}' > /tmp/gcp-key.json
+          echo "GOOGLE_APPLICATION_CREDENTIALS=/tmp/gcp-key.json" >> $GITHUB_ENV
 
       - name: Run conversion
         env:
@@ -48,4 +47,6 @@ jobs:
           BLOB_READ_WRITE_TOKEN: ${{ secrets.BLOB_READ_WRITE_TOKEN }}
           APP_BASE_URL: ${{ secrets.APP_BASE_URL }}
           APP_CALLBACK_SECRET: ${{ secrets.APP_CALLBACK_SECRET }}
+          GCS_AUDIOBOOK_BUCKET: ${{ secrets.GCS_AUDIOBOOK_BUCKET }}
+          GCP_PROJECT_ID: ${{ secrets.GCP_PROJECT_ID }}
         run: python .github/scripts/convert_audiobook.py
