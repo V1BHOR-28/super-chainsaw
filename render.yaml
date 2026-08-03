@@ -50,12 +50,13 @@ services:
       # ── Gemini LLM (text optimization) ──
       # Rewrites each chapter's text for better TTS quality before synthesis.
       # Uses Gemini's OpenAI-compatible endpoint. Same API key as TTS.
+      # Note: Google discontinued AIzaSy keys — new keys use the AQ. format.
       - key: ABM_LLM_API_KEY
         sync: false  # set manually — same Gemini key as ABM_GEMINI_API_KEY
       - key: ABM_LLM_API_BASE
         value: https://generativelanguage.googleapis.com/v1beta/openai/
       - key: ABM_LLM_MODEL
-        value: gemini-2.0-flash
+        value: gemini-2.5-flash
 
       # ── Cloudflare R2 (persistent storage — survives Render restarts) ──
       # Audio files + download tokens are uploaded to R2 after generation.
