@@ -322,7 +322,7 @@ def generate_chapter_audio_sync(text: str, output_path: str) -> None:
 
         # Unique GCS output path for this synthesis task
         gcs_output_uri = (
-            f"gs://{GCS_BUCKET}/tts-tmp/{JOB_ID}/chapter-part-{i:04d}.mp3"
+            f"gs://{GCS_BUCKET}/tts-tmp/{JOB_ID}/chapter-part-{i:04d}.wav"
         )
 
         voice = texttospeech.VoiceSelectionParams(
@@ -330,7 +330,8 @@ def generate_chapter_audio_sync(text: str, output_path: str) -> None:
             name=TTS_VOICE,
         )
         audio_config = texttospeech.AudioConfig(
-            audio_encoding=texttospeech.AudioEncoding.MP3,
+            audio_encoding=texttospeech.AudioEncoding.LINEAR16,
+            sample_rate_hertz=24000,
         )
         input_text = texttospeech.SynthesisInput(text=segment)
 
@@ -365,19 +366,39 @@ def generate_chapter_audio_sync(text: str, output_path: str) -> None:
                 f"TTS operation failed for segment {i+1}: {operation.exception()}"
             )
 
-        # Download the generated MP3 from GCS to a local temp file
+        # Download WAV from GCS to a local temp file
         gcs_object_path = gcs_output_uri.replace(f"gs://{GCS_BUCKET}/", "")
         local_part_path = output_path.replace(".mp3", f"-part{i:04d}.mp3")
+        local_wav_path = local_part_path.replace(".mp3", ".wav")
 
         bucket = _storage_client.bucket(GCS_BUCKET)
         blob = bucket.blob(gcs_object_path)
-        blob.download_to_filename(local_part_path)
-        mp3_parts.append(local_part_path)
-        print(f"[tts] Segment {i+1} downloaded ({os.path.getsize(local_part_path)} bytes)")
+        blob.download_to_filename(local_wav_path)
+        print(f"[tts] Segment {i+1} WAV downloaded ({os.path.getsize(local_wav_path)} bytes)")
 
-        # Delete the temp GCS object immediately — no need to accumulate storage
+        # Delete the temp GCS object immediately
         blob.delete()
         print(f"[tts] Cleaned up temp GCS object: {gcs_object_path}")
+
+        # Convert WAV → MP3 with ffmpeg
+        result = subprocess.run(
+            ["ffmpeg", "-y", "-i", local_wav_path,
+             "-codec:a", "libmp3lame", "-qscale:a", "4",
+             local_part_path],
+            capture_output=True, text=True, timeout=300,
+        )
+        try:
+            os.remove(local_wav_path)
+        except:
+            pass
+
+        if result.returncode != 0:
+            raise RuntimeError(
+                f"ffmpeg WAV→MP3 conversion failed for segment {i+1}: {result.stderr[:300]}"
+            )
+
+        mp3_parts.append(local_part_path)
+        print(f"[tts] Segment {i+1} converted to MP3 ({os.path.getsize(local_part_path)} bytes)")
 
     if not mp3_parts:
         raise RuntimeError("Google Cloud TTS produced no audio for this chapter")
