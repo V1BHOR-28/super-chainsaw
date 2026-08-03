@@ -700,8 +700,23 @@ def _check_job_owner(job_id):
     Admin bypass: una richiesta autenticata come admin (header X-Admin-Token o cookie
     abm_admin_session valido) passa il controllo. Necessario per la pagina /admin/log-activity che
     fa polling di /api/job_status/<job_id> per mostrare la % delle conversioni in corso.
+
+    ARIA fallback: if the job is not in the in-memory `jobs` dict (lost after a
+    Flask restart), check `_download_tokens` for a persisted snapshot. If found,
+    construct a minimal job dict from the token so chapter_mp3 + job_chapters
+    endpoints can still serve data after a restart.
     """
     if job_id not in jobs:
+        # ARIA fallback: check download tokens (persisted to disk, survive restart)
+        for tok, rec in _download_tokens.items():
+            if isinstance(rec, dict) and rec.get("job_id") == job_id:
+                caller = _get_client_id()
+                owner = rec.get("client_id", "")
+                if owner and caller and caller != owner:
+                    if not _admin_auth_ok(_admin_auth_from_request()):
+                        return None, jsonify({"error": "Forbidden"}), 403
+                # Construct a minimal job dict from the token snapshot
+                return rec, None, 0
         return None, jsonify({"error": "Job not found"}), 404
     job = jobs[job_id]
     owner = job.get("client_id", "")
@@ -9670,6 +9685,30 @@ def api_job_chapters(job_id):
         return err, sc
     info = job.get("info")
     if not info or not info.chapters:
+        # ARIA fallback: if the in-memory job is gone (Flask restart), the
+        # job dict is a download token snapshot. It has chapter_mp3s +
+        # selected_chapters but no parsed chapter list. Return what we have
+        # so the frontend can at least show the chapter browser + play audio.
+        chapter_mp3s = job.get("chapter_mp3s") or []
+        if chapter_mp3s:
+            return jsonify({
+                "job_id": job_id,
+                "title": job.get("book_title", ""),
+                "author": "",
+                "language": "",
+                "total_chapters": job.get("total_chapters", len(chapter_mp3s)),
+                "total_words": 0,
+                "total_chars": 0,
+                "estimated_minutes": round(sum(ch.get("duration_ms", 0) for ch in chapter_mp3s) / 60000.0, 1),
+                "chapters": [
+                    {"index": ch["index"], "title": ch["title"], "words": 0,
+                     "chars": 0, "estimated_minutes": round(ch.get("duration_ms", 0) / 60000.0, 1)}
+                    for ch in chapter_mp3s
+                ],
+                "has_cover": False,
+                "selected_chapters": job.get("selected_chapters", []),
+                "chapter_mp3s": chapter_mp3s,
+            })
         return jsonify({"error": "Book data no longer available. Please re-upload the file."}), 400
 
     chapters = []
@@ -10036,6 +10075,12 @@ def api_my_jobs():
                 "mp3": bool(tinfo.get("output_file")),
                 "abm": bool(tinfo.get("optimized_abm_path")),
             },
+            # ARIA per-chapter mode: return from the persisted token snapshot
+            # so the frontend can show chapter count + build the playlist player
+            # even after a Flask restart (when the in-memory job is gone).
+            "selected_chapters": tinfo.get("selected_chapters", []),
+            "total_chapters": tinfo.get("total_chapters", 0),
+            "chapter_mp3s": tinfo.get("chapter_mp3s", []),
         })
 
     ordered = sorted(out.values(),

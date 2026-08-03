@@ -31,6 +31,7 @@ import {
   type MyJob,
   type AnalyzeResponse,
   type JobStatus,
+  type ChapterMp3Info,
 } from "@/lib/abm-api";
 import { toast } from "@/hooks/use-toast";
 
@@ -68,9 +69,9 @@ interface LibraryCard {
   progressCurrent?: number;
   progressTotal?: number;
   progressMessage?: string;
-  /** Which chapter indices are in the current audio. */
   selectedChapters?: number[];
   totalChapters?: number;
+  chapterMp3s?: ChapterMp3Info[];
 }
 
 function toCard(job: MyJob): LibraryCard {
@@ -87,6 +88,7 @@ function toCard(job: MyJob): LibraryCard {
     progressMessage: job.progress_message,
     selectedChapters: job.selected_chapters,
     totalChapters: job.total_chapters,
+    chapterMp3s: job.chapter_mp3s,
   };
 }
 
@@ -111,28 +113,56 @@ function progressPct(card: LibraryCard): number {
 export function LibraryView() {
   const openPlayer = usePlayerStore((s) => s.openPlayer);
   const setActiveWorkspace = useAriaStore((s) => s.setActiveWorkspace);
-  const [cards, setCards] = useState<LibraryCard[]>([]);
+  const STORAGE_KEY = "aria-audiobook-library";
+
+  // Load from localStorage on mount — instant display before the API responds.
+  const [cards, setCards] = useState<LibraryCard[]>(() => {
+    if (typeof window === "undefined") return [];
+    try {
+      const stored = localStorage.getItem(STORAGE_KEY);
+      return stored ? JSON.parse(stored) : [];
+    } catch {
+      return [];
+    }
+  });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [hoveredJob, setHoveredJob] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
   const [analyzeResponse, setAnalyzeResponse] = useState<AnalyzeResponse | null>(null);
-  /** For "analyzed" jobs clicked from the grid — we don't have the chapter
-   *  data anymore (the upload-time analyzeResponse is long gone), so we open
-   *  the selector in "whole-book" mode: just voice + convert. */
   const [wholeBookJob, setWholeBookJob] = useState<LibraryCard | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const [resetting, setResetting] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
+  // Persist cards to localStorage on every change
+  useEffect(() => {
+    try {
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(cards));
+    } catch {
+      // localStorage may be full — non-blocking
+    }
+  }, [cards]);
+
   const fetchJobs = useCallback(async () => {
     try {
       const data = await getMyJobs();
-      setCards(data.jobs.map(toCard));
+      const apiCards = data.jobs.map(toCard);
+      // Merge: keep localStorage cards that aren't in the API response (they
+      // may be expired on the Flask side but still have audio files on disk).
+      // Update cards that ARE in the API response with fresh data.
+      setCards((prev) => {
+        const apiIds = new Set(apiCards.map((c) => c.jobId));
+        const staleCards = prev.filter((c) => !apiIds.has(c.jobId));
+        return [...apiCards, ...staleCards];
+      });
       setError(null);
     } catch (err) {
       console.error("[library-view] failed to load jobs", err);
-      setError(err instanceof Error ? err.message : "Failed to load your library");
+      // Don't overwrite localStorage cards on API failure — keep showing them
+      if (cards.length === 0) {
+        setError(err instanceof Error ? err.message : "Failed to load your library");
+      }
     } finally {
       setLoading(false);
     }
@@ -201,7 +231,7 @@ export function LibraryView() {
         downloadUrl: getDownloadUrl(card.jobId),
         selectedChapters: chaptersResp?.selected_chapters ?? card.selectedChapters,
         chapters: chaptersResp?.chapters,
-        chapterMp3s: chaptersResp?.chapter_mp3s,
+        chapterMp3s: chaptersResp?.chapter_mp3s ?? card.chapterMp3s,
       });
       return;
     }
@@ -271,15 +301,11 @@ export function LibraryView() {
   const handleDelete = async (jobId: string) => {
     try {
       await deleteJob(jobId);
-      setCards((prev) => prev.filter((c) => c.jobId !== jobId));
-      toast({ title: "Audiobook removed" });
-    } catch (err) {
-      console.error("[library-view] delete failed", err);
-      toast({
-        title: "Could not delete",
-        description: err instanceof Error ? err.message : "Try again",
-      });
+    } catch {
+      // Non-blocking — remove from UI even if the Flask job is already gone
     }
+    setCards((prev) => prev.filter((c) => c.jobId !== jobId));
+    toast({ title: "Audiobook removed" });
     setConfirmDelete(null);
   };
 

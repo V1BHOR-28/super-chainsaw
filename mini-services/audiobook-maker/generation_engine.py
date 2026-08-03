@@ -1440,6 +1440,13 @@ def _create_download_token(job_id):
         # Flag PREMIUM/Gemini: pilota retention 48h vs 18h nei /dl/* e nel cleanup.
         "is_gemini": _is_gemini_voice(job.get("voice", "") or job.get("opt_voice", "")),
         "client_id": job.get("client_id", ""),
+        # ARIA per-chapter mode: persist chapter_mp3s + selected_chapters so
+        # /api/chapter_mp3 and /api/job_chapters can serve them after a Flask
+        # restart (the in-memory jobs dict is lost on restart, but download
+        # tokens persist to _download_tokens.json on disk).
+        "chapter_mp3s": job.get("chapter_mp3s", []),
+        "selected_chapters": job.get("selected_chapters", []),
+        "total_chapters": len(info.chapters) if info else 0,
     }
     _save_tokens()
     return token

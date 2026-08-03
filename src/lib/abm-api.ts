@@ -125,6 +125,9 @@ export interface MyJob {
    *  player UI to show which chapters are downloaded. */
   selected_chapters?: number[];
   total_chapters?: number;
+  /** Per-chapter MP3 metadata from the persisted download token.
+   *  Present for done jobs generated in per-chapter mode. */
+  chapter_mp3s?: ChapterMp3Info[];
   // Present when status === "generating"
   progress_current?: number;
   progress_total?: number;
