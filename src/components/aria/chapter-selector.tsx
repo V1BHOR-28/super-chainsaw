@@ -128,12 +128,14 @@ export function ChapterSelector({
   // Default-select every chapter that is NOT already converted. If all chapters
   // are already converted (re-converting), default-select none so the user
   // explicitly picks what to re-generate.
+  // Runs ONCE when chapters load — does NOT re-fire when selected changes
+  // (otherwise Select All/None/Invert buttons get immediately overridden).
   useEffect(() => {
     if (chapters.length > 0 && selected.size === 0) {
       const newChapters = chapters.filter((c) => !alreadyConverted.has(c.index));
       setSelected(new Set(newChapters.map((c) => c.index)));
     }
-  }, [chapters, alreadyConverted, selected]);
+  }, [chapters, alreadyConverted]);
 
   // ── Selection helpers ──
   const toggle = (idx: number) => {
