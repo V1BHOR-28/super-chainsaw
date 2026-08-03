@@ -46,6 +46,15 @@ services:
         value: apikey
       - key: ABM_GEMINI_API_KEY
         sync: false  # set manually — get from https://aistudio.google.com/apikey
+      # Make Gemini voices free for ARIA users (no PayPal payment required).
+      # The audiobook-maker app was designed for commercial use with PayPal;
+      # ARIA is free, so we set the thresholds high enough that all jobs are free.
+      - key: ABM_GEMINI_FREE_THRESHOLD_EUR
+        value: "1000"
+      - key: ABM_FREE_QUOTA_EUR_PER_MONTH
+        value: "10000"
+      - key: ABM_SPEECHIFY_FREE_THRESHOLD_EUR
+        value: "1000"
 
       # ── Gemini LLM (text optimization) ──
       # Rewrites each chapter's text for better TTS quality before synthesis.

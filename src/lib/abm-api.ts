@@ -213,9 +213,23 @@ export async function generate(
   });
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
-    throw new Error(
-      (body && (body.error || body.message)) || `Generate failed (${res.status})`,
-    );
+    // Translate machine-readable error codes to human-readable messages
+    const errorCode = body?.error_code || body?.error || "";
+    let msg: string;
+    if (errorCode === "payment_required" || errorCode === "free_quota_exhausted") {
+      msg = "This voice requires payment (Gemini premium). Try an edge-tts voice instead — they're free.";
+    } else if (errorCode === "gemini_tts_not_configured") {
+      msg = "Gemini TTS is not configured on the server. Try an edge-tts voice instead.";
+    } else if (errorCode === "gemini_overload") {
+      msg = "Gemini voices are temporarily overloaded. Try again in a few minutes, or use an edge-tts voice.";
+    } else if (errorCode === "selection_too_large") {
+      msg = body?.error || "Selection too large. Reduce the number of chapters.";
+    } else if (errorCode === "invalid_voice") {
+      msg = "Invalid voice selected. Pick a different voice.";
+    } else {
+      msg = (body && (body.error || body.message)) || `Generate failed (${res.status})`;
+    }
+    throw new Error(msg);
   }
   // The Flask app returns {status: "started"} on success — nothing to return.
 }
