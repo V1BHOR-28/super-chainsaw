@@ -58,3 +58,35 @@ Stage Summary:
 - The brain transplant is text-in, text-out — it sits between EPUB download and TTS submission. The entire audio pipeline downstream (Long Audio API, fresh-operation retry, Vercel Blob upload, callback route, Prisma schema) is untouched.
 - Quality gains vs legacy parser: (1) spine↔TOC orphan reconciliation fixes phantom "Chapter N" entries from light-novel/Word-export EPUBs, (2) word-boundary frontmatter filtering fixes "note" matching "Notevole" (legitimate chapters no longer dropped), (3) 9-step text cleaner strips footnote markers [1], URLs, ISBN, DOI, daggers, section signs, page numbers, expands 40+ abbreviations, fixes roman-numeral corruption, (4) LIS-based heading-to-TOC assignment handles single-file EPUBs and duplicate heading text, (5) multilingual chapter-marker detection (en/it/fr/es/de/pt/ru/hi/zh + Chinese 第N章) for books with no semantic headings, (6) backnote arrow filtering for Word-export TOCs.
 - Runtime verification: smoke test of clean_text_for_tts + end-to-end parse of Pride and Prejudice EPUB both pass. The next live GitHub Actions run (triggered from the deployed app) will exercise the new parser on the user's actual library.
+
+---
+Task ID: 3
+Agent: main (ARIA selective chapter conversion feature)
+Task: Implement selective chapter conversion — users pick which chapters to narrate instead of auto-converting the whole book. Modeled on audiobook-maker.com's UX. User decisions: Q1=A (READY_TO_SELECT on upload, user picks), Q2=A (separate "Add Chapters" button on COMPLETED books), Q3=A (show both cost + minutes estimate), Q4=A (fix only what the feature needs).
+
+Work Log:
+- Dispatched a general-purpose subagent to research the current audiobook pipeline. Findings: upload-epub route already calls parseEpub() and gets chapters back but DISCARDS them (only persists title/author/fullText). AudiobookChapter.status field already exists with pending/generating/ready/failed values but only ready/failed were used. Callback does deleteMany+createMany which wipes unselected chapters — incompatible with partial conversion. Workflow accepts only job_id/epub_url/audiobook_id — no chapter list.
+- Re-cloned audiobook-maker repo to study their chapter selection UX: checkboxes per chapter, Select All/None/Invert, live cost estimate, selected_chapters parameter threaded through their entire stack (app.js → audiobook_app.py → generation_engine.run_generation).
+- Schema change: added `chapterIndices Int[] @default([])` to AudiobookJob. Backward-compatible (empty array = legacy whole-book conversion). Ran prisma generate to update the TypeScript client.
+- Upload route rewrite: removed the GitHub Actions dispatch entirely. Now creates Audiobook + ALL AudiobookChapter rows upfront with status='pending' and cleanedText populated from the parser. Book lands as READY_TO_SELECT. Fixed a type bug along the way: EpubChapter uses `rawText` not `text`.
+- New route POST /api/audiobooks/[id]/convert: accepts { chapterIds }, validates ownership, filters out already-ready chapters, marks selected as 'generating', looks up epubUrl from the most recent job, creates AudiobookJob with chapterIndices, dispatches GH Actions with chapter_indices input. On dispatch failure, reverts chapter statuses to 'pending' so they're not stuck at 'generating'.
+- Callback route rewrite: if job.chapterIndices is non-empty, UPDATE existing chapter rows (not delete+recreate) — only chapters in the job's scope are touched. Aggregate audiobook status derived from all chapter statuses: COMPLETED (all ready) / COMPLETED_WITH_ERRORS (some failed/pending) / FAILED (none ready). Falls back to legacy delete+recreate for jobs without chapterIndices (backward compat). On job failure, reverts in-scope 'generating' chapters to 'failed' and only flips audiobook to FAILED if NO chapters are ready (otherwise COMPLETED_WITH_ERRORS so user can still play what's there).
+- Workflow: added chapter_indices input (comma-separated string, optional, default ''). Passed to the Python script as CHAPTER_INDICES env var.
+- Python script: reads CHAPTER_INDICES, parses comma-separated ints into a set, filters parsed chapters to only those in the set AFTER full-EPUB parsing (so spine/TOC reconciliation still works correctly). Logs the selection: "Selective conversion: N/M chapters selected (indices: [0, 1, 2])".
+- New component src/components/aria/chapter-selector.tsx (~260 lines): modal with chapter list, checkboxes per chapter, status pills (ready=green check, generating=spinner, failed=red badge), Select All Pending / Clear buttons, live estimate (selected count + total chars + est minutes @ 750 chars/min + est cost @ $0.000016/char), Convert button. Polls every 5s while any chapter is generating. Shows "Listen now" button when showListenNow=true and readyCount>0. Styled to match the existing ARIA design language (AmbientGlow, GradientText, font-serif headings, var(--aria-*) colors).
+- Library view wiring: READY_TO_SELECT status opens chapter selector on click (instead of player). COMPLETED/COMPLETED_WITH_ERRORS books get a "Chapters" button (top-right, hover-only) to add more chapters. FAILED books get a "Select chapters" button (replaces the old "Retry generation" button — retry now goes through the selector so the user picks which failed chapters to re-convert, not blind retry of the whole book). Polling now includes READY_TO_SELECT status so the library refreshes when conversion starts. Added selectorBook state + ChapterSelector modal at the end of the component.
+- Verification: python -m py_compile OK. prisma generate OK (chapterIndices in client). npx tsc --noEmit: no audiobook-related errors (initial run flagged 2 issues: chapterIndices not in Prisma client — fixed by prisma generate; EpubChapter.text → EpubChapter.rawText — fixed). bun run lint: clean. agent-browser: landing page renders without console errors. db:push couldn't run locally (production Neon not reachable from sandbox) — schema is backward-compatible so production deploy will apply it via prisma migrate.
+
+Stage Summary:
+- 8 files changed, 820 insertions, 135 deletions
+- New: src/app/api/audiobooks/[id]/convert/route.ts (convert route)
+- New: src/components/aria/chapter-selector.tsx (modal UI)
+- Modified: prisma/schema.prisma (+chapterIndices field)
+- Modified: src/app/api/audiobooks/upload-epub/route.ts (persist chapters upfront, no auto-dispatch)
+- Modified: src/app/api/audiobooks/callback/route.ts (update-not-recreate for partial completion)
+- Modified: .github/workflows/audiobook-convert.yml (+chapter_indices input)
+- Modified: .github/scripts/convert_audiobook.py (read CHAPTER_INDICES, filter chapters)
+- Modified: src/components/aria/library-view.tsx (READY_TO_SELECT handling, Chapters button, selector modal)
+- Commit 811adbc pushed to origin/main
+- Feature is backward-compatible: legacy jobs (chapterIndices=[]) use the old delete+recreate callback path. Existing COMPLETED books get the "Chapters" button to add more chapters incrementally.
+- db:push still needed on production (schema change is additive — new field defaults to empty array, no migration required).
