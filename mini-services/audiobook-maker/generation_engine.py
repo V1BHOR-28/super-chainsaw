@@ -4524,6 +4524,7 @@ def run_generation(job_id, info, voice, rate, single_file, output_format='m4b', 
                       f"output_tok={gemini_usage['output_tokens']}")
         else:
             mp3_files = []
+            mp3_chapter_indices = []  # parallel to mp3_files: chapter index for each MP3
             m4b_chapters = []
             current_ms = 0
             current_chapter_parts = []
@@ -4552,6 +4553,7 @@ def run_generation(job_id, info, voice, rate, single_file, output_format='m4b', 
                         else:
                             _concatenate_mp3(current_chapter_parts, mp3_path)
                         mp3_files.append(mp3_path)
+                        mp3_chapter_indices.append(current_chapter_idx)
 
                         duration = _get_audio_duration_ms(mp3_path)
                         m4b_chapters.append({
@@ -4613,6 +4615,7 @@ def run_generation(job_id, info, voice, rate, single_file, output_format='m4b', 
                 else:
                     _concatenate_mp3(current_chapter_parts, mp3_path)
                 mp3_files.append(mp3_path)
+                mp3_chapter_indices.append(current_chapter_idx)
 
                 duration = _get_audio_duration_ms(mp3_path)
                 m4b_chapters.append({
@@ -4626,11 +4629,48 @@ def run_generation(job_id, info, voice, rate, single_file, output_format='m4b', 
                     if os.path.exists(p) and p != silence_path:
                         os.remove(p)
 
-            job["progress_message"] = "Creating ZIP..."
             safe_name = _safe_filename(info.title) or "audiolibro"
 
+            # ── ARIA per-chapter mode ──
+            # When output_format='mp3' + single_file=False, keep individual
+            # chapter MP3s on disk (don't build a ZIP). The frontend streams
+            # each chapter MP3 individually via /api/chapter_mp3/<job_id>/<idx>.
+            # This enables: (1) incremental chapter addition without
+            # re-generating existing chapters, (2) exact chapter seeking
+            # (each file = one chapter), (3) gapless playlist playback.
+            if output_format == 'mp3':
+                job["chapter_mp3s"] = []
+                for i, mp3_path in enumerate(mp3_files):
+                    ch_idx = mp3_chapter_indices[i] if i < len(mp3_chapter_indices) else i
+                    ch = chapter_by_idx.get(ch_idx)
+                    dur = _get_audio_duration_ms(mp3_path) or (
+                        m4b_chapters[i]["end"] - m4b_chapters[i]["start"]
+                        if i < len(m4b_chapters) else 0
+                    )
+                    job["chapter_mp3s"].append({
+                        "index": ch_idx,
+                        "title": ch.title if ch else f"Chapter {ch_idx}",
+                        "filename": os.path.basename(mp3_path),
+                        "path": mp3_path,
+                        "duration_ms": dur,
+                        "start_ms": m4b_chapters[i]["start"] if i < len(m4b_chapters) else 0,
+                        "end_ms": m4b_chapters[i]["end"] if i < len(m4b_chapters) else dur,
+                    })
+                job["output_files"] = mp3_files
+                job["output_name"] = f"{safe_name} (per-chapter)"
+                job["bytes_generated"] = sum(
+                    os.path.getsize(p) for p in mp3_files if os.path.exists(p)
+                )
+                print(f"[{job_id}] Per-chapter MP3 mode: {len(mp3_files)} files kept on disk "
+                      f"(no ZIP built). Chapter metadata stored on job.")
+                job["progress_message"] = ""
+                # Skip ZIP building, RSS, and purge — the else block below handles those
+            else:
+                job["progress_message"] = "Creating ZIP..."
+
             # Include book cover in ZIP if available
-            _include_cover_in_dir(job, output_dir)
+            if output_format != 'mp3':
+                _include_cover_in_dir(job, output_dir)
 
             # Generate RSS XML for zip_rss format (before ZIP so it gets included)
             if output_format == 'zip_rss':
@@ -4654,12 +4694,14 @@ def run_generation(job_id, info, voice, rate, single_file, output_format='m4b', 
 
             # Build ZIP outside output_dir (make_archive can't write inside its
             # source), then move it inside so cleanup per-epoch handles it.
-            _zip_tmp = shutil.make_archive(str(work_dir / f"_zip_{my_epoch}"), "zip", str(output_dir))
-            zip_path = str(output_dir / f"{safe_name}.zip")
-            shutil.move(_zip_tmp, zip_path)
-            job["output_files"] = mp3_files
-            job["output_name"] = f"{safe_name}.zip"
-            job["output_zip"] = zip_path
+            # Skip for per-chapter mp3 mode — individual MP3s are the output.
+            if output_format != 'mp3':
+                _zip_tmp = shutil.make_archive(str(work_dir / f"_zip_{my_epoch}"), "zip", str(output_dir))
+                zip_path = str(output_dir / f"{safe_name}.zip")
+                shutil.move(_zip_tmp, zip_path)
+                job["output_files"] = mp3_files
+                job["output_name"] = f"{safe_name}.zip"
+                job["output_zip"] = zip_path
 
             # Storage cleanup: per output_format zip / zip_rss i singoli MP3 sono
             # gia' contenuti nello ZIP (duplicazione completa su disco). Verifichiamo

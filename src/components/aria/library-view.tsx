@@ -201,6 +201,7 @@ export function LibraryView() {
         downloadUrl: getDownloadUrl(card.jobId),
         selectedChapters: chaptersResp?.selected_chapters ?? card.selectedChapters,
         chapters: chaptersResp?.chapters,
+        chapterMp3s: chaptersResp?.chapter_mp3s,
       });
       return;
     }

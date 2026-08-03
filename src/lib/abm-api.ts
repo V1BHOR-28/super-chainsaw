@@ -46,10 +46,21 @@ export interface AnalyzeResponse {
   optimized_chapters?: number[];
   max_text_chars?: number;
   max_gemini_text_chars?: number;
-  /** Which chapter indices are already in the current audio (from the last
-   *  generation). Present when fetching via getJobChapters() for an existing
-   *  job. Empty/missing = nothing converted yet (fresh upload) or whole book. */
   selected_chapters?: number[];
+  /** Per-chapter MP3 metadata. Present when the job was generated with
+   *  output_format='mp3' + single_file=false (ARIA per-chapter mode).
+   *  Each entry has exact duration + file path info for playlist playback. */
+  chapter_mp3s?: ChapterMp3Info[];
+}
+
+/** Metadata for a single chapter MP3 file in per-chapter mode. */
+export interface ChapterMp3Info {
+  index: number;
+  title: string;
+  filename: string;
+  duration_ms: number;
+  start_ms: number;
+  end_ms: number;
 }
 
 export type JobStatus =
@@ -193,7 +204,7 @@ export async function generate(
       rate,
       selected_chapters: selectedChapters,
       output_format: outputFormat,
-      single_file: true,
+      single_file: false,
     }),
     credentials: "include",
   });
@@ -333,4 +344,13 @@ export function getDownloadUrl(jobId: string): string {
 /** Returns the relative cover thumbnail URL for a job (may 404 if no cover). */
 export function getCoverUrl(jobId: string): string {
   return `${ABM_BASE}/cover/${jobId}`;
+}
+
+/**
+ * Returns the relative URL for streaming an individual chapter MP3.
+ * Only works for jobs generated in per-chapter mode (single_file=false).
+ * The Flask app serves the file with HTTP Range support for seeking.
+ */
+export function getChapterMp3Url(jobId: string, chapterIndex: number): string {
+  return `${ABM_BASE}/chapter_mp3/${jobId}/${chapterIndex}`;
 }

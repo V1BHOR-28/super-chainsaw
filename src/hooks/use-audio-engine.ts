@@ -2,29 +2,29 @@
 
 import { useEffect, useRef } from "react";
 import { usePlayerStore } from "@/lib/player-store";
+import { getChapterMp3Url } from "@/lib/abm-api";
 
 /**
- * Audio engine — plays the single MP3 produced by the audiobook-maker
- * Flask app for the currently-open job.
+ * Audio engine — playlist player for per-chapter MP3s.
  *
- * Responsibilities:
- *   - load the downloadUrl into a real <audio> element when a job opens
- *   - play / pause / seek / skip ±15s
- *   - sync playbackRate + volume + muted into the element
- *   - track currentTime + duration back into the store (drives the scrubber)
- *   - honor the sleep timer
- *   - expose Media Session metadata for OS-level controls
+ * In per-chapter mode (single_file=false), the Flask app produces individual
+ * MP3 files per chapter. This engine plays them sequentially:
+ *   1. Loads chapter N's MP3 via getChapterMp3Url(jobId, chapterIndex)
+ *   2. On `onended`, advances to chapter N+1 and auto-plays (gapless)
+ *   3. The store's `currentTime` is absolute across all chapters
+ *   4. The store's `duration` is the sum of all chapter durations
+ *   5. Seeking computes which chapter + offset to switch to
  *
- * REMOVED vs the legacy engine:
- *   - chapter-by-chapter playback (the Flask app produces a single MP3)
- *   - live narration / speechSynthesis fallback
- *   - per-chapter status polling + PATCH /api/audiobooks/[id] progress save
- *     (the Flask app keeps state in-memory only; jobs expire after 18h)
+ * For backward compat (old single_file=true jobs without chapterMp3s),
+ * falls back to playing a single downloadUrl.
  */
 export function useAudioEngine() {
   const audioRef = useRef<HTMLAudioElement | null>(null);
+  const isLoadingNewChapter = useRef(false);
+  const pendingSeekRef = useRef<number | null>(null);
 
   const currentJob = usePlayerStore((s) => s.currentJob);
+  const currentChapterIdx = usePlayerStore((s) => s.currentChapterIdx);
   const isPlaying = usePlayerStore((s) => s.isPlaying);
   const playbackRate = usePlayerStore((s) => s.playbackRate);
   const volume = usePlayerStore((s) => s.volume);
@@ -46,17 +46,30 @@ export function useAudioEngine() {
     };
   }, []);
 
-  // When the current job changes: load the new source.
+  // ── Chapter change: load the new chapter's MP3 ──
+  // When currentChapterIdx changes (or the job opens), load the new source.
   useEffect(() => {
     const a = audioRef.current;
     if (!a || !currentJob) return;
-    a.src = currentJob.downloadUrl;
-    a.load();
-    setDuration(0);
-    setCurrentTime(0);
-  }, [currentJob, setDuration, setCurrentTime]);
 
-  // Play / pause control
+    // Backward compat: single-file mode (no chapterMp3s)
+    if (!currentJob.chapterMp3s || currentJob.chapterMp3s.length === 0) {
+      a.src = currentJob.downloadUrl;
+      a.load();
+      return;
+    }
+
+    // Playlist mode
+    if (currentChapterIdx < 0 || currentChapterIdx >= currentJob.chapterMp3s.length) return;
+
+    const chInfo = currentJob.chapterMp3s[currentChapterIdx];
+    const url = getChapterMp3Url(currentJob.jobId, chInfo.index);
+    isLoadingNewChapter.current = true;
+    a.src = url;
+    a.load();
+  }, [currentJob, currentChapterIdx]);
+
+  // ── Play / pause control ──
   useEffect(() => {
     const a = audioRef.current;
     if (!a || !currentJob) return;
@@ -67,21 +80,77 @@ export function useAudioEngine() {
     } else {
       if (!a.paused) a.pause();
     }
-  }, [isPlaying, currentJob]);
+  }, [isPlaying, currentJob, currentChapterIdx]);
 
-  // Sync <audio> element time updates → store
+  // ── Audio event handlers: timeupdate, loadedmetadata, ended ──
   useEffect(() => {
     const a = audioRef.current;
     if (!a) return;
-    const onTimeUpdate = () => setCurrentTime(a.currentTime);
+
+    const onTimeUpdate = () => {
+      if (isLoadingNewChapter.current) return;
+      const job = usePlayerStore.getState().currentJob;
+      if (!job) return;
+
+      // In playlist mode, add the chapter's start offset
+      if (job.chapterMp3s && job.chapterMp3s.length > 0 && usePlayerStore.getState().currentChapterIdx >= 0) {
+        const idx = usePlayerStore.getState().currentChapterIdx;
+        const chapterStart = job.chapterMp3s
+          .slice(0, idx)
+          .reduce((sum, ch) => sum + (ch.duration_ms || 0), 0) / 1000;
+        setCurrentTime(chapterStart + a.currentTime);
+      } else {
+        setCurrentTime(a.currentTime);
+      }
+    };
+
     const onLoadedMetadata = () => {
-      if (a.duration && isFinite(a.duration)) {
+      isLoadingNewChapter.current = false;
+      const job = usePlayerStore.getState().currentJob;
+      if (!job) return;
+
+      // In playlist mode, apply any pending seek offset
+      if (job.chapterMp3s && job.chapterMp3s.length > 0) {
+        const idx = usePlayerStore.getState().currentChapterIdx;
+        if (idx >= 0 && idx < job.chapterMp3s.length) {
+          const chapterStart = job.chapterMp3s
+            .slice(0, idx)
+            .reduce((sum, ch) => sum + (ch.duration_ms || 0), 0) / 1000;
+          const storeTime = usePlayerStore.getState().currentTime;
+          const offset = Math.max(0, storeTime - chapterStart);
+          if (offset > 0.5 && offset < a.duration) {
+            a.currentTime = offset;
+          }
+        }
+      } else if (a.duration && isFinite(a.duration)) {
         setDuration(a.duration);
       }
     };
+
     const onEnded = () => {
+      const job = usePlayerStore.getState().currentJob;
+      if (!job) return;
+
+      // In playlist mode, advance to the next chapter
+      if (job.chapterMp3s && job.chapterMp3s.length > 0) {
+        const hasNext = usePlayerStore.getState().advanceToNextChapter();
+        if (hasNext) {
+          // The chapter change effect will load the next chapter's MP3.
+          // If we were playing, auto-play the next chapter.
+          if (usePlayerStore.getState().isPlaying) {
+            // Small delay to let the new src load
+            setTimeout(() => {
+              const a2 = audioRef.current;
+              if (a2) a2.play().catch(() => {});
+            }, 100);
+          }
+          return;
+        }
+      }
+      // No next chapter or single-file mode — stop
       usePlayerStore.getState().pause();
     };
+
     a.addEventListener("timeupdate", onTimeUpdate);
     a.addEventListener("loadedmetadata", onLoadedMetadata);
     a.addEventListener("durationchange", onLoadedMetadata);
@@ -109,31 +178,75 @@ export function useAudioEngine() {
     }
   }, [volume, muted]);
 
-  // Seek → actually move the <audio> element's playhead.
-  //
-  // Subscribe to the store directly rather than using a useEffect on
-  // currentTime, because currentTime changes on EVERY timeupdate tick
-  // (many times per second). Reacting to every change would cause an
-  // infinite loop: audio fires timeupdate → store updates → effect fires
-  // → sets audio.currentTime → audio fires timeupdate → ...
+  // ── Seek subscription (chapter-aware) ──
+  // Subscribes to the store directly. When currentTime jumps significantly:
+  //   - In single-file mode: set a.currentTime directly (old behavior)
+  //   - In playlist mode (same chapter): set a.currentTime to the offset
+  //   - In playlist mode (different chapter): call seekToChapter (triggers
+  //     the chapter change effect which loads the new MP3)
   useEffect(() => {
-    const SEEK_THRESHOLD = 1.5; // seconds — natural playback never jumps this far per tick
+    const SEEK_THRESHOLD = 1.5;
     let lastWrittenTime = -1;
 
     const unsubscribe = usePlayerStore.subscribe((state) => {
       const a = audioRef.current;
-      if (!a || !a.src) return;
+      if (!a || !a.src || isLoadingNewChapter.current) return;
 
-      const storeTime = state.currentTime;
-      const delta = Math.abs(storeTime - a.currentTime);
-      if (delta > SEEK_THRESHOLD && Math.abs(storeTime - lastWrittenTime) > 0.1) {
-        a.currentTime = storeTime;
-        lastWrittenTime = storeTime;
+      const job = state.currentJob;
+      if (!job) return;
+
+      // Single-file mode (backward compat)
+      if (!job.chapterMp3s || job.chapterMp3s.length === 0) {
+        const delta = Math.abs(state.currentTime - a.currentTime);
+        if (delta > SEEK_THRESHOLD && Math.abs(state.currentTime - lastWrittenTime) > 0.1) {
+          a.currentTime = state.currentTime;
+          lastWrittenTime = state.currentTime;
+        }
+        return;
+      }
+
+      // Playlist mode — compute the chapter-relative time
+      const idx = state.currentChapterIdx;
+      if (idx < 0) return;
+
+      const chapterStart = job.chapterMp3s
+        .slice(0, idx)
+        .reduce((sum, ch) => sum + (ch.duration_ms || 0), 0) / 1000;
+      const relativeTime = state.currentTime - chapterStart;
+
+      // If the target is in a different chapter, switch
+      let targetIdx = idx;
+      let accStart = 0;
+      for (let i = 0; i < job.chapterMp3s.length; i++) {
+        const dur = (job.chapterMp3s[i].duration_ms || 0) / 1000;
+        if (state.currentTime < accStart + dur) {
+          targetIdx = i;
+          break;
+        }
+        accStart += dur;
+        targetIdx = i;
+      }
+
+      if (targetIdx !== idx) {
+        // Different chapter — switch directly without resetting currentTime
+        // (seekToChapter would reset to chapter start, losing the user's
+        // seek target). setState changes currentChapterIdx, which triggers
+        // the chapter change effect to load the new MP3. onLoadedMetadata
+        // will then compute the offset from the preserved currentTime.
+        usePlayerStore.setState({ currentChapterIdx: targetIdx });
+        return;
+      }
+
+      // Same chapter — seek within
+      const delta = Math.abs(relativeTime - a.currentTime);
+      if (delta > SEEK_THRESHOLD && Math.abs(relativeTime - lastWrittenTime) > 0.1) {
+        a.currentTime = Math.max(0, relativeTime);
+        lastWrittenTime = relativeTime;
       }
     });
 
     return unsubscribe;
-  }, []); // empty deps — subscription created once and cleaned up on unmount
+  }, []); // empty deps — subscription created once
 
   // Sleep timer watcher
   useEffect(() => {
@@ -149,12 +262,15 @@ export function useAudioEngine() {
     return () => clearInterval(id);
   }, [sleepTimerEndsAt, pause]);
 
-  // Media Session API — exposes play/pause/seek to OS-level media controls
+  // Media Session API
   useEffect(() => {
     if (typeof window === "undefined" || !("mediaSession" in navigator) || !currentJob) return;
     try {
+      const chapterTitle = currentJob.chapterMp3s && currentChapterIdx >= 0
+        ? currentJob.chapterMp3s[currentChapterIdx]?.title
+        : undefined;
       navigator.mediaSession.metadata = new MediaMetadata({
-        title: currentJob.title,
+        title: chapterTitle ? `${chapterTitle} — ${currentJob.title}` : currentJob.title,
         artist: currentJob.author || "Unknown author",
         album: "ARIA Audiobooks",
       });
@@ -165,7 +281,7 @@ export function useAudioEngine() {
     } catch {
       /* ignore */
     }
-  }, [currentJob]);
+  }, [currentJob, currentChapterIdx]);
 
   return null;
 }

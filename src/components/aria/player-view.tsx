@@ -25,7 +25,7 @@ import { cn } from "@/lib/utils";
 import { AmbientGlow, StatusPill, AriaDivider } from "./primitives";
 import { NowPlayingBars } from "./waveform";
 import { BookCover } from "./book-cover";
-import { getJobChapters, type AnalyzeResponse } from "@/lib/abm-api";
+import { getJobChapters, type AnalyzeResponse, type ChapterMp3Info } from "@/lib/abm-api";
 
 /**
  * PlayerView — plays the single MP3 produced by the audiobook-maker Flask
@@ -51,6 +51,8 @@ export function PlayerView() {
   const toggle = usePlayerStore((s) => s.toggle);
   const skip = usePlayerStore((s) => s.skip);
   const seek = usePlayerStore((s) => s.seek);
+  const seekToChapter = usePlayerStore((s) => s.seekToChapter);
+  const currentChapterIdx = usePlayerStore((s) => s.currentChapterIdx);
   const closePlayer = usePlayerStore((s) => s.closePlayer);
   const toggleSettings = usePlayerStore((s) => s.toggleSettings);
   const setActiveWorkspace = useAriaStore((s) => s.setActiveWorkspace);
@@ -254,9 +256,12 @@ export function PlayerView() {
           chaptersData={chaptersData}
           passedChapters={job.chapters}
           passedSelected={job.selectedChapters ?? chaptersData?.selected_chapters}
+          chapterMp3s={job.chapterMp3s ?? chaptersData?.chapter_mp3s}
+          currentChapterIdx={currentChapterIdx}
           currentTime={currentTime}
           duration={duration}
           onSeek={seek}
+          onSeekToChapter={seekToChapter}
           onClose={toggleChapters}
         />
       </SidePanel>
@@ -693,75 +698,88 @@ function ChaptersPanel({
   chaptersData,
   passedChapters,
   passedSelected,
+  chapterMp3s,
+  currentChapterIdx,
   currentTime,
   duration,
   onSeek,
+  onSeekToChapter,
   onClose,
 }: {
   loading: boolean;
   chaptersData: AnalyzeResponse | null;
   passedChapters?: { index: number; title: string; chars: number; estimated_minutes: number }[];
   passedSelected?: number[];
+  chapterMp3s?: ChapterMp3Info[];
+  currentChapterIdx: number;
   currentTime: number;
   duration: number;
   onSeek: (t: number) => void;
+  onSeekToChapter: (idx: number) => void;
   onClose: () => void;
 }) {
-  // Prefer freshly-fetched data; fall back to what was passed from the library
   const chapters = chaptersData?.chapters ?? passedChapters ?? [];
   const selectedSet = new Set(
     chaptersData?.selected_chapters ?? passedSelected ?? []
   );
   const totalChapters = chaptersData?.total_chapters ?? chapters.length;
   const inAudioCount = selectedSet.size;
+  const hasChapterMp3s = !!chapterMp3s && chapterMp3s.length > 0;
 
-  // Only chapters that are actually IN the audio can be seeked to.
-  // If selected_chapters is empty (whole book), all chapters are in the audio.
-  const audioChapters = selectedSet.size > 0
-    ? chapters.filter((c) => selectedSet.has(c.index))
-    : chapters;
+  // When chapterMp3s is available, use exact durations. Otherwise fall back
+  // to proportional estimates from char counts (backward compat).
+  const audioChapters = hasChapterMp3s
+    ? chapterMp3s!
+    : selectedSet.size > 0
+      ? chapters.filter((c) => selectedSet.has(c.index))
+      : chapters;
 
-  // Calculate each audio chapter's approximate start time proportionally
-  // based on char count. The Flask app produces a single merged MP3, so
-  // we estimate: chapterStartTime(i) = (cumulativeCharsBefore(i) / totalChars) * duration
-  const totalAudioChars = audioChapters.reduce((sum, c) => sum + (c.chars || 0), 0);
-  const chapterStarts = audioChapters.reduce<number[]>((acc, ch) => {
-    const cumulativeBefore = acc.length > 0
-      ? audioChapters.slice(0, acc.length).reduce((s, c) => s + (c.chars || 0), 0)
-      : 0;
-    const startTime = totalAudioChars > 0 && duration > 0
-      ? (cumulativeBefore / totalAudioChars) * duration
-      : 0;
-    acc.push(startTime);
-    return acc;
-  }, []);
+  const chapterStarts = hasChapterMp3s
+    ? chapterMp3s!.map((_, i) =>
+        chapterMp3s!.slice(0, i).reduce((s, ch) => s + (ch.duration_ms || 0), 0) / 1000
+      )
+    : (() => {
+        const totalAudioChars = audioChapters.reduce((sum, c) => sum + ((c as any).chars || 0), 0);
+        let cum = 0;
+        return audioChapters.map((ch) => {
+          const t = totalAudioChars > 0 && duration > 0 ? (cum / totalAudioChars) * duration : 0;
+          cum += (ch as any).chars || 0;
+          return t;
+        });
+      })();
 
-  // Which chapter is currently playing? Find the last chapter whose start
-  // time is <= currentTime.
-  let currentChapterIdx = -1;
-  if (duration > 0 && chapterStarts.length > 0) {
-    for (let i = chapterStarts.length - 1; i >= 0; i--) {
-      if (currentTime >= chapterStarts[i]) {
-        currentChapterIdx = i;
-        break;
-      }
-    }
-  }
+  // Use currentChapterIdx from the store when available (exact, no computation
+  // needed). Fall back to computing from currentTime for backward compat.
+  const activeIdx = currentChapterIdx >= 0
+    ? currentChapterIdx
+    : (() => {
+        if (duration <= 0 || chapterStarts.length === 0) return -1;
+        for (let i = chapterStarts.length - 1; i >= 0; i--) {
+          if (currentTime >= chapterStarts[i]) return i;
+        }
+        return -1;
+      })();
 
   const handleChapterClick = (audioIdx: number) => {
-    if (chapterStarts[audioIdx] !== undefined) {
+    if (hasChapterMp3s) {
+      // Per-chapter mode: directly switch to the chapter
+      onSeekToChapter(audioIdx);
+    } else if (chapterStarts[audioIdx] !== undefined) {
+      // Single-file mode: seek to the estimated position
       onSeek(chapterStarts[audioIdx]);
     }
   };
 
-  // Prev / Next chapter seek
   const handlePrevChapter = () => {
-    if (currentChapterIdx > 0) onSeek(chapterStarts[currentChapterIdx - 1]);
-    else if (currentChapterIdx === 0) onSeek(0);
+    if (activeIdx > 0) {
+      handleChapterClick(activeIdx - 1);
+    } else if (activeIdx === 0) {
+      onSeek(0);
+    }
   };
   const handleNextChapter = () => {
-    if (currentChapterIdx >= 0 && currentChapterIdx < chapterStarts.length - 1) {
-      onSeek(chapterStarts[currentChapterIdx + 1]);
+    if (activeIdx >= 0 && activeIdx < chapterStarts.length - 1) {
+      handleChapterClick(activeIdx + 1);
     }
   };
 
@@ -776,28 +794,21 @@ function ChaptersPanel({
         }
         onClose={onClose}
       />
-      {/* Prev/Next chapter controls */}
       {audioChapters.length > 1 && (
         <div className="flex items-center gap-2 px-4 py-2 border-b border-[var(--aria-border)]">
           <button
             onClick={handlePrevChapter}
-            disabled={currentChapterIdx <= 0}
+            disabled={activeIdx <= 0}
             className="flex-1 text-xs py-1.5 rounded-md transition-colors disabled:opacity-40"
-            style={{
-              border: "1px solid var(--aria-border)",
-              color: "var(--aria-fg-muted)",
-            }}
+            style={{ border: "1px solid var(--aria-border)", color: "var(--aria-fg-muted)" }}
           >
             ← Prev chapter
           </button>
           <button
             onClick={handleNextChapter}
-            disabled={currentChapterIdx >= chapterStarts.length - 1}
+            disabled={activeIdx >= chapterStarts.length - 1}
             className="flex-1 text-xs py-1.5 rounded-md transition-colors disabled:opacity-40"
-            style={{
-              border: "1px solid var(--aria-border)",
-              color: "var(--aria-fg-muted)",
-            }}
+            style={{ border: "1px solid var(--aria-border)", color: "var(--aria-fg-muted)" }}
           >
             Next chapter →
           </button>
@@ -805,19 +816,20 @@ function ChaptersPanel({
       )}
       <div className="flex-1 overflow-y-auto px-4 pb-4 space-y-1">
         {loading ? (
-          <div className="text-center py-8 text-[var(--aria-fg-muted)] text-sm">
-            Loading chapters…
-          </div>
+          <div className="text-center py-8 text-[var(--aria-fg-muted)] text-sm">Loading chapters…</div>
         ) : chapters.length === 0 ? (
           <div className="text-center py-8 text-[var(--aria-fg-muted)] text-sm">
-            Chapter data unavailable. The job may have expired (18h retention) —
-            re-upload the EPUB to browse chapters.
+            Chapter data unavailable. The job may have expired (18h retention) — re-upload the EPUB to browse chapters.
           </div>
         ) : (
           chapters.map((ch, idx) => {
             const inAudio = selectedSet.size === 0 || selectedSet.has(ch.index);
-            const audioIdx = audioChapters.findIndex((c) => c.index === ch.index);
-            const isCurrent = audioIdx === currentChapterIdx;
+            const audioIdx = audioChapters.findIndex((c) =>
+              hasChapterMp3s
+                ? (c as ChapterMp3Info).index === ch.index
+                : c.index === ch.index
+            );
+            const isCurrent = audioIdx === activeIdx;
             const chapterTime = audioIdx >= 0 ? chapterStarts[audioIdx] : undefined;
 
             return (
@@ -827,47 +839,24 @@ function ChaptersPanel({
                 disabled={!inAudio}
                 className="w-full flex items-start gap-2.5 p-2.5 rounded-lg transition-colors text-left disabled:cursor-not-allowed"
                 style={{
-                  background: isCurrent
-                    ? "rgba(245,158,11,0.1)"
-                    : inAudio
-                      ? "rgba(34,197,94,0.04)"
-                      : "transparent",
-                  border: isCurrent
-                    ? "1px solid rgba(245,158,11,0.3)"
-                    : inAudio
-                      ? "1px solid rgba(34,197,94,0.15)"
-                      : "1px solid transparent",
+                  background: isCurrent ? "rgba(245,158,11,0.1)" : inAudio ? "rgba(34,197,94,0.04)" : "transparent",
+                  border: isCurrent ? "1px solid rgba(245,158,11,0.3)" : inAudio ? "1px solid rgba(34,197,94,0.15)" : "1px solid transparent",
                   cursor: inAudio ? "pointer" : "default",
                 }}
               >
                 <div className="flex items-center justify-center flex-shrink-0 mt-0.5">
                   {inAudio ? (
                     isCurrent ? (
-                      <div
-                        className="w-4 h-4 rounded flex items-center justify-center"
-                        style={{
-                          background: "rgba(245,158,11,0.2)",
-                          border: "1px solid rgba(245,158,11,0.5)",
-                        }}
-                      >
+                      <div className="w-4 h-4 rounded flex items-center justify-center" style={{ background: "rgba(245,158,11,0.2)", border: "1px solid rgba(245,158,11,0.5)" }}>
                         <Play size={9} className="fill-current text-[var(--aria-accent-glow)]" />
                       </div>
                     ) : (
-                      <div
-                        className="w-4 h-4 rounded flex items-center justify-center"
-                        style={{
-                          background: "rgba(34,197,94,0.15)",
-                          border: "1px solid rgba(34,197,94,0.3)",
-                        }}
-                      >
+                      <div className="w-4 h-4 rounded flex items-center justify-center" style={{ background: "rgba(34,197,94,0.15)", border: "1px solid rgba(34,197,94,0.3)" }}>
                         <Check size={10} className="text-green-400" />
                       </div>
                     )
                   ) : (
-                    <span
-                      className="text-[10px] font-mono w-4 text-center"
-                      style={{ color: "var(--aria-fg-dim)" }}
-                    >
+                    <span className="text-[10px] font-mono w-4 text-center" style={{ color: "var(--aria-fg-dim)" }}>
                       {String(idx + 1).padStart(2, "0")}
                     </span>
                   )}
@@ -875,43 +864,21 @@ function ChaptersPanel({
                 <div className="flex-1 min-w-0">
                   <div className="flex items-center gap-2">
                     {inAudio && (
-                      <span
-                        className="text-[10px] font-mono w-4 text-center"
-                        style={{ color: "var(--aria-fg-dim)" }}
-                      >
+                      <span className="text-[10px] font-mono w-4 text-center" style={{ color: "var(--aria-fg-dim)" }}>
                         {String(idx + 1).padStart(2, "0")}
                       </span>
                     )}
-                    <span
-                      className="text-sm font-medium truncate"
-                      style={{
-                        color: isCurrent
-                          ? "var(--aria-accent-glow)"
-                          : inAudio
-                            ? "var(--aria-fg)"
-                            : "var(--aria-fg-muted)",
-                      }}
-                    >
+                    <span className="text-sm font-medium truncate" style={{ color: isCurrent ? "var(--aria-accent-glow)" : inAudio ? "var(--aria-fg)" : "var(--aria-fg-muted)" }}>
                       {ch.title || `Chapter ${ch.index + 1}`}
                     </span>
                   </div>
-                  <div
-                    className="text-[10px] mt-0.5 flex items-center gap-2"
-                    style={{ color: "var(--aria-fg-dim)" }}
-                  >
+                  <div className="text-[10px] mt-0.5 flex items-center gap-2" style={{ color: "var(--aria-fg-dim)" }}>
                     <span>
-                      {(ch.chars || 0).toLocaleString()} chars · ~
-                      {ch.estimated_minutes || Math.max(1, Math.round((ch.chars || 0) / 750))} min
+                      {(ch.chars || 0).toLocaleString()} chars · ~{ch.estimated_minutes || Math.max(1, Math.round((ch.chars || 0) / 750))} min
                     </span>
-                    {isCurrent && (
-                      <span style={{ color: "var(--aria-accent-glow)" }}>· playing</span>
-                    )}
-                    {!inAudio && (
-                      <span>· not narrated</span>
-                    )}
-                    {chapterTime !== undefined && inAudio && !isCurrent && (
-                      <span>· {formatTime(chapterTime)}</span>
-                    )}
+                    {isCurrent && <span style={{ color: "var(--aria-accent-glow)" }}>· playing</span>}
+                    {!inAudio && <span>· not narrated</span>}
+                    {chapterTime !== undefined && inAudio && !isCurrent && <span>· {formatTime(chapterTime)}</span>}
                   </div>
                 </div>
               </button>
@@ -920,13 +887,7 @@ function ChaptersPanel({
         )}
       </div>
       {inAudioCount > 0 && (
-        <div
-          className="px-4 py-3 border-t text-[11px]"
-          style={{
-            borderColor: "var(--aria-border)",
-            color: "var(--aria-fg-muted)",
-          }}
-        >
+        <div className="px-4 py-3 border-t text-[11px]" style={{ borderColor: "var(--aria-border)", color: "var(--aria-fg-muted)" }}>
           <span style={{ color: "#22c55e" }}>✓ {inAudioCount}</span> of {totalChapters} chapters narrated.
           Click any chapter to jump there. Use &quot;More chapters&quot; in the library to narrate the rest.
         </div>

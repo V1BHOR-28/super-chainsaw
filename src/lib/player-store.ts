@@ -2,12 +2,17 @@
 
 import { create } from "zustand";
 import { persist, createJSONStorage } from "zustand/middleware";
+import type { ChapterMp3Info } from "@/lib/abm-api";
 
 /**
- * A single playing job. The Flask /api/generate produces ONE MP3 file per
- * job (single_file=true), so the player just plays one continuous audio
- * stream — there's no chapter list, no per-chapter narration state, and
- * no live-narration fallback.
+ * A single playing job. In per-chapter mode, the Flask /api/generate
+ * produces individual MP3 files per chapter (single_file=false), so the
+ * player is a playlist player: it plays chapter N's MP3, then on `onended`
+ * advances to chapter N+1's MP3 — gapless playback with exact chapter
+ * boundaries.
+ *
+ * For backward compat, if chapterMp3s is empty, the player falls back to
+ * playing a single merged downloadUrl (old single_file=true mode).
  */
 export interface PlayerChapterInfo {
   index: number;
@@ -21,14 +26,15 @@ export interface PlayingJob {
   title: string;
   author: string;
   accent: string;
+  /** Single-file download URL (legacy single_file=true mode). Used as
+   *  fallback when chapterMp3s is empty. */
   downloadUrl: string;
-  /** Chapters that are in the current audio (from the Flask job's
-   *  selected_chapters). When present + non-empty, the player shows a
-   *  chapter browser drawer. When absent, no chapter UI is shown. */
+  /** Per-chapter MP3 metadata from the Flask job. When non-empty, the
+   *  player operates in playlist mode. */
+  chapterMp3s?: ChapterMp3Info[];
+  /** Which chapter indices are in the current audio. */
   selectedChapters?: number[];
-  /** Full chapter metadata (title, chars, est minutes) for the chapter
-   *  browser. Fetched lazily by the player via getJobChapters when the
-   *  user opens the browser. */
+  /** Full chapter metadata for the chapter browser. */
   chapters?: PlayerChapterInfo[];
 }
 
@@ -44,17 +50,22 @@ interface PlayerState {
   // Current job
   currentJob: PlayingJob | null;
 
+  // Playlist state
+  currentChapterIdx: number; // index into chapterMp3s array (-1 = no playlist)
+  seekToChapter: (idx: number) => void;
+  advanceToNextChapter: () => boolean; // returns true if there's a next chapter
+
   // Playback
   isPlaying: boolean;
-  currentTime: number; // seconds within the single MP3
-  duration: number; // total seconds of the MP3
+  currentTime: number; // absolute seconds across all chapters
+  duration: number; // total seconds across all chapters
   playbackRate: number;
   volume: number;
   muted: boolean;
 
   // UI
   showSettings: boolean;
-  sleepTimerMinutes: number | null; // null = off
+  sleepTimerMinutes: number | null;
   sleepTimerEndsAt: number | null;
 
   // Actions
@@ -68,7 +79,7 @@ interface PlayerState {
   setVolume: (v: number) => void;
   toggleMute: () => void;
 
-  skip: (seconds: number) => void; // positive = forward, negative = back
+  skip: (seconds: number) => void;
 
   toggleSettings: () => void;
   setSleepTimer: (minutes: number | null) => void;
@@ -81,11 +92,16 @@ export const usePlayerStore = create<PlayerState>()(
       view: "landing",
       setView: (v) => set({ view: v }),
       openPlayer: (job) => {
+        // Compute total duration from chapterMp3s if available
+        const totalDuration = job.chapterMp3s && job.chapterMp3s.length > 0
+          ? job.chapterMp3s.reduce((sum, ch) => sum + (ch.duration_ms || 0), 0) / 1000
+          : 0;
         set({
           view: "player",
           currentJob: job,
+          currentChapterIdx: job.chapterMp3s && job.chapterMp3s.length > 0 ? 0 : -1,
           currentTime: 0,
-          duration: 0,
+          duration: totalDuration,
           isPlaying: false,
         });
         if (typeof window !== "undefined") {
@@ -93,13 +109,37 @@ export const usePlayerStore = create<PlayerState>()(
         }
       },
       closePlayer: () => {
-        set({ view: "landing", isPlaying: false });
+        set({ view: "landing", isPlaying: false, currentChapterIdx: -1 });
         if (typeof window !== "undefined") {
           window.scrollTo({ top: 0, behavior: "instant" as ScrollBehavior });
         }
       },
 
       currentJob: null,
+      currentChapterIdx: -1,
+
+      seekToChapter: (idx) => {
+        const { currentJob } = get();
+        if (!currentJob?.chapterMp3s || idx < 0 || idx >= currentJob.chapterMp3s.length) return;
+        // Compute the absolute start time of this chapter
+        const startTime = currentJob.chapterMp3s
+          .slice(0, idx)
+          .reduce((sum, ch) => sum + (ch.duration_ms || 0), 0) / 1000;
+        set({ currentChapterIdx: idx, currentTime: startTime });
+      },
+
+      advanceToNextChapter: () => {
+        const { currentJob, currentChapterIdx } = get();
+        if (!currentJob?.chapterMp3s) return false;
+        const next = currentChapterIdx + 1;
+        if (next >= currentJob.chapterMp3s.length) return false;
+        // Set currentTime to the start of the next chapter
+        const startTime = currentJob.chapterMp3s
+          .slice(0, next)
+          .reduce((sum, ch) => sum + (ch.duration_ms || 0), 0) / 1000;
+        set({ currentChapterIdx: next, currentTime: startTime });
+        return true;
+      },
 
       isPlaying: false,
       currentTime: 0,

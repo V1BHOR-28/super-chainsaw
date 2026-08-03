@@ -9698,6 +9698,75 @@ def api_job_chapters(job_id):
         # last generation). The frontend uses this to show an "Already in
         # audiobook" badge on those chapters + warn on re-convert.
         "selected_chapters": job.get("selected_chapters") or [],
+        # Per-chapter MP3 metadata. Present when the job was generated with
+        # output_format='mp3' + single_file=False (ARIA per-chapter mode).
+        # Each entry: {index, title, filename, duration_ms, start_ms, end_ms}.
+        # The frontend uses this to build a playlist player with exact
+        # chapter boundaries + stream each chapter individually.
+        "chapter_mp3s": job.get("chapter_mp3s") or [],
+    })
+
+
+@app.route("/api/chapter_mp3/<job_id>/<int:chapter_index>")
+def api_chapter_mp3(job_id, chapter_index):
+    """Serve an individual chapter MP3 file from a per-chapter-mode job.
+
+    Used by the ARIA playlist player — each chapter is its own MP3 file,
+    enabling exact seeking + gapless playback via <audio onended>.
+
+    Supports HTTP Range requests for seeking within a chapter.
+    """
+    job, err, sc = _check_job_owner(job_id)
+    if err is not None:
+        if sc == 404:
+            return jsonify({"error": "Job not found"}), 404
+        return err, sc
+
+    chapter_mp3s = job.get("chapter_mp3s") or []
+    target = None
+    for ch in chapter_mp3s:
+        if ch.get("index") == chapter_index:
+            target = ch
+            break
+
+    if not target:
+        return jsonify({"error": f"Chapter {chapter_index} not found in this job"}), 404
+
+    mp3_path = target.get("path", "")
+    if not mp3_path or not os.path.isfile(mp3_path):
+        return jsonify({"error": "Chapter audio file not found on disk"}), 404
+
+    # Serve with Range support for seeking
+    return _send_file_throttled(
+        mp3_path,
+        as_attachment=False,
+        download_name=target.get("filename", f"chapter_{chapter_index}.mp3"),
+        mimetype="audio/mpeg",
+        conditional=True,
+    )
+
+
+@app.route("/api/chapter_durations/<job_id>")
+def api_chapter_durations(job_id):
+    """Return exact chapter durations for a per-chapter-mode job.
+
+    Returns: {chapters: [{index, title, duration_ms, start_ms, end_ms}], total_ms}
+    Used by the ARIA player to show exact chapter positions in the UI.
+    """
+    job, err, sc = _check_job_owner(job_id)
+    if err is not None:
+        if sc == 404:
+            return jsonify({"error": "Job not found"}), 404
+        return err, sc
+
+    chapter_mp3s = job.get("chapter_mp3s") or []
+    if not chapter_mp3s:
+        return jsonify({"error": "This job was not generated in per-chapter mode"}), 400
+
+    total_ms = sum(ch.get("duration_ms", 0) for ch in chapter_mp3s)
+    return jsonify({
+        "chapters": chapter_mp3s,
+        "total_ms": total_ms,
     })
 
 
