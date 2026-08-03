@@ -26,7 +26,7 @@ services:
     buildCommand: |
       pip install --upgrade pip
       pip install -r requirements.txt
-      pip install flask edge-tts ebooklib beautifulsoup4 lxml Pillow pymupdf flask-compress defusedxml
+      pip install flask edge-tts ebooklib beautifulsoup4 lxml Pillow pymupdf flask-compress defusedxml openai google-genai google-cloud-texttospeech
     startCommand: python audiobook_app.py
     envVars:
       # ── Core ──
