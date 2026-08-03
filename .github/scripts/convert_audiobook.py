@@ -348,7 +348,7 @@ def parse_epub(epub_path: str):
 
 
 # ── TTS: Phase A — start all synthesis tasks (non-blocking) ──────────────────
-def start_synthesis_task(text: str, gcs_output_uri: str) -> list:
+def start_synthesis_task(text: str, gcs_output_uri: str, chapter_index: int) -> list:
     """
     Start a Long Audio synthesis task and return the operation handle immediately.
     Does NOT wait for completion — call finish_synthesis_task() for that.
@@ -359,9 +359,9 @@ def start_synthesis_task(text: str, gcs_output_uri: str) -> list:
     for i, segment in enumerate(segments):
         if not segment.strip():
             continue
-        # For multi-segment chapters, use part index in the URI
-        seg_uri = gcs_output_uri.replace('.wav', f'-part{i:04d}.wav') \
-                  if len(segments) > 1 else gcs_output_uri
+        # Always include chapter_index in the URI — even for single-segment chapters —
+        # so concurrent chapters never collide on the same GCS path.
+        seg_uri = gcs_output_uri.replace('.wav', f'-ch{chapter_index:04d}-part{i:04d}.wav')
         voice = texttospeech.VoiceSelectionParams(
             language_code=TTS_LANGUAGE,
             name=TTS_VOICE,
@@ -395,22 +395,14 @@ def finish_synthesis_task(
     convert to MP3 with ffmpeg, clean up GCS objects.
     """
     mp3_parts = []
-    start = time.time()
 
     for seg_uri, operation in operations:
-        # Poll this operation until done
-        while not operation.done():
-            if time.time() - start > timeout_s:
-                raise RuntimeError(
-                    f"TTS operation timed out after {timeout_s}s: {seg_uri}"
-                )
-            time.sleep(5)
-            operation.operation.refresh()
-
-        if operation.exception():
-            raise RuntimeError(
-                f"TTS operation failed: {operation.exception()}"
-            )
+        # Block this thread until the operation completes — thread-safe,
+        # unlike manual refresh() calls in a thread executor.
+        try:
+            operation.result(timeout=timeout_s)
+        except Exception as e:
+            raise RuntimeError(f"TTS operation failed or timed out for {seg_uri}: {e}")
 
         # Parse bucket + object path from gs:// URI
         bucket_name = GCS_BUCKET
@@ -505,7 +497,7 @@ async def process_chapter_start(chapter, tmp_dir):
     print(f"[convert] Starting synthesis: Chapter {i+1} '{title}' ({len(chapter['text'])} chars)")
     loop = asyncio.get_running_loop()
     operations = await loop.run_in_executor(
-        None, start_synthesis_task, chapter["text"], gcs_uri
+        None, start_synthesis_task, chapter["text"], gcs_uri, chapter["order"]
     )
     return chapter, operations, output_path
 
