@@ -7,6 +7,14 @@ parses it with ebooklib, generates TTS per chapter using Google Cloud
 Text-to-Speech Long Audio API (synthesize_long_audio), uploads each MP3
 to Vercel Blob concurrently, then calls the app's callback route.
 
+EPUB parsing is delegated to tts_brain.epub_parser — a verbatim port of
+the audiobook-maker repo's parser brain
+(https://github.com/gfrangiamone/audiobook-maker) with explicit permission
+from the author. That brain handles spine↔TOC orphan reconciliation,
+multilingual chapter-marker detection, word-boundary frontmatter filtering,
+parenthetical/footnote/URL noise stripping, abbreviation expansion, and
+LIS-based heading-to-TOC assignment for single-file EPUBs.
+
 Each chapter is a self-contained retryable pipeline: submit → wait →
 upload, and on backend failure (InternalServerError/ServiceUnavailable)
 the chapter is resubmitted as a FRESH operation rather than re-polling
@@ -271,6 +279,25 @@ def _split_on_wordcount(text: str, base_order: int,
 
 def parse_epub(epub_path: str):
     """Parse EPUB and return (title, author, chapters).
+
+    Delegates to tts_brain.epub_parser — a verbatim port of the audiobook-maker
+    repo's parser brain (https://github.com/gfrangiamone/audiobook-maker) with
+    explicit permission from the author. That parser is substantially more
+    sophisticated than the legacy one below: spine↔TOC orphan reconciliation,
+    backnote arrow filtering, multilingual chapter-marker detection, word-
+    boundary frontmatter filtering, parenthetical/footnote/URL noise stripping,
+    abbreviation expansion, roman-numeral corruption fix, and LIS-based heading-
+    to-TOC assignment for single-file EPUBs.
+
+    The legacy implementation is preserved as parse_epub_legacy() below for
+    fallback / comparison purposes.
+    """
+    from tts_brain import parse_epub_for_tts
+    return parse_epub_for_tts(epub_path)
+
+
+def parse_epub_legacy(epub_path: str):
+    """Legacy EPUB parser — kept for fallback / comparison.
 
     Uses the spine (reading order) rather than raw manifest iteration,
     filters front/back matter, and splits single-file EPUBs on headings

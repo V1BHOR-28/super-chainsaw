@@ -32,7 +32,7 @@ jobs:
 
       - name: Install Python dependencies
         run: |
-          pip install google-cloud-texttospeech google-cloud-storage ebooklib beautifulsoup4 requests aiohttp
+          pip install google-cloud-texttospeech google-cloud-storage ebooklib beautifulsoup4 lxml requests aiohttp
 
       - name: Write GCP credentials
         run: |
