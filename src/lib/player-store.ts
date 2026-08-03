@@ -86,6 +86,30 @@ interface PlayerState {
   clearSleepTimer: () => void;
 }
 
+// ── Playback progress persistence (localStorage) ──
+// Saves {chapterIdx, currentTime} per job so the user resumes where they left
+// off after a refresh. Throttled by the audio engine (every 5s).
+const PROGRESS_KEY_PREFIX = "aria-playback-";
+function saveProgress(jobId: string, chapterIdx: number, currentTime: number) {
+  try {
+    localStorage.setItem(
+      PROGRESS_KEY_PREFIX + jobId,
+      JSON.stringify({ chapterIdx, currentTime, savedAt: Date.now() }),
+    );
+  } catch { /* non-blocking */ }
+}
+function loadProgress(jobId: string): { chapterIdx: number; currentTime: number } | null {
+  try {
+    const raw = localStorage.getItem(PROGRESS_KEY_PREFIX + jobId);
+    if (!raw) return null;
+    const data = JSON.parse(raw);
+    return { chapterIdx: data.chapterIdx ?? 0, currentTime: data.currentTime ?? 0 };
+  } catch { return null; }
+}
+function clearProgress(jobId: string) {
+  try { localStorage.removeItem(PROGRESS_KEY_PREFIX + jobId); } catch { /* */ }
+}
+
 export const usePlayerStore = create<PlayerState>()(
   persist(
     (set, get) => ({
@@ -96,11 +120,19 @@ export const usePlayerStore = create<PlayerState>()(
         const totalDuration = job.chapterMp3s && job.chapterMp3s.length > 0
           ? job.chapterMp3s.reduce((sum, ch) => sum + (ch.duration_ms || 0), 0) / 1000
           : 0;
+
+        // Restore saved playback progress from localStorage
+        const saved = loadProgress(job.jobId);
+        const startChapterIdx = saved && job.chapterMp3s && saved.chapterIdx < job.chapterMp3s.length
+          ? saved.chapterIdx
+          : (job.chapterMp3s && job.chapterMp3s.length > 0 ? 0 : -1);
+        const startTime = saved ? saved.currentTime : 0;
+
         set({
           view: "player",
           currentJob: job,
-          currentChapterIdx: job.chapterMp3s && job.chapterMp3s.length > 0 ? 0 : -1,
-          currentTime: 0,
+          currentChapterIdx: startChapterIdx,
+          currentTime: startTime,
           duration: totalDuration,
           isPlaying: false,
         });
@@ -109,6 +141,11 @@ export const usePlayerStore = create<PlayerState>()(
         }
       },
       closePlayer: () => {
+        // Save final progress before closing
+        const { currentJob, currentChapterIdx, currentTime } = get();
+        if (currentJob) {
+          saveProgress(currentJob.jobId, currentChapterIdx, currentTime);
+        }
         set({ view: "landing", isPlaying: false, currentChapterIdx: -1 });
         if (typeof window !== "undefined") {
           window.scrollTo({ top: 0, behavior: "instant" as ScrollBehavior });

@@ -22,6 +22,7 @@ export function useAudioEngine() {
   const audioRef = useRef<HTMLAudioElement | null>(null);
   const isLoadingNewChapter = useRef(false);
   const pendingSeekRef = useRef<number | null>(null);
+  const lastProgressSaveRef = useRef<number>(0);
 
   const currentJob = usePlayerStore((s) => s.currentJob);
   const currentChapterIdx = usePlayerStore((s) => s.currentChapterIdx);
@@ -98,7 +99,20 @@ export function useAudioEngine() {
         const chapterStart = job.chapterMp3s
           .slice(0, idx)
           .reduce((sum, ch) => sum + (ch.duration_ms || 0), 0) / 1000;
-        setCurrentTime(chapterStart + a.currentTime);
+        const absTime = chapterStart + a.currentTime;
+        setCurrentTime(absTime);
+
+        // Throttled progress save (every 5s)
+        const now = Date.now();
+        if (now - (lastProgressSaveRef.current || 0) > 5000) {
+          lastProgressSaveRef.current = now;
+          try {
+            localStorage.setItem(
+              `aria-playback-${job.jobId}`,
+              JSON.stringify({ chapterIdx: idx, currentTime: absTime, savedAt: now }),
+            );
+          } catch { /* non-blocking */ }
+        }
       } else {
         setCurrentTime(a.currentTime);
       }

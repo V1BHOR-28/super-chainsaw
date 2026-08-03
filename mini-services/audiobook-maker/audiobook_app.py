@@ -1680,18 +1680,53 @@ def _save_tokens():
                     "ai_optimized": info.get("ai_optimized", False),
                     # Mobile: client identifier for job reconstruction after restart
                     "client_id": info.get("client_id", ""),
+                    # ARIA per-chapter mode: persist so chapter_mp3 + job_chapters
+                    # survive Flask restarts (served from R2 presigned URLs).
+                    "chapter_mp3s": info.get("chapter_mp3s", []),
+                    "selected_chapters": info.get("selected_chapters", []),
+                    "total_chapters": info.get("total_chapters", 0),
                 }
             # Atomic write (tmp + fsync + rename) per evitare corruzione su crash
             community_store.atomic_write_json(_TOKENS_FILE, data, indent=2)
+            # Sync to R2/S3 if configured — survives Render ephemeral storage wipes.
+            try:
+                import storage_backend
+                if storage_backend.is_enabled():
+                    storage_backend.upload_file(str(_TOKENS_FILE), "_download_tokens.json")
+            except Exception:
+                pass  # non-fatal
     except Exception as e:
         print(f"[tokens] Failed to save tokens: {e}")
 
 
 def _load_tokens():
-    """Reload download tokens from disk on startup."""
+    """Reload download tokens from disk on startup.
+
+    If the local tokens file doesn't exist (ephemeral storage wiped on
+    restart), try downloading from R2/S3 if configured.
+    """
     global _download_tokens
     if not _TOKENS_FILE.exists():
-        return
+        # ARIA R2 fallback: download tokens from R2 if local file is missing
+        try:
+            import storage_backend
+            if storage_backend.is_enabled() and storage_backend.object_exists("_download_tokens.json"):
+                import tempfile
+                tmp = tempfile.NamedTemporaryFile(mode="wb", suffix=".json", delete=False)
+                tmp.close()
+                storage_backend._get_client().download_file(
+                    storage_backend._BUCKET,
+                    storage_backend._full_key("_download_tokens.json"),
+                    tmp.name,
+                )
+                _TOKENS_FILE.parent.mkdir(parents=True, exist_ok=True)
+                import shutil
+                shutil.move(tmp.name, str(_TOKENS_FILE))
+                print(f"[tokens] Restored _download_tokens.json from R2/S3")
+        except Exception as e:
+            print(f"[tokens] R2/S3 restore failed (non-fatal): {e}")
+        if not _TOKENS_FILE.exists():
+            return
     try:
         with open(_TOKENS_FILE, "r", encoding="utf-8") as f:
             data = json.load(f)
@@ -9773,7 +9808,20 @@ def api_chapter_mp3(job_id, chapter_index):
 
     mp3_path = target.get("path", "")
     if not mp3_path or not os.path.isfile(mp3_path):
-        return jsonify({"error": "Chapter audio file not found on disk"}), 404
+        # Local file missing (Flask restart wiped ephemeral storage).
+        # Fall back to R2/S3 presigned URL if the chapter was uploaded.
+        s3_key = target.get("s3_key", "")
+        if s3_key:
+            try:
+                import storage_backend
+                if storage_backend.is_enabled():
+                    url = storage_backend.presigned_get_url(
+                        s3_key, download_name=target.get("filename", f"chapter_{chapter_index}.mp3")
+                    )
+                    return redirect(url)
+            except Exception as _e_r2:
+                print(f"[chapter_mp3] R2 redirect failed: {_e_r2}")
+        return jsonify({"error": "Chapter audio file not found on disk or R2"}), 404
 
     # Serve with Range support for seeking
     return _send_file_throttled(

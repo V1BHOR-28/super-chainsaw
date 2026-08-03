@@ -4663,6 +4663,19 @@ def run_generation(job_id, info, voice, rate, single_file, output_format='m4b', 
                         "start_ms": m4b_chapters[i]["start"] if i < len(m4b_chapters) else 0,
                         "end_ms": m4b_chapters[i]["end"] if i < len(m4b_chapters) else dur,
                     })
+                # Upload to R2/S3 if configured — survives Render restarts.
+                # The chapter_mp3 endpoint redirects to presigned URLs when
+                # local files are missing (after a restart).
+                try:
+                    import storage_backend
+                    if storage_backend.is_enabled():
+                        for ch_entry in job["chapter_mp3s"]:
+                            s3_key = f"chapters/{job_id}/{ch_entry['filename']}"
+                            storage_backend.upload_file(ch_entry["path"], s3_key)
+                            ch_entry["s3_key"] = s3_key
+                        print(f"[{job_id}] Uploaded {len(job['chapter_mp3s'])} chapter MP3s to R2/S3")
+                except Exception as _e_s3:
+                    print(f"[{job_id}] R2/S3 upload failed (non-fatal): {_e_s3}")
                 job["output_files"] = mp3_files
                 job["output_name"] = f"{safe_name} (per-chapter)"
                 job["bytes_generated"] = sum(
