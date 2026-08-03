@@ -9376,13 +9376,18 @@ def api_job_status(job_id):
         tot = job.get("tr_progress_total", 0)
         pct = int(cur / tot * 100) if tot > 0 else 0
 
-    return {
+    result = {
         "status": st,
         "current": cur,
         "total": tot,
         "pct": pct,
         "message": job.get("progress_message", "") or job.get("opt_progress_message", "")
     }
+    # Include error details so the frontend can show a useful message
+    if st == "error":
+        result["error"] = job.get("user_facing_error") or job.get("error", "")
+        result["error_detail"] = job.get("error", "")
+    return jsonify(result)
 
 
 @app.route("/api/progress/<job_id>")
