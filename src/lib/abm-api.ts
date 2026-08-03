@@ -212,6 +212,25 @@ export async function getJobStatus(jobId: string): Promise<JobStatusResponse> {
   return (await res.json()) as JobStatusResponse;
 }
 
+/**
+ * Send a heartbeat to keep a generating job alive.
+ *
+ * The Flask app cancels jobs if no client polls the SSE /api/progress endpoint
+ * for 60+ seconds (heartbeat timeout). Since we use polling via getJobStatus
+ * instead of SSE, we must call this endpoint periodically to reset the timer.
+ * Call every 30 seconds while a job is generating.
+ */
+export async function sendHeartbeat(jobId: string): Promise<void> {
+  try {
+    await fetch(`${ABM_BASE}/heartbeat/${jobId}`, {
+      method: "POST",
+      credentials: "include",
+    });
+  } catch {
+    // Non-blocking — heartbeat failure shouldn't crash the UI
+  }
+}
+
 /** Fetch the voice catalog grouped by language code. */
 export async function getVoices(): Promise<VoicesResponse> {
   const res = await fetch(`${ABM_BASE}/voices`, {

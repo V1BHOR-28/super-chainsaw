@@ -12,13 +12,10 @@ export const maxDuration = 60
  * multipart form-data, plain), query params, and headers (including cookies
  * for abm_cid session identity) to the Flask service.
  *
- * Response streaming is preserved for:
- *   - /api/abm/progress/<job_id> (Server-Sent Events for live progress)
- *   - /api/abm/download/<job_id> (audio MP3 streaming with range requests)
- *   - /api/abm/preview_audio/<job_id> (preview audio)
- *
- * The frontend calls /api/abm/voices, /api/abm/analyze, /api/abm/generate,
- * etc. — all relative paths, no CORS issues, works on both Vercel and sandbox.
+ * Response handling:
+ *   - SSE (text/event-stream): streamed chunk-by-chunk (live progress updates)
+ *   - Audio (audio/*): streamed (large files, range requests)
+ *   - Everything else (JSON): buffered fully then returned (avoids truncation)
  */
 
 const FLASK_BASE = process.env.ABM_SERVICE_URL || 'http://localhost:5601'
@@ -66,13 +63,19 @@ async function proxy(
   const searchParams = req.nextUrl.search
   const targetUrl = `${FLASK_BASE}${flaskPath}${searchParams}`
 
-  // Forward headers, excluding host (Flask sets its own)
+  // Forward headers, excluding host (Flask sets its own) and accept-encoding
+  // (we want Flask to send UNCOMPRESSED responses — if Flask sends gzip/br,
+  // the proxy's Content-Length refers to the compressed size but the body is
+  // decompressed by Node's fetch, causing a size mismatch that truncates the
+  // response in the browser).
   const headers = new Headers()
   req.headers.forEach((value, key) => {
     const lk = key.toLowerCase()
-    if (lk === 'host' || lk === 'connection' || lk === 'content-length') return
+    if (lk === 'host' || lk === 'connection' || lk === 'content-length' || lk === 'accept-encoding') return
     headers.set(key, value)
   })
+  // Explicitly request no encoding from Flask
+  headers.set('Accept-Encoding', 'identity')
   // Forward the client IP for rate-limiting
   const clientIp = req.headers.get('x-forwarded-for') || req.headers.get('x-real-ip') || '127.0.0.1'
   headers.set('X-Forwarded-For', clientIp)
@@ -92,7 +95,7 @@ async function proxy(
       duplex: 'half',
     })
 
-    // Build the response, preserving status + headers
+    // Build the response headers, preserving status + content-type
     const responseHeaders = new Headers()
     flaskRes.headers.forEach((value, key) => {
       const lk = key.toLowerCase()
@@ -102,12 +105,30 @@ async function proxy(
       responseHeaders.set(key, value)
     })
 
-    // Stream the body — critical for SSE progress and audio download
-    return new NextResponse(flaskRes.body, {
-      status: flaskRes.status,
-      statusText: flaskRes.statusText,
-      headers: responseHeaders,
-    })
+    const contentType = (flaskRes.headers.get('content-type') || '').toLowerCase()
+    const isSSE = contentType.includes('text/event-stream')
+    const isAudio = contentType.startsWith('audio/')
+    const shouldStream = isSSE || isAudio
+
+    if (shouldStream && flaskRes.body) {
+      // Stream SSE + audio directly — critical for live progress and audio playback
+      return new NextResponse(flaskRes.body, {
+        status: flaskRes.status,
+        statusText: flaskRes.statusText,
+        headers: responseHeaders,
+      })
+    } else {
+      // Buffer JSON + other responses fully — avoids truncation issues where
+      // Next.js cuts the stream short before all bytes are flushed.
+      // The Flask /api/analyze response can be ~8KB for a 60-chapter book;
+      // buffering it fully ensures the frontend gets valid JSON.
+      const buf = await flaskRes.arrayBuffer()
+      return new NextResponse(buf, {
+        status: flaskRes.status,
+        statusText: flaskRes.statusText,
+        headers: responseHeaders,
+      })
+    }
   } catch (err) {
     console.error(`[abm-proxy] Error forwarding to ${targetUrl}:`, err)
     return NextResponse.json(

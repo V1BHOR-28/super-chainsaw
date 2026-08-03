@@ -21,6 +21,7 @@ import {
   getMyJobs,
   analyzeEpub,
   getDownloadUrl,
+  sendHeartbeat,
   isPollingStatus,
   type MyJob,
   type AnalyzeResponse,
@@ -130,9 +131,17 @@ export function LibraryView() {
   }, [fetchJobs]);
 
   // Poll while any job is still generating / optimizing / translating.
+  // Also send heartbeats to keep generating jobs alive (the Flask app cancels
+  // jobs with no heartbeat for 60+ seconds).
   useEffect(() => {
-    if (!cards.some((c) => isPollingStatus(c.status))) return;
-    const interval = setInterval(fetchJobs, 5000);
+    const generating = cards.filter((c) => c.status === "generating");
+    if (generating.length === 0) return;
+
+    const interval = setInterval(() => {
+      fetchJobs();
+      // Send a heartbeat to each generating job to prevent the 60s timeout
+      generating.forEach((c) => sendHeartbeat(c.jobId));
+    }, 5000);
     return () => clearInterval(interval);
   }, [cards, fetchJobs]);
 
