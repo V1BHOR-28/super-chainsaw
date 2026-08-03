@@ -36,6 +36,7 @@ import subprocess
 import time
 import requests
 
+from google.api_core.exceptions import ResourceExhausted
 from google.cloud import texttospeech
 from google.cloud import storage
 import ebooklib
@@ -385,6 +386,26 @@ def start_synthesis_task(text: str, gcs_output_uri: str, chapter_index: int) -> 
 
 
 # ── TTS: Phase B — poll, download WAV, convert to MP3 ────────────────────────
+MAX_POLL_RETRIES = 5
+
+
+def _wait_for_operation(operation, seg_uri, timeout_s):
+    """Wait for a Long Audio operation with retry-on-rate-limit backoff."""
+    delay = 15  # start with a real gap, not an aggressive retry
+    for attempt in range(MAX_POLL_RETRIES):
+        try:
+            operation.result(timeout=timeout_s)
+            return
+        except ResourceExhausted as e:
+            if attempt == MAX_POLL_RETRIES - 1:
+                raise RuntimeError(f"TTS operation still rate-limited after {MAX_POLL_RETRIES} retries for {seg_uri}: {e}")
+            print(f"[tts] Rate-limited polling {seg_uri}, waiting {delay}s (attempt {attempt + 1}/{MAX_POLL_RETRIES})", file=sys.stderr)
+            time.sleep(delay)
+            delay = min(delay * 2, 60)
+        except Exception as e:
+            raise RuntimeError(f"TTS operation failed or timed out for {seg_uri}: {e}")
+
+
 def finish_synthesis_task(
     operations: list,        # from start_synthesis_task()
     output_mp3_path: str,    # final local MP3 path
@@ -397,12 +418,7 @@ def finish_synthesis_task(
     mp3_parts = []
 
     for seg_uri, operation in operations:
-        # Block this thread until the operation completes — thread-safe,
-        # unlike manual refresh() calls in a thread executor.
-        try:
-            operation.result(timeout=timeout_s)
-        except Exception as e:
-            raise RuntimeError(f"TTS operation failed or timed out for {seg_uri}: {e}")
+        _wait_for_operation(operation, seg_uri, timeout_s)
 
         # Parse bucket + object path from gs:// URI
         bucket_name = GCS_BUCKET
@@ -551,7 +567,7 @@ async def main_async():
 
         # Phase B: Poll + download + convert in parallel, with limited concurrency on
         # the download/convert side (these are CPU/network bound, not API-quota bound)
-        dl_semaphore = asyncio.Semaphore(8)  # up to 8 concurrent downloads
+        dl_semaphore = asyncio.Semaphore(2)  # keep well under the 100/min operation-status quota
         finish_tasks = [
             process_chapter_finish(ch, ops, path, dl_semaphore)
             for ch, ops, path in started
