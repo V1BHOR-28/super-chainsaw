@@ -5,16 +5,13 @@ import { usePlayerStore } from "@/lib/player-store";
 
 /**
  * Global keyboard shortcuts for the player. Only active when in player view.
- *   Space       play / pause
+ *   Space / k   play / pause
  *   ArrowLeft   seek -5s
  *   ArrowRight  seek +5s
  *   j           skip -15s
- *   l           skip +30s
- *   ArrowUp     next chapter
- *   ArrowDown   prev chapter
+ *   l           skip +15s
  *   m           mute toggle
- *   b           add bookmark
- *   Escape      back to library / close panels
+ *   Escape      back to library / close settings
  */
 export function useKeyboardShortcuts() {
   const view = usePlayerStore((s) => s.view);
@@ -49,30 +46,14 @@ export function useKeyboardShortcuts() {
           break;
         case "l":
           e.preventDefault();
-          s.skip(30);
-          break;
-        case "ArrowUp":
-          e.preventDefault();
-          s.nextChapter();
-          break;
-        case "ArrowDown":
-          e.preventDefault();
-          s.prevChapter();
+          s.skip(15);
           break;
         case "m":
           e.preventDefault();
           s.toggleMute();
           break;
-        case "b":
-          e.preventDefault();
-          s.addBookmark();
-          break;
         case "Escape":
-          if (s.showChapterList) {
-            s.toggleChapterList();
-          } else if (s.showBookmarks) {
-            s.toggleBookmarks();
-          } else if (s.showSettings) {
+          if (s.showSettings) {
             s.toggleSettings();
           } else {
             s.closePlayer();

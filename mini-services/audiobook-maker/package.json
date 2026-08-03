@@ -1,0 +1,11 @@
+{
+  "name": "audiobook-maker-service",
+  "version": "1.0.0",
+  "private": true,
+  "description": "1:1 replica of audiobook-maker Flask app — runs as a sidecar service for ARIA",
+  "scripts": {
+    "dev": "bun --hot run index.ts",
+    "start": "python3 audiobook_app.py"
+  },
+  "dependencies": {}
+}

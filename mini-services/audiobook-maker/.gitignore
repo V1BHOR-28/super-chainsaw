@@ -1,0 +1,7 @@
+# Mini-service runtime artifacts (not committed)
+data/
+uploads/
+__pycache__/
+*.pyc
+*.log
+activity_*.log

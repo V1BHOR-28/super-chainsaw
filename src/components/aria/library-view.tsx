@@ -1,172 +1,235 @@
 "use client";
 
-import { useState, useEffect, useCallback } from "react";
-import { Play, Trash2, BookOpen, ArrowLeft, ListChecks } from "lucide-react";
+import { useState, useEffect, useCallback, useRef } from "react";
+import {
+  Play,
+  BookOpen,
+  ArrowLeft,
+  ListChecks,
+  Upload,
+  Loader2,
+  AlertCircle,
+  CheckCircle2,
+} from "lucide-react";
 import { AmbientGlow, GradientText } from "./primitives";
 import { ScrollReveal } from "./scroll-reveal";
 import { BookCover } from "./book-cover";
 import { ChapterSelector } from "./chapter-selector";
-import { usePlayerStore, type CurrentAudiobook, type PlayerChapter } from "@/lib/player-store";
+import { usePlayerStore } from "@/lib/player-store";
 import { useAriaStore } from "@/lib/store";
-import { formatDuration } from "@/lib/audiobooks";
+import {
+  getMyJobs,
+  analyzeEpub,
+  getDownloadUrl,
+  isPollingStatus,
+  type MyJob,
+  type AnalyzeResponse,
+  type JobStatus,
+} from "@/lib/abm-api";
 import { toast } from "@/hooks/use-toast";
 
-interface AudiobookListItem {
-  id: string;
+/** Deterministic accent color from a job's title — used because the Flask
+ *  API doesn't return an accent color per book. */
+const ACCENT_PALETTE = [
+  "#f59e0b", // amber (default ARIA gold)
+  "#d97706",
+  "#b45309",
+  "#a16207",
+  "#92400e",
+  "#c2410c",
+  "#9a3412",
+  "#7c2d12",
+  "#9d174d",
+  "#831843",
+];
+function accentForTitle(title: string): string {
+  let hash = 0;
+  for (let i = 0; i < title.length; i++) {
+    hash = (hash * 31 + title.charCodeAt(i)) | 0;
+  }
+  return ACCENT_PALETTE[Math.abs(hash) % ACCENT_PALETTE.length];
+}
+
+/** State of a job in the library, mapped from the Flask MyJob shape. */
+interface LibraryCard {
+  jobId: string;
   title: string;
   author: string | null;
   accent: string;
-  documentId: string;
-  createdAt: string;
-  progressChapter: number;
-  progressCharOffset: number;
-  chapterCount: number;
-  narratedCount: number;
-  status: string; // PARSING | READY_TO_SELECT | PENDING | GENERATING | COMPLETED | COMPLETED_WITH_ERRORS | FAILED
-  prepProgress?: number;
-  prepTotal?: number;
+  status: JobStatus;
+  outputFormat?: string;
+  createdAt?: number;
+  progressCurrent?: number;
+  progressTotal?: number;
+  progressMessage?: string;
+}
+
+function toCard(job: MyJob): LibraryCard {
+  return {
+    jobId: job.job_id,
+    title: job.title || "Untitled",
+    author: job.author ?? null,
+    accent: accentForTitle(job.title || job.job_id),
+    status: job.status,
+    outputFormat: job.output_format,
+    createdAt: job.created_at,
+    progressCurrent: job.progress_current,
+    progressTotal: job.progress_total,
+    progressMessage: job.progress_message,
+  };
+}
+
+function progressPct(card: LibraryCard): number {
+  if (card.status === "done") return 100;
+  const cur = card.progressCurrent ?? 0;
+  const tot = card.progressTotal ?? 0;
+  if (tot <= 0) return 0;
+  return Math.max(0, Math.min(99, Math.round((cur / tot) * 100)));
 }
 
 /**
- * LibraryView — fetches the user's real audiobooks from /api/audiobooks.
- * Audiobooks are auto-created when book-length content is fed via Feed ARIA.
+ * LibraryView — fetches the user's audiobook jobs from the audiobook-maker
+ * Flask app (via /api/my_jobs with XTransformPort=5601).
+ *
+ * Each job is a single MP3 produced by edge-tts. Click behavior:
+ *   analyzed / optimized → open chapter selector (re-pick chapters + voice)
+ *   generating / optimizing / translating → show progress (no action)
+ *   done → open the player (single MP3 via /api/download/<job_id>)
+ *   error / cancelled / interrupted → show error pill (no action)
  */
 export function LibraryView() {
   const openPlayer = usePlayerStore((s) => s.openPlayer);
   const setActiveWorkspace = useAriaStore((s) => s.setActiveWorkspace);
-  const [audiobooks, setAudiobooks] = useState<AudiobookListItem[]>([]);
+  const [cards, setCards] = useState<LibraryCard[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [hoveredBook, setHoveredBook] = useState<string | null>(null);
-  const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
-  const [selectorBook, setSelectorBook] = useState<AudiobookListItem | null>(null);
+  const [hoveredJob, setHoveredJob] = useState<string | null>(null);
+  const [uploading, setUploading] = useState(false);
+  const [analyzeResponse, setAnalyzeResponse] = useState<AnalyzeResponse | null>(null);
+  /** For "analyzed" jobs clicked from the grid — we don't have the chapter
+   *  data anymore (the upload-time analyzeResponse is long gone), so we open
+   *  the selector in "whole-book" mode: just voice + convert. */
+  const [wholeBookJob, setWholeBookJob] = useState<LibraryCard | null>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
-  const fetchAudiobooks = useCallback(async () => {
-    setLoading(true);
-    setError(null);
+  const fetchJobs = useCallback(async () => {
     try {
-      const res = await fetch('/api/audiobooks');
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({}));
-        throw new Error(body?.error || `Request failed (${res.status})`);
-      }
-      const data = await res.json();
-      setAudiobooks(data.audiobooks || []);
+      const data = await getMyJobs();
+      setCards(data.jobs.map(toCard));
       setError(null);
     } catch (err) {
-      console.error('[library-view] failed to load audiobooks', err);
-      setError(err instanceof Error ? err.message : 'Failed to load your library');
+      console.error("[library-view] failed to load jobs", err);
+      setError(err instanceof Error ? err.message : "Failed to load your library");
     } finally {
       setLoading(false);
     }
   }, []);
 
   useEffect(() => {
-    fetchAudiobooks();
-  }, [fetchAudiobooks]);
+    fetchJobs();
+  }, [fetchJobs]);
 
-  // Poll for audiobook status updates when there are pending/generating books.
-  // The actual TTS generation runs on GitHub Actions (not on Vercel), so we
-  // just re-fetch the audiobook list every 5 seconds to pick up status changes.
-  // The callback route updates the audiobook status when the GitHub Actions job completes.
+  // Poll while any job is still generating / optimizing / translating.
   useEffect(() => {
-    const hasPending = audiobooks.some(b => b.status === 'PARSING' || b.status === 'READY_TO_SELECT' || b.status === 'PENDING' || b.status === 'GENERATING');
-    if (!hasPending) return;
-
-    const poll = async () => {
-      try {
-        const res = await fetch('/api/audiobooks');
-        if (!res.ok) return;
-        const data = await res.json();
-        if (data.audiobooks) {
-          setAudiobooks(data.audiobooks);
-        }
-      } catch {
-        // silent — will retry on next interval
-      }
-    };
-
-    const interval = setInterval(poll, 5000);
+    if (!cards.some((c) => isPollingStatus(c.status))) return;
+    const interval = setInterval(fetchJobs, 5000);
     return () => clearInterval(interval);
-  }, [audiobooks]);
+  }, [cards, fetchJobs]);
 
-  const handleOpen = async (book: AudiobookListItem) => {
-    // PARSING: book is still being parsed by the Python tts_brain parser on
-    // GitHub Actions. Don't open anything — show a toast.
-    if (book.status === 'PARSING') {
-      toast({ title: "Parsing chapters…", description: "This usually takes ~20-30 seconds. Check back shortly." });
-      return;
-    }
+  const handleUploadClick = () => fileInputRef.current?.click();
 
-    // READY_TO_SELECT: book parsed, user needs to pick chapters first.
-    // Opens the chapter selector modal instead of the player.
-    if (book.status === 'READY_TO_SELECT') {
-      setSelectorBook(book);
-      return;
-    }
-
-    // Don't allow opening the player until the audiobook is at least partially ready.
-    // COMPLETED_WITH_ERRORS means some chapters failed but the rest are playable —
-    // still allow playback, the failed chapters will use live-narration fallback.
-    if (book.status !== 'COMPLETED' && book.status !== 'COMPLETED_WITH_ERRORS') {
-      toast({ title: "Still converting", description: "This audiobook isn't ready to play yet." });
-      return;
-    }
+  const handleFileSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    e.target.value = ""; // reset so re-picking the same file fires onChange
+    if (!file) return;
+    setUploading(true);
     try {
-      // Fetch chapters for this audiobook before opening the player
-      const res = await fetch(`/api/audiobooks/${book.id}/chapters`);
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({}));
-        const detail = body?.error || `Request failed (${res.status})`;
-        console.error('[library-view] could not load chapters for', book.id, detail);
-        toast({ title: "Could not load chapters", description: detail });
-        return;
-      }
-      const data = await res.json();
-      const chapters: PlayerChapter[] = data.chapters || [];
-      if (chapters.length === 0) {
-        toast({ title: "No readable text found", description: "This audiobook has no content" });
-        return;
-      }
-      // Only open the player if at least one chapter is ready; otherwise
-      // route to the chapter selector so the user can pick what to convert.
-      const readyCount = chapters.filter(c => c.status === 'ready').length;
-      if (readyCount === 0) {
-        setSelectorBook(book);
-        return;
-      }
-      const current: CurrentAudiobook = {
-        id: book.id,
-        title: book.title,
-        author: book.author,
-        accent: book.accent,
-        documentId: book.documentId,
-      };
-      // Resume from saved progress if available
-      openPlayer(current, chapters, book.progressChapter || 0);
+      const resp = await analyzeEpub(file);
+      setAnalyzeResponse(resp);
+      toast({
+        title: "Book analyzed",
+        description: `${resp.title} — ${resp.total_chapters} chapters detected`,
+      });
     } catch (err) {
-      console.error('[library-view] failed to open audiobook', book.id, err);
-      const detail = err instanceof Error ? err.message : 'Try again';
-      toast({ title: "Could not open audiobook", description: detail });
+      console.error("[library-view] analyze failed", err);
+      toast({
+        title: "Could not analyze book",
+        description: err instanceof Error ? err.message : "Try again",
+      });
+    } finally {
+      setUploading(false);
     }
   };
 
-  const handleDelete = async (id: string) => {
-    try {
-      const res = await fetch(`/api/audiobooks/${id}`, { method: 'DELETE' });
-      if (!res.ok) {
-        const body = await res.json().catch(() => ({}));
-        throw new Error(body?.error || `Request failed (${res.status})`);
-      }
-      setAudiobooks(prev => prev.filter(b => b.id !== id));
-      toast({ title: "Audiobook removed" });
-    } catch (err) {
-      console.error('[library-view] failed to delete audiobook', id, err);
-      const detail = err instanceof Error ? err.message : 'Try again';
-      toast({ title: "Could not delete", description: detail });
+  const handleOpen = (card: LibraryCard) => {
+    if (card.status === "done") {
+      openPlayer({
+        jobId: card.jobId,
+        title: card.title,
+        author: card.author ?? "",
+        accent: card.accent,
+        downloadUrl: getDownloadUrl(card.jobId),
+      });
+      return;
     }
-    setConfirmDelete(null);
+    if (card.status === "analyzed" || card.status === "optimized") {
+      // We don't have the analyzeResponse anymore — open the selector in
+      // "whole-book" mode (just voice + convert the whole book).
+      setWholeBookJob(card);
+      return;
+    }
+    if (isPollingStatus(card.status)) {
+      toast({
+        title: "Still generating",
+        description: card.progressMessage || "Hang tight — we'll have audio soon.",
+      });
+      return;
+    }
+    // error / cancelled / interrupted
+    toast({
+      title: "Generation failed",
+      description: "Re-upload the EPUB to try again.",
+    });
   };
+
+  const handleCloseSelector = () => {
+    setAnalyzeResponse(null);
+    setWholeBookJob(null);
+  };
+
+  const handleConvertStarted = () => {
+    // Optimistically flip the job to "generating" so the card shows the
+    // spinner immediately, then refresh from the server on the next poll.
+    const jobId = analyzeResponse?.job_id ?? wholeBookJob?.jobId;
+    if (jobId) {
+      setCards((prev) =>
+        prev.map((c) => (c.jobId === jobId ? { ...c, status: "generating" } : c)),
+      );
+    }
+    handleCloseSelector();
+    fetchJobs();
+  };
+
+  // Determine which (if any) selector modal to render.
+  const selectorProps = analyzeResponse
+    ? {
+        analyzeResponse,
+        jobId: analyzeResponse.job_id,
+        title: analyzeResponse.title,
+        author: analyzeResponse.author,
+        onClose: handleCloseSelector,
+        onConvertStarted: handleConvertStarted,
+      }
+    : wholeBookJob
+      ? {
+          analyzeResponse: null as AnalyzeResponse | null,
+          jobId: wholeBookJob.jobId,
+          title: wholeBookJob.title,
+          author: wholeBookJob.author ?? "",
+          onClose: handleCloseSelector,
+          onConvertStarted: handleConvertStarted,
+        }
+      : null;
 
   return (
     <div className="relative min-h-screen overflow-hidden">
@@ -175,9 +238,9 @@ export function LibraryView() {
       <div className="relative z-10 max-w-7xl mx-auto px-5 sm:px-8 pt-10 sm:pt-14 pb-16">
         {/* Back to chat — exits the audiobook workspace entirely */}
         <button
-          onClick={() => setActiveWorkspace('chat')}
+          onClick={() => setActiveWorkspace("chat")}
           className="flex items-center gap-1.5 text-sm px-3 py-1.5 rounded-md hover:bg-white/5 transition-colors mb-6"
-          style={{ color: 'var(--aria-fg-muted)' }}
+          style={{ color: "var(--aria-fg-muted)" }}
         >
           <ArrowLeft size={15} />
           Back to chat
@@ -195,195 +258,169 @@ export function LibraryView() {
                 </GradientText>
               </h1>
             </div>
-            <p className="text-sm text-[var(--aria-fg-muted)] max-w-xs">
-              Feed ARIA a book-length PDF, URL, or text and it appears here —
-              ready to be read aloud.
-            </p>
+            <div className="flex items-center gap-3">
+              <p className="text-sm text-[var(--aria-fg-muted)] max-w-xs hidden sm:block">
+                Upload an EPUB and ARIA narrates it with edge-tts — free, fast,
+                and yours to keep for 18 hours.
+              </p>
+              <input
+                ref={fileInputRef}
+                type="file"
+                accept=".epub,.pdf,.txt,.abm"
+                onChange={handleFileSelected}
+                className="hidden"
+              />
+              <button
+                onClick={handleUploadClick}
+                disabled={uploading}
+                className="flex items-center gap-2 px-4 py-2.5 rounded-lg text-sm font-medium transition-all disabled:opacity-60 disabled:cursor-not-allowed"
+                style={{
+                  background: "var(--aria-accent-glow)",
+                  color: "var(--aria-bg)",
+                  boxShadow: "0 0 24px rgba(245,158,11,0.35)",
+                }}
+              >
+                {uploading ? (
+                  <>
+                    <Loader2 size={15} className="animate-spin" />
+                    Analyzing…
+                  </>
+                ) : (
+                  <>
+                    <Upload size={15} />
+                    Upload book
+                  </>
+                )}
+              </button>
+            </div>
           </div>
         </ScrollReveal>
 
         {loading ? (
-          <div className="text-center py-20" style={{ color: 'var(--aria-fg-dim)' }}>
+          <div className="text-center py-20" style={{ color: "var(--aria-fg-dim)" }}>
             <p className="text-sm">Loading your library…</p>
           </div>
         ) : error ? (
           <div className="text-center py-20">
-            <p className="text-sm" style={{ color: 'var(--aria-fg-muted)' }}>
+            <p className="text-sm" style={{ color: "var(--aria-fg-muted)" }}>
               Couldn&apos;t load your library — {error}
             </p>
             <button
-              onClick={fetchAudiobooks}
+              onClick={fetchJobs}
               className="mt-3 text-sm underline"
-              style={{ color: 'var(--aria-accent-glow)' }}
+              style={{ color: "var(--aria-accent-glow)" }}
             >
               Try again
             </button>
           </div>
-        ) : audiobooks.length === 0 ? (
+        ) : cards.length === 0 ? (
           <div className="text-center py-20">
-            <BookOpen size={40} strokeWidth={1} className="mx-auto mb-4 opacity-30" style={{ color: 'var(--aria-fg-dim)' }} />
-            <p className="text-sm" style={{ color: 'var(--aria-fg-muted)' }}>
+            <BookOpen size={40} strokeWidth={1} className="mx-auto mb-4 opacity-30" style={{ color: "var(--aria-fg-dim)" }} />
+            <p className="text-sm" style={{ color: "var(--aria-fg-muted)" }}>
               No audiobooks yet.
             </p>
-            <p className="text-xs mt-2" style={{ color: 'var(--aria-fg-dim)' }}>
-              Feed ARIA a book (PDF, URL, or pasted text) from the Feed menu —
-              anything long enough becomes an audiobook automatically.
+            <p className="text-xs mt-2" style={{ color: "var(--aria-fg-dim)" }}>
+              Click <span className="font-medium">Upload book</span> above to pick an
+              EPUB — ARIA will analyze it and let you choose which chapters to narrate.
             </p>
           </div>
         ) : (
           <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-3 gap-5 sm:gap-7">
-            {audiobooks.map((book, i) => {
-              const hasProgress = book.progressChapter > 0 || book.progressCharOffset > 0;
+            {cards.map((card, i) => {
+              const pct = progressPct(card);
+              const isDone = card.status === "done";
+              const isGenerating = isPollingStatus(card.status) && card.status !== "analyzed" && card.status !== "optimized";
+              const isError = card.status === "error" || card.status === "cancelled" || card.status === "interrupted";
               return (
-                <ScrollReveal key={book.id} delay={i * 80}>
+                <ScrollReveal key={card.jobId} delay={i * 80}>
                   <div
                     className="group text-left w-full relative"
-                    onMouseEnter={() => setHoveredBook(book.id)}
-                    onMouseLeave={() => setHoveredBook(null)}
+                    onMouseEnter={() => setHoveredJob(card.jobId)}
+                    onMouseLeave={() => setHoveredJob(null)}
                   >
-                    <div className="book-cover aspect-[3/5] relative cursor-pointer" onClick={() => handleOpen(book)}>
+                    <div className="book-cover aspect-[3/5] relative cursor-pointer" onClick={() => handleOpen(card)}>
                       <BookCover
-                        title={book.title}
-                        accent={book.accent}
+                        title={card.title}
+                        accent={card.accent}
                         className="absolute inset-0"
                       />
                       {/* gradient overlay */}
                       <div className="absolute inset-0 bg-gradient-to-t from-black/80 via-black/10 to-transparent" />
 
-                      {/* play button on hover */}
-                      <div
-                        className={`absolute inset-0 flex items-center justify-center transition-all duration-500 ${
-                          hoveredBook === book.id
-                            ? "opacity-100 backdrop-blur-[2px] bg-black/30"
-                            : "opacity-0"
-                        }`}
-                      >
-                        <span className="w-14 h-14 rounded-full bg-[var(--aria-fg)] text-[var(--aria-bg)] flex items-center justify-center shadow-[0_0_30px_rgba(245,158,11,0.5)] group-hover:scale-110 transition-transform duration-500">
-                          <Play className="w-5 h-5 fill-current ml-0.5" />
-                        </span>
+                      {/* play button on hover (only for done jobs) */}
+                      {isDone && (
+                        <div
+                          className={`absolute inset-0 flex items-center justify-center transition-all duration-500 ${
+                            hoveredJob === card.jobId
+                              ? "opacity-100 backdrop-blur-[2px] bg-black/30"
+                              : "opacity-0"
+                          }`}
+                        >
+                          <span className="w-14 h-14 rounded-full bg-[var(--aria-fg)] text-[var(--aria-bg)] flex items-center justify-center shadow-[0_0_30px_rgba(245,158,11,0.5)] group-hover:scale-110 transition-transform duration-500">
+                            <Play className="w-5 h-5 fill-current ml-0.5" />
+                          </span>
+                        </div>
+                      )}
+
+                      {/* generating overlay — pulsing center spinner */}
+                      {isGenerating && (
+                        <div className="absolute inset-0 flex items-center justify-center bg-black/40 backdrop-blur-[2px]">
+                          <div className="flex flex-col items-center gap-2">
+                            <Loader2 className="w-7 h-7 animate-spin" style={{ color: "var(--aria-accent-glow)" }} />
+                            <span className="text-[10px] font-mono tracking-wider" style={{ color: "var(--aria-accent-glow)" }}>
+                              {pct}%
+                            </span>
+                          </div>
+                        </div>
+                      )}
+
+                      {/* status pill (top-right) */}
+                      <div className="absolute top-3 right-3">
+                        {isDone ? (
+                          <span className="text-[10px] px-2 py-0.5 rounded-full flex items-center gap-1" style={{ background: "rgba(34,197,94,0.18)", color: "#22c55e" }}>
+                            <CheckCircle2 size={10} /> Ready
+                          </span>
+                        ) : isGenerating ? (
+                          <span className="text-[10px] px-2 py-0.5 rounded-full flex items-center gap-1" style={{ background: "rgba(245,158,11,0.18)", color: "var(--aria-accent-glow)" }}>
+                            <span className="status-dot" /> {pct}%
+                          </span>
+                        ) : isError ? (
+                          <span className="text-[10px] px-2 py-0.5 rounded-full flex items-center gap-1" style={{ background: "rgba(239,68,68,0.18)", color: "#ef4444" }}>
+                            <AlertCircle size={10} /> Failed
+                          </span>
+                        ) : (
+                          <span className="text-[10px] px-2 py-0.5 rounded-full flex items-center gap-1" style={{ background: "rgba(245,158,11,0.15)", color: "var(--aria-accent-glow)" }}>
+                            <ListChecks size={10} /> Ready
+                          </span>
+                        )}
                       </div>
-
-                      {/* now playing / progress badge */}
-                      {hasProgress && (
-                        <div className="absolute top-3 right-3 status-pill !py-1 !px-2.5 !text-[9px]">
-                          <span className="status-dot" />
-                          In progress
-                        </div>
-                      )}
-
-                      {/* Add Chapters button for COMPLETED books (top-right, hover only) */}
-                      {(book.status === 'COMPLETED' || book.status === 'COMPLETED_WITH_ERRORS') && (
-                        <button
-                          onClick={(e) => { e.stopPropagation(); setSelectorBook(book); }}
-                          className={`absolute top-3 right-3 px-2 py-1 rounded-lg text-[10px] font-medium transition-all flex items-center gap-1 ${
-                            hoveredBook === book.id ? "opacity-100" : "opacity-0"
-                          } bg-black/50 hover:bg-black/70`}
-                          style={{ color: 'var(--aria-accent-glow)', border: '1px solid rgba(245,158,11,0.3)' }}
-                          title="Add more chapters"
-                          aria-label="Add more chapters"
-                        >
-                          <ListChecks size={11} />
-                          Chapters
-                        </button>
-                      )}
-
-                      {/* delete button (top-left, hover only) */}
-                      {confirmDelete === book.id ? (
-                        <div className="absolute top-3 left-3 flex items-center gap-1">
-                          <button
-                            onClick={(e) => { e.stopPropagation(); handleDelete(book.id); }}
-                            className="px-2 py-1 rounded-lg text-[10px] font-medium bg-[rgba(239,68,68,0.2)] border border-[rgba(239,68,68,0.4)] text-[#ef4444]"
-                          >
-                            Delete
-                          </button>
-                          <button
-                            onClick={(e) => { e.stopPropagation(); setConfirmDelete(null); }}
-                            className="px-2 py-1 rounded-lg text-[10px] font-medium bg-[var(--aria-card)] border border-[var(--aria-border)] text-[var(--aria-fg-muted)]"
-                          >
-                            Cancel
-                          </button>
-                        </div>
-                      ) : (
-                        <button
-                          onClick={(e) => { e.stopPropagation(); setConfirmDelete(book.id); }}
-                          className={`absolute top-3 left-3 w-8 h-8 rounded-full flex items-center justify-center transition-all ${
-                            hoveredBook === book.id ? "opacity-100" : "opacity-0"
-                          } bg-black/50 text-[var(--aria-fg-muted)] hover:text-[#ef4444]`}
-                          title="Delete audiobook"
-                          aria-label="Delete audiobook"
-                        >
-                          <Trash2 size={14} />
-                        </button>
-                      )}
                     </div>
 
                     <div className="mt-3.5">
                       <h3 className="font-serif text-lg leading-snug text-[var(--aria-fg)] group-hover:text-[var(--aria-accent-glow)] transition-colors">
-                        {book.title}
+                        {card.title}
                       </h3>
                       <p className="text-xs text-[var(--aria-fg-muted)] mt-0.5">
-                        {book.author ? `by ${book.author}` : 'Author unknown'}
+                        {card.author ? `by ${card.author}` : "Author unknown"}
                       </p>
                       <div className="flex items-center gap-2 mt-1">
-                        {book.status === 'PARSING' ? (
+                        {isDone ? (
+                          <p className="text-[11px] text-[var(--aria-accent-glow)]">
+                            {card.outputFormat?.toUpperCase() || "MP3"} · tap to play
+                          </p>
+                        ) : isGenerating ? (
                           <p className="text-[11px] text-[var(--aria-accent-glow)] flex items-center gap-1">
                             <span className="status-dot" />
-                            Parsing chapters on GitHub Actions…
+                            {card.progressMessage || `Converting… ${pct}%`}
                           </p>
-                        ) : book.status === 'READY_TO_SELECT' ? (
-                          <>
-                            <p className="text-[11px] text-[var(--aria-accent-glow)] flex items-center gap-1">
-                              <ListChecks size={11} />
-                              {book.chapterCount} chapters · select to convert
-                            </p>
-                          </>
-                        ) : book.status === 'COMPLETED' || book.status === 'COMPLETED_WITH_ERRORS' ? (
-                          <>
-                            {book.status === 'COMPLETED_WITH_ERRORS' && (
-                              <p className="text-[11px] text-[#f59e0b]" title="Some chapters failed to generate and will use live narration instead">
-                                Partially ready
-                              </p>
-                            )}
-                            {hasProgress && (
-                              <p className="text-[11px] text-[var(--aria-accent-glow)]">
-                                Ch. {book.progressChapter + 1} · {formatDuration(book.progressCharOffset)}
-                              </p>
-                            )}
-                            {book.chapterCount > 0 && (
-                              <p className="text-[11px] text-[var(--aria-fg-dim)]">
-                                {book.chapterCount} chapters
-                              </p>
-                            )}
-                          </>
-                        ) : book.status === 'FAILED' ? (
-                          <div className="flex items-center gap-3 mt-1">
-                            <p className="text-[12px] text-[#ef4444]">
-                              Generation failed
-                            </p>
-                            <button
-                              onClick={(e) => {
-                                e.stopPropagation()
-                                setSelectorBook(book)
-                              }}
-                              className="px-3 py-1.5 rounded-lg text-[12px] font-medium transition-all"
-                              style={{
-                                background: 'rgba(245,158,11,0.15)',
-                                border: '1px solid rgba(245,158,11,0.3)',
-                                color: 'var(--aria-accent-glow)',
-                                cursor: 'pointer',
-                                minHeight: '32px',
-                                minWidth: '60px',
-                              }}
-                            >
-                              Select chapters
-                            </button>
-                          </div>
+                        ) : isError ? (
+                          <p className="text-[11px] text-[#ef4444]">
+                            {card.status === "cancelled" ? "Cancelled" : "Generation failed"}
+                          </p>
                         ) : (
                           <p className="text-[11px] text-[var(--aria-accent-glow)] flex items-center gap-1">
-                            <span className="status-dot" />
-                            {book.prepTotal && book.prepTotal > 0
-                              ? `Converting… (${book.prepProgress ?? 0}/${book.prepTotal} chapters)`
-                              : 'Converting on GitHub Actions…'}
+                            <ListChecks size={11} />
+                            Analyzed · tap to convert
                           </p>
                         )}
                       </div>
@@ -396,24 +433,9 @@ export function LibraryView() {
         )}
       </div>
 
-      {/* Chapter selector modal — opened for READY_TO_SELECT, FAILED, or via "Chapters" button on COMPLETED books */}
-      {selectorBook && (
-        <ChapterSelector
-          audiobookId={selectorBook.id}
-          title={selectorBook.title}
-          author={selectorBook.author}
-          accent={selectorBook.accent}
-          onClose={() => setSelectorBook(null)}
-          onConvertStarted={() => {
-            // Optimistically flip the audiobook status to GENERATING so the
-            // library card shows the spinner immediately.
-            setAudiobooks(prev => prev.map(b =>
-              b.id === selectorBook.id ? { ...b, status: 'GENERATING' } : b
-            ));
-          }}
-          showListenNow={selectorBook.status === 'COMPLETED' || selectorBook.status === 'COMPLETED_WITH_ERRORS'}
-        />
-      )}
+      {/* Chapter selector modal — opened either after upload (with analyzeResponse)
+          or when re-clicking an analyzed job (whole-book mode). */}
+      {selectorProps && <ChapterSelector {...selectorProps} />}
     </div>
   );
 }

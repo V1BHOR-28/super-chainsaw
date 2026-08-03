@@ -4,73 +4,62 @@ import { useState, useRef, useEffect } from "react";
 import {
   Play,
   Pause,
-  SkipBack,
-  SkipForward,
   Rewind,
   FastForward,
   ChevronLeft,
   ArrowLeft,
-  ListMusic,
-  Bookmark,
-  BookmarkCheck,
   Settings2,
   Gauge,
   Moon,
   Volume2,
   VolumeX,
   X,
-  Plus,
-  Trash2,
   Clock,
-  CheckCircle2,
 } from "lucide-react";
 import { usePlayerStore } from "@/lib/player-store";
 import { useAriaStore } from "@/lib/store";
-import { formatTime, formatDuration } from "@/lib/audiobooks";
+import { formatTime } from "@/lib/audiobooks";
 import { cn } from "@/lib/utils";
 import { AmbientGlow, StatusPill, AriaDivider } from "./primitives";
 import { NowPlayingBars } from "./waveform";
 import { BookCover } from "./book-cover";
-import { toast } from "@/hooks/use-toast";
 
+/**
+ * PlayerView — plays the single MP3 produced by the audiobook-maker Flask
+ * app for a finished job. No chapter list, no bookmarks (the Flask app
+ * produces a single MP3, not per-chapter files). Settings drawer holds
+ * playback rate, volume, sleep timer, and keyboard shortcut reference.
+ *
+ * Audio playback itself is driven by `useAudioEngine`, which is mounted
+ * at the workspace root (audiobook-workspace.tsx) so it survives view
+ * switches.
+ */
 export function PlayerView() {
-  // useAudioEngine is mounted at the workspace root (audiobook-workspace.tsx)
-  // so playback survives view switches and is not duplicated here.
-
-  const book = usePlayerStore((s) => s.currentAudiobook);
-  const chapters = usePlayerStore((s) => s.chapters);
-  const chapterIndex = usePlayerStore((s) => s.chapterIndex);
+  const job = usePlayerStore((s) => s.currentJob);
   const isPlaying = usePlayerStore((s) => s.isPlaying);
   const currentTime = usePlayerStore((s) => s.currentTime);
   const duration = usePlayerStore((s) => s.duration);
   const playbackRate = usePlayerStore((s) => s.playbackRate);
   const volume = usePlayerStore((s) => s.volume);
   const muted = usePlayerStore((s) => s.muted);
-  const showChapterList = usePlayerStore((s) => s.showChapterList);
-  const showBookmarks = usePlayerStore((s) => s.showBookmarks);
   const showSettings = usePlayerStore((s) => s.showSettings);
   const sleepTimerMinutes = usePlayerStore((s) => s.sleepTimerMinutes);
-  const narrating = usePlayerStore((s) => s.narrating);
-  const usingLiveNarration = usePlayerStore((s) => s.usingLiveNarration);
 
   const toggle = usePlayerStore((s) => s.toggle);
   const skip = usePlayerStore((s) => s.skip);
   const seek = usePlayerStore((s) => s.seek);
-  const nextChapter = usePlayerStore((s) => s.nextChapter);
-  const prevChapter = usePlayerStore((s) => s.prevChapter);
   const closePlayer = usePlayerStore((s) => s.closePlayer);
+  const toggleSettings = usePlayerStore((s) => s.toggleSettings);
   const setActiveWorkspace = useAriaStore((s) => s.setActiveWorkspace);
 
-  if (!book) return null;
-  const chapter = chapters[chapterIndex];
-  if (!chapter) return null;
+  if (!job) return null;
 
   const progressPct = duration > 0 ? (currentTime / duration) * 100 : 0;
 
   return (
     <div className="relative min-h-screen flex flex-col overflow-hidden">
       {/* ambient background tinted to the book's accent */}
-      <AmbientGlow color={book.accent} opacity={0.18} size={700} className="-top-40 left-1/2 -translate-x-1/2" />
+      <AmbientGlow color={job.accent} opacity={0.18} size={700} className="-top-40 left-1/2 -translate-x-1/2" />
       <AmbientGlow color="#92400e" opacity={0.12} size={500} className="bottom-0 right-0" />
 
       {/* ============ Top bar ============ */}
@@ -86,9 +75,9 @@ export function PlayerView() {
           </button>
           {/* Back to chat — secondary, exits the audiobook workspace entirely */}
           <button
-            onClick={() => setActiveWorkspace('chat')}
+            onClick={() => setActiveWorkspace("chat")}
             className="flex items-center gap-1.5 text-xs px-2.5 py-1.5 rounded-md hover:bg-white/5 transition-colors"
-            style={{ color: 'var(--aria-fg-dim)' }}
+            style={{ color: "var(--aria-fg-dim)" }}
             title="Exit to chat"
           >
             <ArrowLeft size={13} />
@@ -97,18 +86,6 @@ export function PlayerView() {
         </div>
 
         <div className="hidden sm:flex items-center gap-2">
-          {narrating && (
-            <StatusPill className="!text-[10px]">
-              <span className="status-dot" />
-              Narrating…
-            </StatusPill>
-          )}
-          {usingLiveNarration && (
-            <StatusPill className="!text-[10px]">
-              <span className="status-dot" />
-              Live narration
-            </StatusPill>
-          )}
           <StatusPill className="!text-[10px]">
             <NowPlayingBars active={isPlaying} />
             {isPlaying ? "Now playing" : "Paused"}
@@ -116,8 +93,6 @@ export function PlayerView() {
         </div>
 
         <div className="flex items-center gap-1">
-          <SidePanelToggle kind="chapterList" active={showChapterList} icon={ListMusic} label="Chapters" />
-          <SidePanelToggle kind="bookmarks" active={showBookmarks} icon={Bookmark} label="Bookmarks" />
           <SidePanelToggle kind="settings" active={showSettings} icon={Settings2} label="Settings" />
         </div>
       </header>
@@ -134,8 +109,8 @@ export function PlayerView() {
               )}
             >
               <BookCover
-                title={book.title}
-                accent={book.accent}
+                title={job.title}
+                accent={job.accent}
                 className="absolute inset-0"
               />
               <div className="absolute inset-0 bg-gradient-to-t from-black/60 via-transparent to-transparent" />
@@ -144,40 +119,46 @@ export function PlayerView() {
             {/* glow ring behind cover */}
             <div
               className="absolute -inset-3 -z-10 rounded-3xl blur-2xl opacity-40"
-              style={{ background: `radial-gradient(circle, ${book.accent}, transparent 70%)` }}
+              style={{ background: `radial-gradient(circle, ${job.accent}, transparent 70%)` }}
             />
           </div>
 
           {/* Book meta */}
           <div className="text-center lg:text-left w-full">
             <h1 className="font-serif text-2xl sm:text-3xl leading-tight text-[var(--aria-fg)]">
-              {book.title}
+              {job.title}
             </h1>
             <p className="text-sm text-[var(--aria-fg-muted)] mt-1">
-              {book.author ? <>by <span className="text-[var(--aria-fg)]">{book.author}</span></> : <span className="italic">Author unknown</span>}
+              {job.author ? (
+                <>
+                  by <span className="text-[var(--aria-fg)]">{job.author}</span>
+                </>
+              ) : (
+                <span className="italic">Author unknown</span>
+              )}
             </p>
             <div className="flex items-center gap-3 mt-3 justify-center lg:justify-start text-[11px] text-[var(--aria-fg-dim)]">
               <span className="flex items-center gap-1">
                 <Clock className="w-3 h-3" />
-                {formatDuration(chapter.durationSeconds ?? Math.round((chapter.cleanedText.split(/\s+/).length / 155) * 60))}
+                {duration > 0 ? formatTime(duration) : "—"}
               </span>
-              <span>{chapters.length} chapters</span>
+              <span>Single MP3 · edge-tts</span>
             </div>
           </div>
         </div>
 
         {/* Player controls */}
         <div className="flex-1 flex flex-col justify-center gap-7 lg:py-6">
-          {/* Chapter info */}
+          {/* Now playing info */}
           <div>
             <div className="font-mono text-[11px] tracking-[0.2em] uppercase text-[var(--aria-accent-glow)] mb-1.5">
-              Chapter {chapterIndex + 1} of {chapters.length}
+              Now playing
             </div>
             <h2 className="font-serif text-3xl sm:text-4xl leading-tight">
-              {chapter.title}
+              {job.title}
             </h2>
-            <p className="text-sm text-[var(--aria-fg-muted)] mt-2 leading-relaxed max-w-xl line-clamp-3">
-              {chapter.cleanedText.slice(0, 200)}{chapter.cleanedText.length > 200 ? '…' : ''}
+            <p className="text-sm text-[var(--aria-fg-muted)] mt-2 leading-relaxed max-w-xl">
+              {job.author ? `Narrated by edge-tts · ${job.author}` : "Narrated by edge-tts"}
             </p>
           </div>
 
@@ -191,14 +172,6 @@ export function PlayerView() {
 
           {/* Transport controls */}
           <div className="flex items-center justify-center gap-2 sm:gap-4">
-            <button
-              onClick={() => prevChapter()}
-              className="transport-btn w-11 h-11"
-              title="Previous chapter"
-              aria-label="Previous chapter"
-            >
-              <SkipBack className="w-5 h-5 fill-current" />
-            </button>
             <button
               onClick={() => skip(-15)}
               className="transport-btn w-12 h-12 relative"
@@ -221,21 +194,13 @@ export function PlayerView() {
               )}
             </button>
             <button
-              onClick={() => skip(30)}
+              onClick={() => skip(15)}
               className="transport-btn w-12 h-12 relative"
-              title="Forward 30 seconds"
-              aria-label="Forward 30 seconds"
+              title="Forward 15 seconds"
+              aria-label="Forward 15 seconds"
             >
               <FastForward className="w-5 h-5" />
-              <span className="absolute -bottom-0.5 text-[8px] font-mono font-medium">30</span>
-            </button>
-            <button
-              onClick={() => nextChapter()}
-              className="transport-btn w-11 h-11"
-              title="Next chapter"
-              aria-label="Next chapter"
-            >
-              <SkipForward className="w-5 h-5 fill-current" />
+              <span className="absolute -bottom-0.5 text-[8px] font-mono font-medium">15</span>
             </button>
           </div>
 
@@ -243,24 +208,15 @@ export function PlayerView() {
           <div className="flex items-center justify-center gap-2 flex-wrap">
             <SpeedControl rate={playbackRate} />
             <SleepTimerControl minutes={sleepTimerMinutes} />
-            <BookmarkButton bookId={book.id} chapterIndex={chapterIndex} time={currentTime} />
             <VolumeControl volume={volume} muted={muted} />
           </div>
         </div>
       </main>
 
       {/* ============ Side panels ============ */}
-      <SidePanel open={showChapterList} side="right">
-        <ChapterListPanel />
-      </SidePanel>
-      <SidePanel open={showBookmarks} side="right">
-        <BookmarksPanel />
-      </SidePanel>
       <SidePanel open={showSettings} side="right">
         <SettingsPanel />
       </SidePanel>
-
-      {/* ============ Mini player on mobile when scrolled (simple) ============ */}
     </div>
   );
 }
@@ -273,17 +229,13 @@ function SidePanelToggle({
   icon: Icon,
   label,
 }: {
-  kind: "chapterList" | "bookmarks" | "settings";
+  kind: "settings";
   active: boolean;
   icon: React.ElementType;
   label: string;
 }) {
   const toggle = usePlayerStore((s) =>
-    kind === "chapterList"
-      ? s.toggleChapterList
-      : kind === "bookmarks"
-        ? s.toggleBookmarks
-        : s.toggleSettings
+    kind === "settings" ? s.toggleSettings : s.toggleSettings,
   );
   return (
     <button
@@ -480,47 +432,6 @@ function SleepTimerControl({ minutes }: { minutes: number | null }) {
   );
 }
 
-function BookmarkButton({
-  bookId,
-  chapterIndex,
-  time,
-}: {
-  bookId: string;
-  chapterIndex: number;
-  time: number;
-}) {
-  const bookmarks = usePlayerStore((s) => s.bookmarks);
-  const addBookmark = usePlayerStore((s) => s.addBookmark);
-
-  const existing = bookmarks.find(
-    (b) => b.bookId === bookId && b.chapterIndex === chapterIndex && Math.abs(b.time - time) < 3
-  );
-
-  return (
-    <button
-      onClick={() => {
-        if (existing) return;
-        addBookmark();
-        toast({
-          title: "Bookmark added",
-          description: `Saved at ${formatTime(time)}`,
-        });
-      }}
-      disabled={!!existing}
-      className={cn(
-        "flex items-center gap-1.5 px-3 py-2 rounded-full border text-xs transition-colors",
-        existing
-          ? "border-[rgba(245,158,11,0.3)] text-[var(--aria-accent-glow)] bg-[rgba(245,158,11,0.08)]"
-          : "border-[var(--aria-border)] text-[var(--aria-fg-muted)] hover:text-[var(--aria-accent-glow)] hover:border-[rgba(245,158,11,0.3)]"
-      )}
-      title={existing ? "Bookmarked here" : "Add bookmark"}
-    >
-      {existing ? <BookmarkCheck className="w-3.5 h-3.5" /> : <Bookmark className="w-3.5 h-3.5" />}
-      {existing ? "Saved" : "Bookmark"}
-    </button>
-  );
-}
-
 function VolumeControl({ volume, muted }: { volume: number; muted: boolean }) {
   const setVolume = usePlayerStore((s) => s.setVolume);
   const toggleMute = usePlayerStore((s) => s.toggleMute);
@@ -576,12 +487,8 @@ function SidePanel({
   side?: "right" | "left";
   children: React.ReactNode;
 }) {
-  const toggleChapterList = usePlayerStore((s) => s.toggleChapterList);
-  const toggleBookmarks = usePlayerStore((s) => s.toggleBookmarks);
   const toggleSettings = usePlayerStore((s) => s.toggleSettings);
   const close = () => {
-    if (usePlayerStore.getState().showChapterList) toggleChapterList();
-    if (usePlayerStore.getState().showBookmarks) toggleBookmarks();
     if (usePlayerStore.getState().showSettings) toggleSettings();
   };
 
@@ -640,175 +547,6 @@ function PanelHeader({
   );
 }
 
-function ChapterListPanel() {
-  const toggle = usePlayerStore((s) => s.toggleChapterList);
-  const book = usePlayerStore((s) => s.currentAudiobook);
-  const chapters = usePlayerStore((s) => s.chapters);
-  const chapterIndex = usePlayerStore((s) => s.chapterIndex);
-  const goToChapter = usePlayerStore((s) => s.goToChapter);
-
-  if (!book) return null;
-
-  const totalSeconds = chapters.reduce((sum, ch) => sum + (ch.durationSeconds ?? Math.round((ch.cleanedText.split(/\s+/).length / 155) * 60)), 0);
-
-  return (
-    <>
-      <PanelHeader
-        title="Chapters"
-        subtitle={`${chapters.length} chapters · ${formatDuration(totalSeconds)}`}
-        onClose={toggle}
-      />
-      <div className="flex-1 overflow-y-auto px-3 py-3">
-        {chapters.map((ch, i) => {
-          const active = i === chapterIndex;
-          const done = i < chapterIndex;
-          return (
-            <button
-              key={ch.chapterOrder}
-              onClick={() => {
-                goToChapter(i);
-                toggle();
-              }}
-              className={cn("chapter-item w-full text-left mb-1", active && "active")}
-            >
-              <div
-                className={cn(
-                  "w-9 h-9 rounded-lg flex items-center justify-center shrink-0 font-mono text-xs border transition-colors",
-                  active
-                    ? "bg-[rgba(245,158,11,0.15)] border-[rgba(245,158,11,0.3)] text-[var(--aria-accent-glow)]"
-                    : done
-                      ? "bg-[rgba(245,158,11,0.05)] border-[rgba(245,158,11,0.15)] text-[var(--aria-accent)]"
-                      : "bg-[var(--aria-card)] border-[var(--aria-border)] text-[var(--aria-fg-dim)]"
-                )}
-              >
-                {done ? <CheckCircle2 className="w-4 h-4" /> : i + 1}
-              </div>
-              <div className="flex-1 min-w-0">
-                <div className="flex items-center gap-2">
-                  <span
-                    className={cn(
-                      "text-sm truncate",
-                      active ? "text-[var(--aria-accent-glow)]" : "text-[var(--aria-fg)]"
-                    )}
-                  >
-                    {ch.title}
-                  </span>
-                  {active && <NowPlayingBars active />}
-                  {/* Per-chapter generation status indicator */}
-                  {ch.status === 'pending' && (
-                    <span className="text-[9px] font-mono px-1.5 py-0.5 rounded-full bg-[var(--aria-card)] text-[var(--aria-fg-dim)] border border-[var(--aria-border)]" title="Audio not generated yet">
-                      pending
-                    </span>
-                  )}
-                  {ch.status === 'generating' && (
-                    <span className="text-[9px] font-mono px-1.5 py-0.5 rounded-full bg-[rgba(245,158,11,0.1)] text-[var(--aria-accent-glow)] border border-[rgba(245,158,11,0.2)]" title="Generating audio…">
-                      generating
-                    </span>
-                  )}
-                  {ch.status === 'ready' && (
-                    <span className="w-1.5 h-1.5 rounded-full bg-[var(--aria-accent)]" title="Audio ready" />
-                  )}
-                  {ch.status === 'failed' && (
-                    <span className="text-[9px] font-mono px-1.5 py-0.5 rounded-full bg-[rgba(239,68,68,0.1)] text-[#ef4444] border border-[rgba(239,68,68,0.2)]" title="Generation failed — using live narration">
-                      failed
-                    </span>
-                  )}
-                </div>
-                <p className="text-xs text-[var(--aria-fg-muted)] truncate mt-0.5">{ch.cleanedText.slice(0, 80)}{ch.cleanedText.length > 80 ? '…' : ''}</p>
-              </div>
-              <span className="font-mono text-[10px] text-[var(--aria-fg-dim)] shrink-0">
-                {formatTime(ch.durationSeconds ?? Math.round((ch.cleanedText.split(/\s+/).length / 155) * 60))}
-              </span>
-            </button>
-          );
-        })}
-      </div>
-    </>
-  );
-}
-
-function BookmarksPanel() {
-  const toggle = usePlayerStore((s) => s.toggleBookmarks);
-  const bookmarks = usePlayerStore((s) => s.bookmarks);
-  const removeBookmark = usePlayerStore((s) => s.removeBookmark);
-  const jumpToBookmark = usePlayerStore((s) => s.jumpToBookmark);
-  const addBookmark = usePlayerStore((s) => s.addBookmark);
-  const currentAudiobook = usePlayerStore((s) => s.currentAudiobook);
-  const chapters = usePlayerStore((s) => s.chapters);
-
-  const bookMarks = bookmarks.filter((b) => b.bookId === currentAudiobook?.id);
-  const allMarks = bookmarks;
-
-  return (
-    <>
-      <PanelHeader
-        title="Bookmarks"
-        subtitle={`${bookMarks.length} in this book · ${allMarks.length} total`}
-        onClose={toggle}
-      />
-      <div className="px-5 py-3 border-b border-[var(--aria-border)]">
-        <button
-          onClick={() => {
-            addBookmark();
-            toast({ title: "Bookmark added", description: "Saved at current position" });
-          }}
-          className="btn-ghost w-full !py-2.5 !text-xs justify-center"
-        >
-          <Plus className="w-3.5 h-3.5" />
-          Add bookmark at current position
-        </button>
-      </div>
-      <div className="flex-1 overflow-y-auto px-3 py-3">
-        {bookMarks.length === 0 ? (
-          <div className="text-center py-12 px-6">
-            <Bookmark className="w-8 h-8 mx-auto text-[var(--aria-fg-dim)] mb-3" />
-            <p className="text-sm text-[var(--aria-fg-muted)]">
-              No bookmarks in this book yet.
-            </p>
-            <p className="text-xs text-[var(--aria-fg-dim)] mt-1">
-              Tap a passage, mark it, come back.
-            </p>
-          </div>
-        ) : (
-          bookMarks.map((b) => {
-            const ch = chapters[b.chapterIndex];
-            return (
-              <div
-                key={b.id}
-                className="chapter-item w-full text-left mb-1 group"
-                onClick={() => {
-                  jumpToBookmark(b);
-                  toggle();
-                }}
-              >
-                <div className="w-9 h-9 rounded-lg flex items-center justify-center shrink-0 bg-[rgba(245,158,11,0.08)] border border-[rgba(245,158,11,0.2)] text-[var(--aria-accent-glow)]">
-                  <Bookmark className="w-4 h-4" />
-                </div>
-                <div className="flex-1 min-w-0">
-                  <div className="text-sm text-[var(--aria-fg)] truncate">{b.note}</div>
-                  <div className="text-xs text-[var(--aria-fg-dim)] mt-0.5 truncate">
-                    {ch?.title} · {formatTime(b.time)}
-                  </div>
-                </div>
-                <button
-                  onClick={(e) => {
-                    e.stopPropagation();
-                    removeBookmark(b.id);
-                  }}
-                  className="w-7 h-7 rounded-full flex items-center justify-center text-[var(--aria-fg-dim)] hover:text-[var(--destructive)] hover:bg-[rgba(239,68,68,0.08)] transition-colors opacity-0 group-hover:opacity-100"
-                  aria-label="Remove bookmark"
-                >
-                  <Trash2 className="w-3.5 h-3.5" />
-                </button>
-              </div>
-            );
-          })
-        )}
-      </div>
-    </>
-  );
-}
-
 function SettingsPanel() {
   const toggle = usePlayerStore((s) => s.toggleSettings);
   const playbackRate = usePlayerStore((s) => s.playbackRate);
@@ -817,8 +555,6 @@ function SettingsPanel() {
   const setVolume = usePlayerStore((s) => s.setVolume);
   const muted = usePlayerStore((s) => s.muted);
   const toggleMute = usePlayerStore((s) => s.toggleMute);
-  const [autoResume, setAutoResume] = useState(true);
-  const [skipSilence, setSkipSilence] = useState(false);
 
   return (
     <>
@@ -876,22 +612,6 @@ function SettingsPanel() {
 
         <AriaDivider />
 
-        {/* Toggles */}
-        <ToggleRow
-          label="Auto-resume"
-          desc="Continue from where you left off"
-          checked={autoResume}
-          onChange={setAutoResume}
-        />
-        <ToggleRow
-          label="Skip silence"
-          desc="Jump past long pauses in narration"
-          checked={skipSilence}
-          onChange={setSkipSilence}
-        />
-
-        <AriaDivider />
-
         {/* Keyboard shortcuts */}
         <div>
           <h4 className="font-mono text-[11px] uppercase tracking-[0.15em] text-[var(--aria-fg-dim)] mb-3">
@@ -901,10 +621,9 @@ function SettingsPanel() {
             {[
               ["Space", "Play / pause"],
               ["← / →", "Seek -5s / +5s"],
-              ["J / L", "Skip -15s / +30s"],
-              ["↑ / ↓", "Next / prev chapter"],
+              ["J / L", "Skip -15s / +15s"],
               ["M", "Mute / unmute"],
-              ["B", "Add bookmark"],
+              ["Esc", "Back to library"],
             ].map(([k, d]) => (
               <div key={k} className="flex items-center justify-between text-xs">
                 <span className="text-[var(--aria-fg-muted)]">{d}</span>
@@ -917,43 +636,5 @@ function SettingsPanel() {
         </div>
       </div>
     </>
-  );
-}
-
-function ToggleRow({
-  label,
-  desc,
-  checked,
-  onChange,
-}: {
-  label: string;
-  desc: string;
-  checked: boolean;
-  onChange: (v: boolean) => void;
-}) {
-  return (
-    <div className="flex items-center justify-between gap-4">
-      <div>
-        <div className="text-sm text-[var(--aria-fg)]">{label}</div>
-        <div className="text-xs text-[var(--aria-fg-muted)] mt-0.5">{desc}</div>
-      </div>
-      <button
-        onClick={() => onChange(!checked)}
-        className={cn(
-          "relative w-11 h-6 rounded-full transition-colors shrink-0",
-          checked ? "bg-[var(--aria-accent)]" : "bg-[var(--aria-card)] border border-[var(--aria-border)]"
-        )}
-        role="switch"
-        aria-checked={checked}
-        aria-label={label}
-      >
-        <span
-          className={cn(
-            "absolute top-1/2 -translate-y-1/2 w-4 h-4 rounded-full bg-[var(--aria-fg)] transition-transform",
-            checked ? "left-6" : "left-1"
-          )}
-        />
-      </button>
-    </div>
   );
 }

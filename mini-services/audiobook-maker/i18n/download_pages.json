@@ -1,0 +1,257 @@
+{
+  "expired": {
+    "it": {
+      "title": "Link scaduto",
+      "h2": "Link scaduto",
+      "p1": "Sono trascorse pi&ugrave; di {h} ore dall'invio dell'email. I file generati sono stati cancellati automaticamente per liberare spazio sul server.",
+      "p2": "Per generare nuovamente l'audiolibro, visita:"
+    },
+    "en": {
+      "title": "Link expired",
+      "h2": "Link expired",
+      "p1": "More than {h} hours have passed since the email was sent. The generated files have been automatically deleted to free up server space.",
+      "p2": "To generate the audiobook again, visit:"
+    },
+    "fr": {
+      "title": "Lien expir&eacute;",
+      "h2": "Lien expir&eacute;",
+      "p1": "Plus de {h} heures se sont &eacute;coul&eacute;es depuis l'envoi de l'email. Les fichiers g&eacute;n&eacute;r&eacute;s ont &eacute;t&eacute; automatiquement supprim&eacute;s pour lib&eacute;rer de l'espace sur le serveur.",
+      "p2": "Pour g&eacute;n&eacute;rer &agrave; nouveau le livre audio, visitez :"
+    },
+    "es": {
+      "title": "Enlace caducado",
+      "h2": "Enlace caducado",
+      "p1": "Han pasado m&aacute;s de {h} horas desde el env&iacute;o del email. Los archivos generados se han eliminado autom&aacute;ticamente para liberar espacio en el servidor.",
+      "p2": "Para generar nuevamente el audiolibro, visita:"
+    },
+    "de": {
+      "title": "Link abgelaufen",
+      "h2": "Link abgelaufen",
+      "p1": "Es sind mehr als {h} Stunden seit dem Versand der E-Mail vergangen. Die erzeugten Dateien wurden automatisch gel&ouml;scht, um Speicherplatz auf dem Server freizugeben.",
+      "p2": "Um das H&ouml;rbuch erneut zu erstellen, besuche:"
+    },
+    "zh": {
+      "title": "链接已过期",
+      "h2": "链接已过期",
+      "p1": "邮件发送已超过{h}小时。生成的文件已自动删除以释放服务器空间。",
+      "p2": "要重新生成有声读物，请访问："
+    },
+    "hi": {
+      "title": "लिंक समाप्त हो गया",
+      "h2": "लिंक समाप्त हो गया",
+      "p1": "ईमेल भेजे जाने के बाद से {h} घंटे से अधिक समय बीत चुका है. सर्वर स्थान खाली करने के लिए जनरेट की गई फ़ाइलें स्वचालित रूप से हटा दी गई हैं.",
+      "p2": "ऑडियोबुक को फिर से जनरेट करने के लिए, यहाँ जाएँ:"
+    }
+  },
+  "download": {
+    "it": {
+      "title": "Download",
+      "h2": "Il tuo audiolibro &egrave; pronto!",
+      "btn_no_m4b": "⬇️ Scarica audiolibro",
+      "warn": "&#x23F0; Hai ancora {r} per scaricare i file.<br>Dopo {h} ore dall'invio dell'email verranno cancellati.",
+      "share": "Ti &egrave; piaciuto? Condividi con i tuoi amici!",
+      "share_text": "Ho appena trasformato un ebook in audiolibro con Audiobook Maker — gratis e direttamente dal browser!",
+      "copied": "Copiato!"
+    },
+    "en": {
+      "title": "Download",
+      "h2": "Your audiobook is ready!",
+      "btn_no_m4b": "⬇️ Download audiobook",
+      "warn": "&#x23F0; You have {r} left to download the files.<br>They will be deleted {h} hours after the email was sent.",
+      "share": "Like it? Share with your friends!",
+      "share_text": "I just turned an ebook into an audiobook with Audiobook Maker — free and right in the browser!",
+      "copied": "Copied!"
+    },
+    "fr": {
+      "title": "T&eacute;l&eacute;chargement",
+      "h2": "Votre livre audio est pr&ecirc;t !",
+      "btn_no_m4b": "⬇️ T&eacute;l&eacute;charger le livre audio",
+      "warn": "&#x23F0; Il vous reste {r} pour t&eacute;l&eacute;charger les fichiers.<br>Ils seront supprim&eacute;s {h} heures apr&egrave;s l'envoi de l'email.",
+      "share": "Vous avez aim&eacute; ? Partagez avec vos amis !",
+      "share_text": "Je viens de transformer un ebook en livre audio avec Audiobook Maker — gratuit et directement depuis le navigateur !",
+      "copied": "Copi&eacute; !"
+    },
+    "es": {
+      "title": "Descarga",
+      "h2": "&iexcl;Tu audiolibro est&aacute; listo!",
+      "btn_no_m4b": "⬇️ Descargar audiolibro",
+      "warn": "&#x23F0; Te quedan {r} para descargar los archivos.<br>Se eliminar&aacute;n {h} horas despu&eacute;s del env&iacute;o del email.",
+      "share": "&iexcl;Te ha gustado? &iexcl;Comp&aacute;rtelo con tus amigos!",
+      "share_text": "Acabo de convertir un ebook en audiolibro con Audiobook Maker — ¡gratis y desde el navegador!",
+      "copied": "&iexcl;Copiado!"
+    },
+    "de": {
+      "title": "Download",
+      "h2": "Dein H&ouml;rbuch ist fertig!",
+      "btn_no_m4b": "⬇️ H&ouml;rbuch herunterladen",
+      "warn": "&#x23F0; Du hast noch {r} zum Herunterladen.<br>Die Dateien werden {h} Stunden nach dem E-Mail-Versand gel&ouml;scht.",
+      "share": "Hat es dir gefallen? Teile es mit deinen Freunden!",
+      "share_text": "Ich habe gerade ein Ebook mit Audiobook Maker in ein Hörbuch umgewandelt — kostenlos und direkt im Browser!",
+      "copied": "Kopiert!"
+    },
+    "zh": {
+      "title": "下载",
+      "h2": "您的有声读物已准备好！",
+      "btn_no_m4b": "⬇️ 下载有声读物",
+      "warn": "&#x23F0; 您还有 {r} 的时间下载文件。<br>文件将在邮件发送后{h}小时删除。",
+      "share": "觉得不错？分享给你的朋友！",
+      "share_text": "我刚用 Audiobook Maker 把一本电子书转成了有声书——免费且在浏览器即可完成！",
+      "copied": "已复制！"
+    },
+    "hi": {
+      "title": "डाउनलोड",
+      "h2": "आपकी ऑडियोबुक तैयार है!",
+      "btn_no_m4b": "⬇️ ऑडियोबुक डाउनलोड करें",
+      "warn": "&#x23F0; फ़ाइलें डाउनलोड करने के लिए आपके पास {r} शेष हैं.<br>ईमेल भेजे जाने के {h} घंटे बाद उन्हें हटा दिया जाएगा.",
+      "share": "पसंद आया? अपने दोस्तों के साथ साझा करें!",
+      "share_text": "मैंने अभी Audiobook Maker के साथ एक ईबुक को ऑडियोबुक में बदल दिया — मुफ़्त और सीधे ब्राउज़र से!",
+      "copied": "कॉपी किया गया!"
+    }
+  },
+  "deleted": {
+    "it": {
+      "title": "Download non disponibile",
+      "h2": "File non pi&ugrave; disponibile",
+      "p1": "Questo file &egrave; stato rimosso automaticamente dopo aver raggiunto il numero massimo di download consentiti.",
+      "p2": "Per generare nuovamente l'audiolibro, visita:"
+    },
+    "en": {
+      "title": "Download unavailable",
+      "h2": "File no longer available",
+      "p1": "This file was automatically removed after reaching the maximum number of allowed downloads.",
+      "p2": "To generate the audiobook again, visit:"
+    },
+    "fr": {
+      "title": "T&eacute;l&eacute;chargement indisponible",
+      "h2": "Fichier plus disponible",
+      "p1": "Ce fichier a &eacute;t&eacute; automatiquement supprim&eacute; apr&egrave;s avoir atteint le nombre maximum de t&eacute;l&eacute;chargements autoris&eacute;s.",
+      "p2": "Pour g&eacute;n&eacute;rer &agrave; nouveau le livre audio, visitez :"
+    },
+    "es": {
+      "title": "Descarga no disponible",
+      "h2": "Archivo ya no disponible",
+      "p1": "Este archivo fue eliminado autom&aacute;ticamente tras alcanzar el n&uacute;mero m&aacute;ximo de descargas permitidas.",
+      "p2": "Para generar nuevamente el audiolibro, visita:"
+    },
+    "de": {
+      "title": "Download nicht verf&uuml;gbar",
+      "h2": "Datei nicht mehr verf&uuml;gbar",
+      "p1": "Diese Datei wurde nach Erreichen der maximal erlaubten Downloads automatisch gel&ouml;scht.",
+      "p2": "Um das H&ouml;rbuch erneut zu erstellen, besuche:"
+    },
+    "zh": {
+      "title": "下载不可用",
+      "h2": "文件不再可用",
+      "p1": "该文件在达到最大允许下载次数后已被自动删除。",
+      "p2": "要重新生成有声读物，请访问："
+    },
+    "hi": {
+      "title": "डाउनलोड उपलब्ध नहीं",
+      "h2": "फ़ाइल अब उपलब्ध नहीं है",
+      "p1": "अधिकतम स्वीकृत डाउनलोड संख्या तक पहुँचने के बाद यह फ़ाइल स्वचालित रूप से हटा दी गई थी.",
+      "p2": "ऑडियोबुक को फिर से जनरेट करने के लिए, यहाँ जाएँ:"
+    }
+  },
+  "translated": {
+    "it": {
+      "title": "La tua traduzione è pronta",
+      "h2": "La tua traduzione è pronta",
+      "p1": "Il libro tradotto è pronto per il download.",
+      "btn": "&#x1F4D6; Scarica traduzione",
+      "type_label": "Traduzione"
+    },
+    "en": {
+      "title": "Your translation is ready",
+      "h2": "Your translation is ready",
+      "p1": "Your translated book is ready for download.",
+      "btn": "&#x1F4D6; Download translation",
+      "type_label": "Translation"
+    },
+    "fr": {
+      "title": "Votre traduction est pr&ecirc;te",
+      "h2": "Votre traduction est pr&ecirc;te",
+      "p1": "Votre livre traduit est pr&ecirc;t au t&eacute;l&eacute;chargement.",
+      "btn": "&#x1F4D6; T&eacute;l&eacute;charger la traduction",
+      "type_label": "Traduction"
+    },
+    "es": {
+      "title": "Tu traducci&oacute;n est&aacute; lista",
+      "h2": "Tu traducci&oacute;n est&aacute; lista",
+      "p1": "Tu libro traducido est&aacute; listo para descargar.",
+      "btn": "&#x1F4D6; Descargar traducci&oacute;n",
+      "type_label": "Traducci&oacute;n"
+    },
+    "de": {
+      "title": "Deine &Uuml;bersetzung ist fertig",
+      "h2": "Deine &Uuml;bersetzung ist fertig",
+      "p1": "Dein &uuml;bersetztes Buch ist zum Download bereit.",
+      "btn": "&#x1F4D6; &Uuml;bersetzung herunterladen",
+      "type_label": "&Uuml;bersetzung"
+    },
+    "zh": {
+      "title": "您的翻译已就绪",
+      "h2": "您的翻译已就绪",
+      "p1": "您翻译的图书已准备好下载。",
+      "btn": "&#x1F4D6; 下载翻译",
+      "type_label": "译文"
+    },
+    "hi": {
+      "title": "आपका अनुवाद तैयार है",
+      "h2": "आपका अनुवाद तैयार है",
+      "p1": "आपकी अनुवादित पुस्तक डाउनलोड के लिए तैयार है.",
+      "btn": "&#x1F4D6; अनुवाद डाउनलोड करें",
+      "type_label": "अनुवाद"
+    }
+  },
+  "cooldown": {
+    "it": {
+      "title": "Download in attesa",
+      "h2": "Il download potr&agrave; essere ripetuto tra alcuni secondi",
+      "p1": "Per evitare abusi, &egrave; necessario attendere qualche secondo tra un download e l'altro.",
+      "p2": "Tempo rimanente: <strong>{s}</strong> secondi.",
+      "auto": "La pagina si aggiorner&agrave; automaticamente."
+    },
+    "en": {
+      "title": "Download on hold",
+      "h2": "Download can be repeated in a few seconds",
+      "p1": "To prevent abuse, please wait a few seconds between downloads.",
+      "p2": "Remaining time: <strong>{s}</strong> seconds.",
+      "auto": "The page will refresh automatically."
+    },
+    "fr": {
+      "title": "T&eacute;l&eacute;chargement en attente",
+      "h2": "Le t&eacute;l&eacute;chargement pourra &ecirc;tre r&eacute;p&eacute;t&eacute; dans quelques secondes",
+      "p1": "Pour &eacute;viter les abus, veuillez patienter quelques secondes entre chaque t&eacute;l&eacute;chargement.",
+      "p2": "Temps restant : <strong>{s}</strong> secondes.",
+      "auto": "La page s'actualisera automatiquement."
+    },
+    "es": {
+      "title": "Descarga en espera",
+      "h2": "La descarga podr&aacute; repetirse en unos segundos",
+      "p1": "Para evitar abusos, espera unos segundos entre cada descarga.",
+      "p2": "Tiempo restante: <strong>{s}</strong> segundos.",
+      "auto": "La p&aacute;gina se actualizar&aacute; autom&aacute;ticamente."
+    },
+    "de": {
+      "title": "Download wartend",
+      "h2": "Der Download kann in wenigen Sekunden wiederholt werden",
+      "p1": "Um Missbrauch zu vermeiden, bitte warte ein paar Sekunden zwischen den Downloads.",
+      "p2": "Verbleibende Zeit: <strong>{s}</strong> Sekunden.",
+      "auto": "Die Seite wird automatisch neu geladen."
+    },
+    "zh": {
+      "title": "下载等待中",
+      "h2": "下载可在几秒后重试",
+      "p1": "为防止滥用，请在每次下载之间等待几秒钟。",
+      "p2": "剩余时间：<strong>{s}</strong> 秒。",
+      "auto": "页面将自动刷新。"
+    },
+    "hi": {
+      "title": "डाउनलोड प्रतीक्षा में",
+      "h2": "डाउनलोड कुछ सेकंड में दोहराया जा सकता है",
+      "p1": "दुरुपयोग से बचने के लिए, कृपया डाउनलोड के बीच कुछ सेकंड प्रतीक्षा करें.",
+      "p2": "शेष समय: <strong>{s}</strong> सेकंड.",
+      "auto": "पृष्ठ स्वचालित रूप से ताज़ा हो जाएगा."
+    }
+  }
+}
