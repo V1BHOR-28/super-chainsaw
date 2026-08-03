@@ -534,6 +534,9 @@ async def upload_to_blob(file_path: str, blob_pathname: str) -> str:
 
 
 # ── Two-phase per-chapter pipeline ────────────────────────────────────────────
+MAX_SUBMIT_RETRIES = 3
+
+
 async def process_chapter_start(chapter, tmp_dir):
     """Phase A: start synthesis, return (chapter, operations, output_path)."""
     i = chapter["order"]
@@ -546,6 +549,19 @@ async def process_chapter_start(chapter, tmp_dir):
         None, start_synthesis_task, chapter["text"], gcs_uri, chapter["order"]
     )
     return chapter, operations, output_path
+
+
+async def process_chapter_start_with_retry(chapter, tmp_dir):
+    """Phase A with retry-on-failure for backend overload errors."""
+    for attempt in range(MAX_SUBMIT_RETRIES):
+        try:
+            return await process_chapter_start(chapter, tmp_dir)
+        except Exception as e:
+            if attempt == MAX_SUBMIT_RETRIES - 1:
+                raise
+            wait = 10 * (attempt + 1)
+            print(f"[convert] Chapter {chapter['order']+1} submission failed (attempt {attempt+1}/{MAX_SUBMIT_RETRIES}): {e} — retrying in {wait}s", file=sys.stderr)
+            await asyncio.sleep(wait)
 
 
 async def process_chapter_finish(chapter, operations, output_path, semaphore):
@@ -590,8 +606,17 @@ async def main_async():
             mark_status("failed", error_message="No readable chapters found")
             return
 
-        # Phase A: Fire ALL synthesis tasks simultaneously (non-blocking API calls)
-        start_tasks = [process_chapter_start(ch, tmp) for ch in chapters]
+        # Phase A: submit synthesis tasks with limited concurrency + small gaps
+        # to avoid overwhelming Google's backend with a burst of submissions.
+        start_semaphore = asyncio.Semaphore(2)
+
+        async def process_chapter_start_throttled(chapter, tmp_dir):
+            async with start_semaphore:
+                result = await process_chapter_start_with_retry(chapter, tmp_dir)
+                await asyncio.sleep(1)  # small gap between submissions
+                return result
+
+        start_tasks = [process_chapter_start_throttled(ch, tmp) for ch in chapters]
         started = await asyncio.gather(*start_tasks)
         print(f"[convert] All {len(started)} synthesis tasks started — waiting for completion...")
 
