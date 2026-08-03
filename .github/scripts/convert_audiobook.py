@@ -11,9 +11,9 @@ Uses a two-phase approach for maximum speed:
   Phase A: Fire ALL synthesis tasks simultaneously (non-blocking API calls)
   Phase B: Poll, download WAV, convert to MP3, upload to Blob in parallel
 
-Google Cloud TTS produces studio-quality narration via Journey voices.
+Google Cloud TTS produces high-quality narration via Neural2 voices.
 This is a paid GCP service — estimated cost is ~$0.000016 per character
-for Journey voices (check current pricing at cloud.google.com/text-to-speech/pricing).
+for Neural2 voices (check current pricing at cloud.google.com/text-to-speech/pricing).
 
 Environment variables:
   JOB_ID                — The AudiobookJob ID
@@ -54,7 +54,7 @@ CALLBACK_SECRET  = os.environ["APP_CALLBACK_SECRET"]
 GCS_BUCKET         = os.environ["GCS_AUDIOBOOK_BUCKET"]
 GCP_PROJECT        = os.environ["GCP_PROJECT_ID"]
 GCP_REGION         = "us-central1"   # Long Audio API endpoint region
-TTS_VOICE          = "en-US-Journey-D"  # Natural, warm Journey voice — excellent for narration
+TTS_VOICE          = "en-US-Neural2-F"  # Reliable standard-tier voice — Journey's TPU backend has documented overload issues; Neural2 doesn't share that infra
 TTS_LANGUAGE       = "en-US"
 MAX_CHARS_PER_TASK = 700_000  # Long Audio API limit (~750K chars)
 
@@ -92,6 +92,36 @@ def clean_text(html_content: str) -> str:
     text = soup.get_text(separator=" ")
     text = re.sub(r"\s+", " ", text).strip()
     return text
+
+
+def force_break_long_sentences(text: str, max_sentence_chars: int = 1000) -> str:
+    """
+    Insert a period+space at the nearest comma, semicolon, or word boundary
+    if a 'sentence' (text between real sentence-ending punctuation) exceeds
+    max_sentence_chars. This is a safety net for extraction artifacts, not a
+    style choice — it only fires on abnormally long runs.
+    """
+    sentences = re.split(r'(?<=[.!?])\s+', text)
+    fixed = []
+    for sentence in sentences:
+        if len(sentence) <= max_sentence_chars:
+            fixed.append(sentence)
+            continue
+        # Break the oversized "sentence" at the nearest comma/semicolon past
+        # the midpoint, repeatedly, until every piece is under the limit.
+        remaining = sentence
+        while len(remaining) > max_sentence_chars:
+            window = remaining[:max_sentence_chars]
+            break_point = max(window.rfind(', '), window.rfind('; '))
+            if break_point < max_sentence_chars // 3:
+                break_point = window.rfind(' ')  # last resort: any word boundary
+            if break_point <= 0:
+                break_point = max_sentence_chars  # truly no break found — hard cut
+            fixed.append(remaining[:break_point].strip() + '.')
+            remaining = remaining[break_point:].strip()
+        if remaining:
+            fixed.append(remaining)
+    return ' '.join(fixed)
 
 
 def split_for_tts(text: str, max_len: int = MAX_CHARS_PER_TASK) -> list:
@@ -355,7 +385,7 @@ def start_synthesis_task(text: str, gcs_output_uri: str, chapter_index: int) -> 
     Does NOT wait for completion — call finish_synthesis_task() for that.
     Returns a list of (gcs_uri, operation) tuples (one per text segment).
     """
-    segments = split_for_tts(text, max_len=MAX_CHARS_PER_TASK)
+    segments = split_for_tts(force_break_long_sentences(text), max_len=MAX_CHARS_PER_TASK)
     operations = []
     for i, segment in enumerate(segments):
         if not segment.strip():
