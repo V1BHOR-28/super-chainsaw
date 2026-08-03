@@ -231,6 +231,42 @@ export async function sendHeartbeat(jobId: string): Promise<void> {
   }
 }
 
+/**
+ * Reset a completed ("done") job back to "analyzed" so the user can select
+ * different chapters and re-generate. The book's parsed chapter data must
+ * still be in memory (jobs expire after 18h).
+ */
+export async function resetToChapters(jobId: string): Promise<void> {
+  const res = await fetch(`${ABM_BASE}/reset_to_chapters/${jobId}`, {
+    method: "POST",
+    credentials: "include",
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(
+      (body && (body.error || body.message)) || `Reset failed (${res.status})`,
+    );
+  }
+}
+
+/**
+ * Permanently delete a job and all its files. Works for any job status.
+ * If the job is generating, it's cancelled first. Idempotent — deleting a
+ * non-existent job returns success.
+ */
+export async function deleteJob(jobId: string): Promise<void> {
+  const res = await fetch(`${ABM_BASE}/delete/${jobId}`, {
+    method: "POST",
+    credentials: "include",
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(
+      (body && (body.error || body.message)) || `Delete failed (${res.status})`,
+    );
+  }
+}
+
 /** Fetch the voice catalog grouped by language code. */
 export async function getVoices(): Promise<VoicesResponse> {
   const res = await fetch(`${ABM_BASE}/voices`, {

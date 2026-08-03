@@ -10,6 +10,8 @@ import {
   Loader2,
   AlertCircle,
   CheckCircle2,
+  Trash2,
+  RotateCcw,
 } from "lucide-react";
 import { AmbientGlow, GradientText } from "./primitives";
 import { ScrollReveal } from "./scroll-reveal";
@@ -22,6 +24,8 @@ import {
   analyzeEpub,
   getDownloadUrl,
   sendHeartbeat,
+  resetToChapters,
+  deleteJob,
   isPollingStatus,
   type MyJob,
   type AnalyzeResponse,
@@ -111,6 +115,8 @@ export function LibraryView() {
    *  data anymore (the upload-time analyzeResponse is long gone), so we open
    *  the selector in "whole-book" mode: just voice + convert. */
   const [wholeBookJob, setWholeBookJob] = useState<LibraryCard | null>(null);
+  const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
+  const [resetting, setResetting] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const fetchJobs = useCallback(async () => {
@@ -199,6 +205,48 @@ export function LibraryView() {
       title: "Generation failed",
       description: "Re-upload the EPUB to try again.",
     });
+  };
+
+  // Reset a done job back to 'analyzed' so the user can pick different
+  // chapters + voice and re-generate. The Flask app keeps the parsed chapter
+  // data in memory for 18h, so this works as long as the job hasn't expired.
+  const handleConvertMore = async (card: LibraryCard) => {
+    setResetting(card.jobId);
+    try {
+      await resetToChapters(card.jobId);
+      // Optimistically flip to 'analyzed' + open the selector in whole-book mode
+      setCards((prev) =>
+        prev.map((c) => (c.jobId === card.jobId ? { ...c, status: "analyzed" as JobStatus } : c)),
+      );
+      setWholeBookJob({ ...card, status: "analyzed" });
+      toast({
+        title: "Ready for new chapters",
+        description: "Pick which chapters to convert next.",
+      });
+    } catch (err) {
+      console.error("[library-view] reset failed", err);
+      toast({
+        title: "Could not reset book",
+        description: err instanceof Error ? err.message : "The book data may have expired. Re-upload the EPUB.",
+      });
+    } finally {
+      setResetting(null);
+    }
+  };
+
+  const handleDelete = async (jobId: string) => {
+    try {
+      await deleteJob(jobId);
+      setCards((prev) => prev.filter((c) => c.jobId !== jobId));
+      toast({ title: "Audiobook removed" });
+    } catch (err) {
+      console.error("[library-view] delete failed", err);
+      toast({
+        title: "Could not delete",
+        description: err instanceof Error ? err.message : "Try again",
+      });
+    }
+    setConfirmDelete(null);
   };
 
   const handleCloseSelector = () => {
@@ -384,7 +432,7 @@ export function LibraryView() {
                       )}
 
                       {/* status pill (top-right) */}
-                      <div className="absolute top-3 right-3">
+                      <div className="absolute top-3 right-3 flex items-center gap-1.5">
                         {isDone ? (
                           <span className="text-[10px] px-2 py-0.5 rounded-full flex items-center gap-1" style={{ background: "rgba(34,197,94,0.18)", color: "#22c55e" }}>
                             <CheckCircle2 size={10} /> Ready
@@ -403,6 +451,35 @@ export function LibraryView() {
                           </span>
                         )}
                       </div>
+
+                      {/* delete button (top-left, hover only) */}
+                      {confirmDelete === card.jobId ? (
+                        <div className="absolute top-3 left-3 flex items-center gap-1 z-10">
+                          <button
+                            onClick={(e) => { e.stopPropagation(); handleDelete(card.jobId); }}
+                            className="px-2 py-1 rounded-lg text-[10px] font-medium bg-[rgba(239,68,68,0.2)] border border-[rgba(239,68,68,0.4)] text-[#ef4444]"
+                          >
+                            Delete
+                          </button>
+                          <button
+                            onClick={(e) => { e.stopPropagation(); setConfirmDelete(null); }}
+                            className="px-2 py-1 rounded-lg text-[10px] font-medium bg-[var(--aria-card)] border border-[var(--aria-border)] text-[var(--aria-fg-muted)]"
+                          >
+                            Cancel
+                          </button>
+                        </div>
+                      ) : (
+                        <button
+                          onClick={(e) => { e.stopPropagation(); setConfirmDelete(card.jobId); }}
+                          className={`absolute top-3 left-3 w-8 h-8 rounded-full flex items-center justify-center transition-all ${
+                            hoveredJob === card.jobId ? "opacity-100" : "opacity-0"
+                          } bg-black/50 text-[var(--aria-fg-muted)] hover:text-[#ef4444] z-10`}
+                          title="Delete audiobook"
+                          aria-label="Delete audiobook"
+                        >
+                          <Trash2 size={14} />
+                        </button>
+                      )}
                     </div>
 
                     <div className="mt-3.5">
@@ -412,11 +489,27 @@ export function LibraryView() {
                       <p className="text-xs text-[var(--aria-fg-muted)] mt-0.5">
                         {card.author ? `by ${card.author}` : "Author unknown"}
                       </p>
-                      <div className="flex items-center gap-2 mt-1">
+                      <div className="flex items-center gap-2 mt-1 flex-wrap">
                         {isDone ? (
-                          <p className="text-[11px] text-[var(--aria-accent-glow)]">
-                            {card.outputFormat?.toUpperCase() || "MP3"} · tap to play
-                          </p>
+                          <>
+                            <p className="text-[11px] text-[var(--aria-accent-glow)]">
+                              {card.outputFormat?.toUpperCase() || "MP3"} · tap to play
+                            </p>
+                            {resetting === card.jobId ? (
+                              <span className="text-[11px] text-[var(--aria-fg-muted)] flex items-center gap-1">
+                                <Loader2 size={10} className="animate-spin" /> Resetting…
+                              </span>
+                            ) : (
+                              <button
+                                onClick={(e) => { e.stopPropagation(); handleConvertMore(card); }}
+                                className="text-[11px] px-2 py-0.5 rounded-md flex items-center gap-1 transition-colors hover:bg-white/5"
+                                style={{ color: "var(--aria-fg-muted)", border: "1px solid var(--aria-border)" }}
+                                title="Convert more chapters"
+                              >
+                                <RotateCcw size={10} /> More chapters
+                              </button>
+                            )}
+                          </>
                         ) : isGenerating ? (
                           <p className="text-[11px] text-[var(--aria-accent-glow)] flex items-center gap-1">
                             <span className="status-dot" />

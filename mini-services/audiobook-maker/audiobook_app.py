@@ -9622,6 +9622,36 @@ def api_heartbeat(job_id):
     return "", 404
 
 
+@app.route("/api/delete/<job_id>", methods=["POST", "DELETE"])
+def api_delete_job(job_id):
+    """Permanently delete a job and all its files.
+
+    Used by the ARIA library UI when the user clicks 'Delete' on a book card.
+    Calls _cleanup_job() which removes the in-memory entry + the work_dir on disk.
+    Works for any job status (generating/done/error/analyzed).
+    """
+    _job, _err, _sc = _check_job_owner(job_id)
+    if _err is not None:
+        # Already gone — treat as success (idempotent delete)
+        if _sc == 404:
+            return jsonify({"status": "deleted"})
+        return _err, _sc
+    # If the job is currently generating, cancel it first so the worker thread stops
+    with _jobs_lock:
+        if job_id in jobs:
+            jobs[job_id]["cancelled"] = True
+            jobs[job_id]["status"] = "cancelled"
+    # Small grace period so the worker thread can notice the cancel flag
+    time.sleep(0.2)
+    try:
+        _cleanup_job(job_id, reason="user_delete")
+    except Exception as e:
+        print(f"[delete] {job_id} cleanup failed: {e}")
+        # Still return success — the job entry may be partially cleaned but
+        # the user's intent (remove from library) is fulfilled.
+    return jsonify({"status": "deleted"})
+
+
 @app.route("/api/reset_to_chapters/<job_id>", methods=["POST"])
 def api_reset_to_chapters(job_id):
     """Reset a completed job back to 'analyzed' so the user can select different chapters."""
@@ -9636,7 +9666,6 @@ def api_reset_to_chapters(job_id):
             return jsonify({"error": "Job is not in completed state"}), 400
         if not job.get("info") or not job["info"].chapters:
             return jsonify({"error": "Book data no longer available. Please re-upload the file."}), 400
-
     # Per-epoch layout: /api/generate writes into work_dir/output_{epoch}/,
     # including the .abm snapshot. Reset is fully non-destructive for outputs
     # — the next generation bumps gen_epoch and writes into a fresh dir,
