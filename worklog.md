@@ -90,3 +90,36 @@ Stage Summary:
 - Commit 811adbc pushed to origin/main
 - Feature is backward-compatible: legacy jobs (chapterIndices=[]) use the old delete+recreate callback path. Existing COMPLETED books get the "Chapters" button to add more chapters incrementally.
 - db:push still needed on production (schema change is additive — new field defaults to empty array, no migration required).
+
+---
+Task ID: 4
+Agent: main (ARIA parser fix + concurrent job guard + voice selection)
+Task: Fix 3 bugs: (1) broken TS parser producing wrong/inconsistent chapters, (2) previous conversion command running alongside new one, (3) add audiobook-maker feature parity (voice selection, Select All/None/Invert).
+
+Work Log:
+- Read src/lib/epub-parser.ts (195 lines) and identified 6 critical missing features vs the Python tts_brain parser: no frontmatter filtering, no spine↔TOC reconciliation, no single-file splitting, no content heuristics, no backnote arrow filtering, no multilingual chapter markers. This explained the user's broken output ("Chapter 8, Chapter 17, Chapter 22, About the Author, Document Outline").
+- Created .github/scripts/parse_epub.py — lightweight parse-only script that downloads EPUB, runs tts_brain.parse_epub_for_tts (the SAME parser used for conversion), and calls back with {status: 'parse_complete', chapters: [{title, text, order}]}. No TTS/GCS/ffmpeg — runs in ~20-30s.
+- Created .github/workflows/audiobook-parse.yml — quick parse workflow (5-min timeout, installs only ebooklib+beautifulsoup4+lxml+requests, no GCP credentials needed).
+- Rewrote src/app/api/audiobooks/upload-epub/route.ts — no longer parses in TS. Creates Audiobook as PARSING, uploads EPUB to Blob, dispatches parse job. Removed epub2/cheerio dependency from the upload flow entirely. Title is temporarily set from filename; parse callback updates with real EPUB metadata title.
+- Updated src/app/api/audiobooks/callback/route.ts — handles parse_complete (creates AudiobookChapter rows, sets READY_TO_SELECT, updates title/author from EPUB metadata) and parse_failed (sets FAILED). Convert callbacks unchanged.
+- Added concurrent job guard to src/app/api/audiobooks/[id]/convert/route.ts — checks for any job with status 'queued' or 'running' for this audiobook. If found, returns 409 Conflict. Also filters out 'generating' chapters from selection (can't re-convert a chapter already in flight).
+- Added voice selection: convert route accepts {voice} in body (validated against en-US-Neural2-{A-I}), passes to workflow as 'voice' input, workflow passes as TTS_VOICE env var, Python script reads it with fallback to en-US-Neural2-F. Updated .github/workflows/audiobook-convert.yml with voice input.
+- Enhanced src/components/aria/chapter-selector.tsx — added Select All / None / Invert buttons (matching audiobook-maker), voice dropdown with 9 Neural2 voices (A-I, labeled with gender), voice is sent with the convert request. selectableChapters now filters out 'generating' too (not just 'ready').
+- Updated src/components/aria/library-view.tsx — handles PARSING status (shows "Parsing chapters on GitHub Actions…" spinner, toast on click), polls include PARSING status.
+- Verified: python -m py_compile OK (both scripts), npx tsc --noEmit clean for audiobook code, bun run lint clean, agent-browser landing page renders without errors.
+
+Stage Summary:
+- 9 files changed, 472 insertions, 126 deletions
+- New: .github/scripts/parse_epub.py (parse-only script)
+- New: .github/workflows/audiobook-parse.yml (parse workflow)
+- Modified: upload-epub route (dispatch parse job, not convert job)
+- Modified: callback route (handle parse_complete/parse_failed)
+- Modified: convert route (concurrent job guard + voice parameter)
+- Modified: convert_audiobook.py (read TTS_VOICE env var)
+- Modified: audiobook-convert.yml (voice input)
+- Modified: chapter-selector.tsx (Select All/None/Invert + voice dropdown)
+- Modified: library-view.tsx (PARSING status handling)
+- Commit 94a9250 pushed to origin/main
+- Bug #1 (parser) FIXED: same Python parser now used for both upload-time parsing and conversion — no more TS/Python mismatch
+- Bug #2 (concurrent jobs) FIXED: 409 guard prevents parallel jobs for the same audiobook
+- Bug #3 (feature parity) PARTIAL: voice selection + Select All/None/Invert added. Rate selection not supported by Long Audio API. M4B download + AI optimization deferred.
