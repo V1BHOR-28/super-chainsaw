@@ -7,8 +7,11 @@ parses it with ebooklib, generates TTS per chapter using Google Cloud
 Text-to-Speech Long Audio API (synthesize_long_audio), uploads each MP3
 to Vercel Blob concurrently, then calls the app's callback route.
 
-Google Cloud TTS produces studio-quality narration via Journey voices,
-significantly more natural than Edge TTS or open-source alternatives.
+Uses a two-phase approach for maximum speed:
+  Phase A: Fire ALL synthesis tasks simultaneously (non-blocking API calls)
+  Phase B: Poll, download WAV, convert to MP3, upload to Blob in parallel
+
+Google Cloud TTS produces studio-quality narration via Journey voices.
 This is a paid GCP service — estimated cost is ~$0.000016 per character
 for Journey voices (check current pricing at cloud.google.com/text-to-speech/pricing).
 
@@ -52,11 +55,7 @@ GCP_PROJECT        = os.environ["GCP_PROJECT_ID"]
 GCP_REGION         = "us-central1"   # Long Audio API endpoint region
 TTS_VOICE          = "en-US-Journey-D"  # Natural, warm Journey voice — excellent for narration
 TTS_LANGUAGE       = "en-US"
-# Long Audio API limit: 1,000,000 bytes (~750K chars). Most chapters are well under this.
-# Only split if a chapter genuinely exceeds this — the goal is zero splits for normal chapters.
-MAX_CHARS_PER_TASK = 700_000
-
-MAX_CONCURRENT   = 4  # Google Cloud TTS has low per-call overhead — higher concurrency is fine
+MAX_CHARS_PER_TASK = 700_000  # Long Audio API limit (~750K chars)
 
 # Initialize GCP clients once at module level
 _tts_client     = texttospeech.TextToSpeechLongAudioSynthesizeClient()
@@ -109,9 +108,7 @@ def split_for_tts(text: str, max_len: int = MAX_CHARS_PER_TASK) -> list:
     remaining = text
 
     while len(remaining) > max_len:
-        # Try to break at the last sentence end before the limit
         chunk = remaining[:max_len]
-        # Find the last sentence-ending punctuation
         last_break = max(
             chunk.rfind(". "),
             chunk.rfind("! "),
@@ -119,10 +116,8 @@ def split_for_tts(text: str, max_len: int = MAX_CHARS_PER_TASK) -> list:
             chunk.rfind(".\n"),
         )
         if last_break > max_len // 2:
-            # Good sentence boundary found in the second half of the chunk
             cut = last_break + 2
         else:
-            # Fall back to paragraph break
             last_para = chunk.rfind("\n\n")
             cut = last_para + 2 if last_para > max_len // 3 else max_len
 
@@ -136,7 +131,6 @@ def split_for_tts(text: str, max_len: int = MAX_CHARS_PER_TASK) -> list:
 
 
 # Patterns that identify front/back matter to skip.
-# Matched against the first heading or first 120 chars of text (lowercase).
 FRONTMATTER_PATTERNS = [
     r"^copyright",
     r"^all rights reserved",
@@ -171,12 +165,12 @@ def _is_frontmatter(text: str, heading: str = "") -> bool:
 
 def _split_on_headings(html_content: str, base_order: int) -> list:
     """
-    Split a single large HTML file on <h2>/<h3> boundaries.
+    Split a single large HTML file on <h1>/<h2>/<h3> boundaries.
     Used when an EPUB stores the whole book in one file.
     Returns a list of chapter dicts with title, text, order.
     """
     soup = BeautifulSoup(html_content, "html.parser")
-    headings = soup.find_all(["h2", "h3"])
+    headings = soup.find_all(["h1", "h2", "h3"])
     if not headings:
         return []
 
@@ -186,7 +180,7 @@ def _split_on_headings(html_content: str, base_order: int) -> list:
         # Collect all sibling content until the next heading
         content_parts = []
         for sibling in heading.find_next_siblings():
-            if sibling.name in ("h2", "h3"):
+            if sibling.name in ("h1", "h2", "h3"):
                 break
             content_parts.append(str(sibling))
         chunk_html = str(heading) + "".join(content_parts)
@@ -200,11 +194,52 @@ def _split_on_headings(html_content: str, base_order: int) -> list:
     return chapters
 
 
+def _split_on_wordcount(text: str, base_order: int,
+                         target_words: int = 3500) -> list:
+    """
+    Last-resort chapter splitter for EPUBs with no heading structure.
+    Splits on paragraph boundaries aiming for ~3500 words per chapter
+    (~15–20 minutes of narration). Never cuts mid-paragraph.
+    """
+    paragraphs = [p.strip() for p in re.split(r'\n\s*\n', text) if p.strip()]
+    chapters = []
+    current_paras = []
+    current_words = 0
+
+    for para in paragraphs:
+        word_count = len(para.split())
+        current_paras.append(para)
+        current_words += word_count
+
+        if current_words >= target_words:
+            chapter_text = '\n\n'.join(current_paras)
+            chapters.append({
+                "title": f"Chapter {base_order + len(chapters) + 1}",
+                "text": chapter_text,
+                "order": base_order + len(chapters),
+            })
+            current_paras = []
+            current_words = 0
+
+    # Don't lose the last partial chunk
+    if current_paras:
+        chapter_text = '\n\n'.join(current_paras)
+        if len(chapter_text) > 200:
+            chapters.append({
+                "title": f"Chapter {base_order + len(chapters) + 1}",
+                "text": chapter_text,
+                "order": base_order + len(chapters),
+            })
+
+    return chapters
+
+
 def parse_epub(epub_path: str):
     """Parse EPUB and return (title, author, chapters).
 
     Uses the spine (reading order) rather than raw manifest iteration,
-    filters front/back matter, and splits single-file EPUBs on headings.
+    filters front/back matter, and splits single-file EPUBs on headings
+    (h1/h2/h3) with a word-count fallback for books with no heading structure.
     """
     book = epub.read_epub(epub_path)
 
@@ -264,7 +299,7 @@ def parse_epub(epub_path: str):
         # If this item is very large (> 15,000 chars) and contains multiple headings,
         # it's a single-file EPUB — split it on heading boundaries.
         LARGE_FILE_THRESHOLD = 15_000
-        sub_headings = soup.find_all(["h2", "h3"])
+        sub_headings = soup.find_all(["h1", "h2", "h3"])
         if len(text) > LARGE_FILE_THRESHOLD and len(sub_headings) > 1:
             print(f"[parse_epub] Large single-file item ({len(text)} chars, "
                   f"{len(sub_headings)} headings) — splitting on headings")
@@ -273,7 +308,18 @@ def parse_epub(epub_path: str):
                 chapters.extend(sub_chapters)
                 order += len(sub_chapters)
                 continue
-            # If splitting yielded nothing, fall through and treat as one chapter
+            # Heading split yielded nothing — fall through to word-count split below
+
+        # Word-count fallback for large items with no usable heading structure
+        if len(text) > LARGE_FILE_THRESHOLD:
+            print(f"[parse_epub] Large item ({len(text)} chars) with no heading "
+                  f"structure — splitting on word count (~3500 words/chapter)")
+            sub_chapters = _split_on_wordcount(text, order)
+            if sub_chapters:
+                print(f"[parse_epub] word-count split produced {len(sub_chapters)} chapters")
+                chapters.extend(sub_chapters)
+                order += len(sub_chapters)
+                continue
 
         chapters.append({"title": chapter_title[:200], "text": text, "order": order})
         order += 1
@@ -301,30 +347,21 @@ def parse_epub(epub_path: str):
     return title, author, chapters
 
 
-# ── TTS generation (Google Cloud Long Audio API) ────────────────────────────
-def generate_chapter_audio_sync(text: str, output_path: str) -> None:
+# ── TTS: Phase A — start all synthesis tasks (non-blocking) ──────────────────
+def start_synthesis_task(text: str, gcs_output_uri: str) -> list:
     """
-    Generate TTS audio for a chapter using Google Cloud Text-to-Speech Long Audio API.
-
-    Uses synthesize_long_audio() which accepts full chapter-length text (up to ~750K
-    chars) and writes the result directly to GCS — no manual segmentation needed for
-    normal chapters. Only splits into multiple tasks for unusually long chapters.
-
-    The GCS output object is downloaded locally, then the temp GCS object is deleted
-    to avoid accumulating storage costs.
+    Start a Long Audio synthesis task and return the operation handle immediately.
+    Does NOT wait for completion — call finish_synthesis_task() for that.
+    Returns a list of (gcs_uri, operation) tuples (one per text segment).
     """
     segments = split_for_tts(text, max_len=MAX_CHARS_PER_TASK)
-    mp3_parts = []
-
+    operations = []
     for i, segment in enumerate(segments):
         if not segment.strip():
             continue
-
-        # Unique GCS output path for this synthesis task
-        gcs_output_uri = (
-            f"gs://{GCS_BUCKET}/tts-tmp/{JOB_ID}/chapter-part-{i:04d}.wav"
-        )
-
+        # For multi-segment chapters, use part index in the URI
+        seg_uri = gcs_output_uri.replace('.wav', f'-part{i:04d}.wav') \
+                  if len(segments) > 1 else gcs_output_uri
         voice = texttospeech.VoiceSelectionParams(
             language_code=TTS_LANGUAGE,
             name=TTS_VOICE,
@@ -333,108 +370,92 @@ def generate_chapter_audio_sync(text: str, output_path: str) -> None:
             audio_encoding=texttospeech.AudioEncoding.LINEAR16,
             sample_rate_hertz=24000,
         )
-        input_text = texttospeech.SynthesisInput(text=segment)
-
         parent = f"projects/{GCP_PROJECT}/locations/{GCP_REGION}"
-
-        print(f"[tts] Segment {i+1}/{len(segments)}: {len(segment)} chars → {gcs_output_uri}")
-
         operation = _tts_client.synthesize_long_audio(
             request=texttospeech.SynthesizeLongAudioRequest(
                 parent=parent,
-                input=input_text,
+                input=texttospeech.SynthesisInput(text=segment),
                 audio_config=audio_config,
                 voice=voice,
-                output_gcs_uri=gcs_output_uri,
+                output_gcs_uri=seg_uri,
             )
         )
+        operations.append((seg_uri, operation))
+    return operations
 
-        # Poll until the long-running operation completes
-        print(f"[tts] Waiting for operation {operation.operation.name}...")
-        timeout_s = 300
-        start = time.time()
+
+# ── TTS: Phase B — poll, download WAV, convert to MP3 ────────────────────────
+def finish_synthesis_task(
+    operations: list,        # from start_synthesis_task()
+    output_mp3_path: str,    # final local MP3 path
+    timeout_s: int = 600,    # 10 minutes — generous for long chapters
+) -> None:
+    """
+    Poll all operations to completion, download each WAV from GCS,
+    convert to MP3 with ffmpeg, clean up GCS objects.
+    """
+    mp3_parts = []
+    start = time.time()
+
+    for seg_uri, operation in operations:
+        # Poll this operation until done
         while not operation.done():
             if time.time() - start > timeout_s:
                 raise RuntimeError(
-                    f"TTS operation timed out after {timeout_s}s for segment {i+1}"
+                    f"TTS operation timed out after {timeout_s}s: {seg_uri}"
                 )
             time.sleep(5)
-            operation.operation.refresh()  # re-check operation status
+            operation.operation.refresh()
 
         if operation.exception():
             raise RuntimeError(
-                f"TTS operation failed for segment {i+1}: {operation.exception()}"
+                f"TTS operation failed: {operation.exception()}"
             )
 
-        # Download WAV from GCS to a local temp file
-        gcs_object_path = gcs_output_uri.replace(f"gs://{GCS_BUCKET}/", "")
-        local_part_path = output_path.replace(".mp3", f"-part{i:04d}.mp3")
-        local_wav_path = local_part_path.replace(".mp3", ".wav")
+        # Parse bucket + object path from gs:// URI
+        bucket_name = GCS_BUCKET
+        gcs_object_path = seg_uri.replace(f"gs://{bucket_name}/", "")
+        local_wav = output_mp3_path.replace(".mp3", f"-{len(mp3_parts):04d}.wav")
+        local_mp3 = output_mp3_path.replace(".mp3", f"-{len(mp3_parts):04d}.mp3")
 
-        bucket = _storage_client.bucket(GCS_BUCKET)
+        bucket = _storage_client.bucket(bucket_name)
         blob = bucket.blob(gcs_object_path)
-        blob.download_to_filename(local_wav_path)
-        print(f"[tts] Segment {i+1} WAV downloaded ({os.path.getsize(local_wav_path)} bytes)")
-
-        # Delete the temp GCS object immediately
+        blob.download_to_filename(local_wav)
         blob.delete()
-        print(f"[tts] Cleaned up temp GCS object: {gcs_object_path}")
+        print(f"[tts] Downloaded + cleaned {gcs_object_path} ({os.path.getsize(local_wav)} bytes)")
 
         # Convert WAV → MP3 with ffmpeg
         result = subprocess.run(
-            ["ffmpeg", "-y", "-i", local_wav_path,
-             "-codec:a", "libmp3lame", "-qscale:a", "4",
-             local_part_path],
+            ["ffmpeg", "-y", "-i", local_wav,
+             "-codec:a", "libmp3lame", "-qscale:a", "4", local_mp3],
             capture_output=True, text=True, timeout=300,
         )
-        try:
-            os.remove(local_wav_path)
-        except:
-            pass
-
+        try: os.remove(local_wav)
+        except: pass
         if result.returncode != 0:
-            raise RuntimeError(
-                f"ffmpeg WAV→MP3 conversion failed for segment {i+1}: {result.stderr[:300]}"
-            )
-
-        mp3_parts.append(local_part_path)
-        print(f"[tts] Segment {i+1} converted to MP3 ({os.path.getsize(local_part_path)} bytes)")
+            raise RuntimeError(f"ffmpeg failed: {result.stderr[:300]}")
+        mp3_parts.append(local_mp3)
 
     if not mp3_parts:
-        raise RuntimeError("Google Cloud TTS produced no audio for this chapter")
+        raise RuntimeError("No audio produced")
 
     if len(mp3_parts) == 1:
-        # Single segment (the normal case for most chapters) — just rename
-        os.rename(mp3_parts[0], output_path)
+        os.rename(mp3_parts[0], output_mp3_path)
     else:
-        # Multiple segments (rare — only for very long chapters) — concat with ffmpeg
-        filelist_path = output_path.replace(".mp3", "-filelist.txt")
-        with open(filelist_path, "w") as f:
-            for part in mp3_parts:
-                f.write(f"file '{part}'\n")
-        result = subprocess.run(
+        filelist = output_mp3_path.replace(".mp3", "-filelist.txt")
+        with open(filelist, "w") as f:
+            for p in mp3_parts:
+                f.write(f"file '{p}'\n")
+        subprocess.run(
             ["ffmpeg", "-y", "-f", "concat", "-safe", "0",
-             "-i", filelist_path, "-c", "copy", output_path],
-            capture_output=True, text=True, timeout=120,
+             "-i", filelist, "-c", "copy", output_mp3_path],
+            capture_output=True, text=True, timeout=300, check=True,
         )
-        # Clean up part files and filelist
-        for part in mp3_parts:
-            try: os.remove(part)
+        for p in mp3_parts:
+            try: os.remove(p)
             except: pass
-        try: os.remove(filelist_path)
+        try: os.remove(filelist)
         except: pass
-
-        if result.returncode != 0:
-            raise RuntimeError(f"ffmpeg concat failed: {result.stderr[:500]}")
-
-
-async def generate_chapter_audio(text: str, output_path: str) -> None:
-    """
-    Async wrapper around the synchronous Google Cloud TTS generation.
-    Runs in a thread executor so it doesn't block asyncio.gather().
-    """
-    loop = asyncio.get_running_loop()
-    await loop.run_in_executor(None, generate_chapter_audio_sync, text, output_path)
 
 
 # ── Blob upload (async via asyncio executor) ──────────────────────────────────
@@ -474,30 +495,37 @@ async def upload_to_blob(file_path: str, blob_pathname: str) -> str:
     return await loop.run_in_executor(None, _upload)
 
 
-# ── Per-chapter pipeline ──────────────────────────────────────────────────────
-async def process_chapter(chapter, tmp_dir, semaphore):
-    """
-    Generate TTS + upload for a single chapter.
-    Returns the Blob URL on success, None on failure.
-    Semaphore limits concurrent chapters to MAX_CONCURRENT.
-    """
+# ── Two-phase per-chapter pipeline ────────────────────────────────────────────
+async def process_chapter_start(chapter, tmp_dir):
+    """Phase A: start synthesis, return (chapter, operations, output_path)."""
+    i = chapter["order"]
+    title = chapter["title"]
+    output_path = os.path.join(tmp_dir, f"chapter_{i:04d}.mp3")
+    gcs_uri = f"gs://{GCS_BUCKET}/tts-tmp/{JOB_ID}/chapter-{i:04d}.wav"
+    print(f"[convert] Starting synthesis: Chapter {i+1} '{title}' ({len(chapter['text'])} chars)")
+    loop = asyncio.get_running_loop()
+    operations = await loop.run_in_executor(
+        None, start_synthesis_task, chapter["text"], gcs_uri
+    )
+    return chapter, operations, output_path
+
+
+async def process_chapter_finish(chapter, operations, output_path, semaphore):
+    """Phase B: poll, download, convert. Semaphore limits concurrent downloads."""
     async with semaphore:
         i = chapter["order"]
-        title = chapter["title"]
-        print(f"[convert] Chapter {i + 1}: '{title}' ({len(chapter['text'])} chars)")
-
-        chapter_path = os.path.join(tmp_dir, f"chapter_{i:04d}.mp3")
         try:
-            await generate_chapter_audio(chapter["text"], chapter_path)
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, finish_synthesis_task, operations, output_path)
             blob_path = f"audiobooks/{JOB_ID}/chapter-{i:04d}.mp3"
-            url = await upload_to_blob(chapter_path, blob_path)
-            print(f"[convert] Chapter {i + 1} uploaded")
+            url = await upload_to_blob(output_path, blob_path)
+            print(f"[convert] Chapter {i+1} done and uploaded")
             return url
         except Exception as e:
-            print(f"[convert] Chapter {i + 1} FAILED: {e}", file=sys.stderr)
+            print(f"[convert] Chapter {i+1} FAILED: {e}", file=sys.stderr)
             return None
         finally:
-            try: os.remove(chapter_path)
+            try: os.remove(output_path)
             except: pass
 
 
@@ -524,10 +552,19 @@ async def main_async():
             mark_status("failed", error_message="No readable chapters found")
             return
 
-        # Generate TTS + upload all chapters concurrently (up to MAX_CONCURRENT at once)
-        semaphore = asyncio.Semaphore(MAX_CONCURRENT)
-        tasks = [process_chapter(ch, tmp, semaphore) for ch in chapters]
-        results = await asyncio.gather(*tasks)
+        # Phase A: Fire ALL synthesis tasks simultaneously (non-blocking API calls)
+        start_tasks = [process_chapter_start(ch, tmp) for ch in chapters]
+        started = await asyncio.gather(*start_tasks)
+        print(f"[convert] All {len(started)} synthesis tasks started — waiting for completion...")
+
+        # Phase B: Poll + download + convert in parallel, with limited concurrency on
+        # the download/convert side (these are CPU/network bound, not API-quota bound)
+        dl_semaphore = asyncio.Semaphore(8)  # up to 8 concurrent downloads
+        finish_tasks = [
+            process_chapter_finish(ch, ops, path, dl_semaphore)
+            for ch, ops, path in started
+        ]
+        results = await asyncio.gather(*finish_tasks)
 
         # results is ordered by chapter.order (same order as chapters list)
         # Filter out failures and build the URL list in chapter order
