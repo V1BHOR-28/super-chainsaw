@@ -619,7 +619,16 @@ async def synthesize_chapter(chapter, tmp_dir, semaphore):
                 except Exception:
                     pass
                 if attempt < MAX_CHAPTER_ATTEMPTS - 1:
-                    wait = 20 * (attempt + 1)
+                    # Error-specific backoff: different failure modes clear at
+                    # different speeds, so a flat 20s wastes time on fast-clearing
+                    # errors and is too aggressive on rate limits.
+                    err_str = str(e).lower()
+                    if "failed to write to gcs" in err_str:
+                        wait = 3 * (attempt + 1)    # 3s, 6s, 9s — GCS hiccups clear in seconds
+                    elif "resourceexhausted" in type(e).__name__.lower() or "429" in err_str:
+                        wait = 15 * (attempt + 1)   # 15s, 30s, 45s — rate limits need real backoff
+                    else:
+                        wait = 8 * (attempt + 1)    # 8s, 16s, 24s — other backend errors (500/503)
                     print(f"[convert] Chapter {i+1} attempt {attempt+1} failed ({type(e).__name__}: {e}) — submitting a FRESH operation in {wait}s", file=sys.stderr)
                     await asyncio.sleep(wait)
 
