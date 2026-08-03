@@ -7,9 +7,13 @@ parses it with ebooklib, generates TTS per chapter using Google Cloud
 Text-to-Speech Long Audio API (synthesize_long_audio), uploads each MP3
 to Vercel Blob concurrently, then calls the app's callback route.
 
-Uses a two-phase approach for maximum speed:
-  Phase A: Fire ALL synthesis tasks simultaneously (non-blocking API calls)
-  Phase B: Poll, download WAV, convert to MP3, upload to Blob in parallel
+Each chapter is a self-contained retryable pipeline: submit → wait →
+upload, and on backend failure (InternalServerError/ServiceUnavailable)
+the chapter is resubmitted as a FRESH operation rather than re-polling
+the dead one. ResourceExhausted (429) is still retried at the poll
+level because the operation is alive, just throttled. Concurrency is
+governed by a single semaphore so chapters process in parallel while
+each owns its full retry cycle independently.
 
 Google Cloud TTS produces high-quality narration via Neural2 voices.
 This is a paid GCP service — estimated cost is ~$0.000016 per character
@@ -415,26 +419,35 @@ def start_synthesis_task(text: str, gcs_output_uri: str, chapter_index: int) -> 
     return operations
 
 
-# ── TTS: Phase B — poll, download WAV, convert to MP3 ────────────────────────
-MAX_POLL_RETRIES = 5
-
-
+# ── TTS: poll, download WAV, convert to MP3 ─────────────────────────────────
 def _wait_for_operation(operation, seg_uri, timeout_s):
-    """Wait for a Long Audio operation with retry-on-transient-error backoff."""
-    delay = 15  # start with a real gap, not an aggressive retry
-    for attempt in range(MAX_POLL_RETRIES):
+    """
+    Wait for a single Long Audio operation.
+
+    Retries ResourceExhausted (429) — the operation is still valid, just
+    being throttled, so polling the same operation again later is correct.
+
+    Does NOT retry InternalServerError / ServiceUnavailable — those mean
+    the operation itself died on Google's backend, and re-polling it will
+    forever return the same terminal failure. The caller (synthesize_chapter)
+    must submit a FRESH operation instead, which it does one level up.
+    """
+    delay = 15
+    for attempt in range(3):  # only for genuine rate-limit backoff, not backend death
         try:
             operation.result(timeout=timeout_s)
             return
-        except (ResourceExhausted, InternalServerError, ServiceUnavailable) as e:
-            if attempt == MAX_POLL_RETRIES - 1:
-                raise RuntimeError(f"TTS operation still failing after {MAX_POLL_RETRIES} retries for {seg_uri}: {e}")
-            print(f"[tts] Transient error polling {seg_uri} ({type(e).__name__}), waiting {delay}s (attempt {attempt + 1}/{MAX_POLL_RETRIES})", file=sys.stderr)
+        except ResourceExhausted as e:
+            if attempt == 2:
+                raise
+            print(f"[tts] Rate-limited polling {seg_uri}, waiting {delay}s (attempt {attempt + 1}/3)", file=sys.stderr)
             time.sleep(delay)
             delay = min(delay * 2, 60)
+        except (InternalServerError, ServiceUnavailable) as e:
+            # Operation is dead — don't retry polling it, let the caller resubmit fresh.
+            raise
         except Exception as e:
-            # Genuinely non-retryable (bad input, permission error, etc.) — fail immediately
-            raise RuntimeError(f"TTS operation failed (non-retryable) for {seg_uri}: {e}")
+            raise RuntimeError(f"TTS operation failed for {seg_uri}: {e}")
 
 
 def finish_synthesis_task(
@@ -534,54 +547,57 @@ async def upload_to_blob(file_path: str, blob_pathname: str) -> str:
     return await loop.run_in_executor(None, _upload)
 
 
-# ── Two-phase per-chapter pipeline ────────────────────────────────────────────
-MAX_SUBMIT_RETRIES = 3
+# ── Retryable per-chapter pipeline ───────────────────────────────────────────
+MAX_CHAPTER_ATTEMPTS = 4
 
 
-async def process_chapter_start(chapter, tmp_dir):
-    """Phase A: start synthesis, return (chapter, operations, output_path)."""
-    i = chapter["order"]
-    title = chapter["title"]
-    output_path = os.path.join(tmp_dir, f"chapter_{i:04d}.mp3")
-    gcs_uri = f"gs://{GCS_BUCKET}/tts-tmp/{JOB_ID}/chapter-{i:04d}.wav"
-    print(f"[convert] Starting synthesis: Chapter {i+1} '{title}' ({len(chapter['text'])} chars)")
-    loop = asyncio.get_running_loop()
-    operations = await loop.run_in_executor(
-        None, start_synthesis_task, chapter["text"], gcs_uri, chapter["order"]
-    )
-    return chapter, operations, output_path
+async def synthesize_chapter(chapter, tmp_dir, semaphore):
+    """
+    Fully synthesize one chapter, retrying with a FRESH operation (not
+    re-polling a dead one) on backend failure.
 
+    Each attempt calls start_synthesis_task → finish_synthesis_task →
+    upload_to_blob. If any step throws — including the InternalServerError
+    / ServiceUnavailable cases that _wait_for_operation now lets propagate —
+    we discard the operation, wait with linear backoff, and submit a brand
+    new synthesize_long_audio() call. Reusing the same gcs_uri is fine: a
+    fresh synthesis simply overwrites the previous (failed/incomplete)
+    object at that path.
 
-async def process_chapter_start_with_retry(chapter, tmp_dir):
-    """Phase A with retry-on-failure for backend overload errors."""
-    for attempt in range(MAX_SUBMIT_RETRIES):
-        try:
-            return await process_chapter_start(chapter, tmp_dir)
-        except Exception as e:
-            if attempt == MAX_SUBMIT_RETRIES - 1:
-                raise
-            wait = 10 * (attempt + 1)
-            print(f"[convert] Chapter {chapter['order']+1} submission failed (attempt {attempt+1}/{MAX_SUBMIT_RETRIES}): {e} — retrying in {wait}s", file=sys.stderr)
-            await asyncio.sleep(wait)
-
-
-async def process_chapter_finish(chapter, operations, output_path, semaphore):
-    """Phase B: poll, download, convert. Semaphore limits concurrent downloads."""
+    Returns {"order": int, "title": str, "url": str | None}.
+    """
     async with semaphore:
         i = chapter["order"]
-        try:
-            loop = asyncio.get_running_loop()
-            await loop.run_in_executor(None, finish_synthesis_task, operations, output_path)
-            blob_path = f"audiobooks/{JOB_ID}/chapter-{i:04d}.mp3"
-            url = await upload_to_blob(output_path, blob_path)
-            print(f"[convert] Chapter {i+1} done and uploaded")
-            return url
-        except Exception as e:
-            print(f"[convert] Chapter {i+1} FAILED: {e}", file=sys.stderr)
-            return None
-        finally:
-            try: os.remove(output_path)
-            except: pass
+        title = chapter["title"]
+        output_path = os.path.join(tmp_dir, f"chapter_{i:04d}.mp3")
+        gcs_uri = f"gs://{GCS_BUCKET}/tts-tmp/{JOB_ID}/chapter-{i:04d}.wav"
+        loop = asyncio.get_running_loop()
+
+        last_err = None
+        for attempt in range(MAX_CHAPTER_ATTEMPTS):
+            try:
+                print(f"[convert] Chapter {i+1} '{title}': submitting (attempt {attempt+1}/{MAX_CHAPTER_ATTEMPTS})")
+                operations = await loop.run_in_executor(
+                    None, start_synthesis_task, chapter["text"], gcs_uri, i
+                )
+                await loop.run_in_executor(None, finish_synthesis_task, operations, output_path)
+                blob_path = f"audiobooks/{JOB_ID}/chapter-{i:04d}.mp3"
+                url = await upload_to_blob(output_path, blob_path)
+                print(f"[convert] Chapter {i+1} done and uploaded")
+                return {"order": i, "title": title, "url": url}
+            except Exception as e:
+                last_err = e
+                try:
+                    os.remove(output_path)
+                except Exception:
+                    pass
+                if attempt < MAX_CHAPTER_ATTEMPTS - 1:
+                    wait = 20 * (attempt + 1)
+                    print(f"[convert] Chapter {i+1} attempt {attempt+1} failed ({type(e).__name__}: {e}) — submitting a FRESH operation in {wait}s", file=sys.stderr)
+                    await asyncio.sleep(wait)
+
+        print(f"[convert] Chapter {i+1} FAILED permanently after {MAX_CHAPTER_ATTEMPTS} fresh attempts: {last_err}", file=sys.stderr)
+        return {"order": i, "title": title, "url": None}
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -607,39 +623,15 @@ async def main_async():
             mark_status("failed", error_message="No readable chapters found")
             return
 
-        # Phase A: submit synthesis tasks with limited concurrency + small gaps
-        # to avoid overwhelming Google's backend with a burst of submissions.
-        start_semaphore = asyncio.Semaphore(2)
-
-        async def process_chapter_start_throttled(chapter, tmp_dir):
-            async with start_semaphore:
-                result = await process_chapter_start_with_retry(chapter, tmp_dir)
-                await asyncio.sleep(1)  # small gap between submissions
-                return result
-
-        start_tasks = [process_chapter_start_throttled(ch, tmp) for ch in chapters]
-        started = await asyncio.gather(*start_tasks)
-        print(f"[convert] All {len(started)} synthesis tasks started — waiting for completion...")
-
-        # Phase B: Poll + download + convert in parallel, with limited concurrency on
-        # the download/convert side (these are CPU/network bound, not API-quota bound)
-        dl_semaphore = asyncio.Semaphore(2)  # keep well under the 100/min operation-status quota
-        finish_tasks = [
-            process_chapter_finish(ch, ops, path, dl_semaphore)
-            for ch, ops, path in started
-        ]
-        results = await asyncio.gather(*finish_tasks)
-
-        # Preserve real chapter order + title for every result, success or failure.
-        # This lets the app correctly label partial results instead of silently
-        # renumbering whatever succeeded as if it were sequential.
-        chapter_results = []
-        for chapter, url in zip(chapters, results):
-            chapter_results.append({
-                "order": chapter["order"],
-                "title": chapter["title"],
-                "url": url,  # None if this chapter failed
-            })
+        # Single semaphore governs total concurrent chapter pipelines.
+        # Each pipeline = submit + wait + retry-with-fresh-resubmission,
+        # so a value of 2 means at most 2 chapters are simultaneously in
+        # flight at any moment. If transient backend errors persist after
+        # this refactor, drop to Semaphore(1) (fully sequential) as the
+        # next lever — slower but eliminates concurrency-related failures.
+        semaphore = asyncio.Semaphore(2)
+        tasks = [synthesize_chapter(ch, tmp, semaphore) for ch in chapters]
+        chapter_results = await asyncio.gather(*tasks)
         chapter_results.sort(key=lambda c: c["order"])
 
         succeeded = [c for c in chapter_results if c["url"]]
@@ -648,7 +640,7 @@ async def main_async():
             return
 
         print(f"[convert] Done! {len(succeeded)}/{len(chapters)} chapters generated")
-        mark_status("complete", chapter_urls=chapter_results)
+        mark_status("complete", chapter_urls=chapter_results)  # full list incl. failures — callback only rows chapters with non-null url
 
 
 def main():
