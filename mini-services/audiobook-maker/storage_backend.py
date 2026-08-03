@@ -66,9 +66,35 @@ def _get_client():
 
 
 def upload_file(local_path, key):
-    """Carica local_path su S3 sotto `key`. boto3 usa multipart automatico
-    sopra ~8MB (resumabile, checksum). Solleva su errore."""
-    _get_client().upload_file(Filename=str(local_path), Bucket=_BUCKET, Key=_full_key(key))
+    """Carica local_path su S3/R2/Storj sotto `key`.
+
+    Storj's gateway doesn't support boto3's multipart upload_file (it fails
+    with MissingContentLength). We work around this by generating a presigned
+    PUT URL and uploading via requests — works across all S3-compatible
+    backends (AWS S3, Cloudflare R2, Storj, Backblaze B2).
+    """
+    full_key = _full_key(key)
+    file_size = os.path.getsize(str(local_path))
+    # Detect content type from extension
+    ext = os.path.splitext(str(local_path))[1].lower()
+    content_type = {
+        ".mp3": "audio/mpeg", ".m4b": "audio/mp4", ".json": "application/json",
+        ".jpg": "image/jpeg", ".jpeg": "image/jpeg", ".png": "image/png",
+    }.get(ext, "application/octet-stream")
+
+    put_url = _get_client().generate_presigned_url(
+        "put_object",
+        Params={"Bucket": _BUCKET, "Key": full_key, "ContentType": content_type},
+        ExpiresIn=3600,
+    )
+    with open(str(local_path), "rb") as f:
+        resp = requests.put(
+            put_url, data=f,
+            headers={"Content-Length": str(file_size), "Content-Type": content_type},
+            timeout=300,
+        )
+    if resp.status_code not in (200, 204):
+        raise RuntimeError(f"S3 upload failed: {resp.status_code} {resp.text[:200]}")
 
 
 def object_exists(key):
@@ -81,6 +107,18 @@ def object_exists(key):
         if code in ("404", "NoSuchKey", "NotFound"):
             return False
         raise
+
+
+def download_file(key, local_path):
+    """Download a file from S3/R2/Storj to local_path. Used to restore
+    _download_tokens.json on startup after an ephemeral storage wipe."""
+    presigned = presigned_get_url(key)
+    resp = requests.get(presigned, timeout=60, stream=True)
+    if resp.status_code != 200:
+        raise RuntimeError(f"S3 download failed: {resp.status_code}")
+    with open(str(local_path), "wb") as f:
+        for chunk in resp.iter_content(chunk_size=8192):
+            f.write(chunk)
 
 
 def object_size(key):

@@ -1707,24 +1707,15 @@ def _load_tokens():
     """
     global _download_tokens
     if not _TOKENS_FILE.exists():
-        # ARIA R2 fallback: download tokens from R2 if local file is missing
+        # ARIA R2/Storj fallback: download tokens from S3 if local file is missing
         try:
             import storage_backend
             if storage_backend.is_enabled() and storage_backend.object_exists("_download_tokens.json"):
-                import tempfile
-                tmp = tempfile.NamedTemporaryFile(mode="wb", suffix=".json", delete=False)
-                tmp.close()
-                storage_backend._get_client().download_file(
-                    storage_backend._BUCKET,
-                    storage_backend._full_key("_download_tokens.json"),
-                    tmp.name,
-                )
                 _TOKENS_FILE.parent.mkdir(parents=True, exist_ok=True)
-                import shutil
-                shutil.move(tmp.name, str(_TOKENS_FILE))
-                print(f"[tokens] Restored _download_tokens.json from R2/S3")
+                storage_backend.download_file("_download_tokens.json", str(_TOKENS_FILE))
+                print(f"[tokens] Restored _download_tokens.json from R2/S3/Storj")
         except Exception as e:
-            print(f"[tokens] R2/S3 restore failed (non-fatal): {e}")
+            print(f"[tokens] S3 restore failed (non-fatal): {e}")
         if not _TOKENS_FILE.exists():
             return
     try:
