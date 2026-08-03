@@ -13,6 +13,14 @@ on:
         required: false
         type: string
         default: ''
+      # Comma-separated list of chapter `order` values to convert.
+      # Empty/omitted = convert the whole book (legacy behavior).
+      # When populated, the Python script filters the parsed chapters to
+      # only those in this list, leaving the rest unconverted.
+      chapter_indices:
+        required: false
+        type: string
+        default: ''
 
 jobs:
   convert:
@@ -44,6 +52,7 @@ jobs:
           JOB_ID: ${{ inputs.job_id }}
           EPUB_URL: ${{ inputs.epub_url }}
           AUDIOBOOK_ID: ${{ inputs.audiobook_id }}
+          CHAPTER_INDICES: ${{ inputs.chapter_indices }}
           BLOB_READ_WRITE_TOKEN: ${{ secrets.BLOB_READ_WRITE_TOKEN }}
           APP_BASE_URL: ${{ secrets.APP_BASE_URL }}
           APP_CALLBACK_SECRET: ${{ secrets.APP_CALLBACK_SECRET }}

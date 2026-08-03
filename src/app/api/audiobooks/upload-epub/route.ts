@@ -9,10 +9,16 @@ import { put } from '@vercel/blob'
 /**
  * POST /api/audiobooks/upload-epub
  *
- * Accepts an .epub file upload, parses it to get the title/author,
- * uploads the raw EPUB to Vercel Blob (so GitHub Actions can download it),
- * creates the Audiobook row, and dispatches a GitHub Actions workflow
- * to convert the EPUB into an audiobook.
+ * Accepts an .epub file upload, parses it to extract title/author/chapters,
+ * uploads the raw EPUB to Vercel Blob (so GitHub Actions can download it
+ * later), and creates the Audiobook row + ALL AudiobookChapter rows upfront
+ * with status='pending' and cleanedText populated.
+ *
+ * The book lands in the library as READY_TO_SELECT — the user must open it
+ * and pick which chapters to convert via the /convert route. This avoids
+ * spending TTS quota on chapters the user may not want, and matches the
+ * audiobook-maker.com UX where users see a chapter list with checkboxes
+ * after upload.
  *
  * Body (multipart/form-data): { file: Blob (.epub) }
  */
@@ -41,7 +47,7 @@ export async function POST(req: NextRequest) {
     const arrayBuffer = await file.arrayBuffer()
     const buffer = Buffer.from(arrayBuffer)
 
-    // Parse the EPUB to get title/author/chapter count (for the DB row)
+    // Parse the EPUB to get title/author/chapters (chapters now persisted upfront)
     const { title, author, chapters, fullText } = await parseEpub(buffer)
 
     if (chapters.length === 0) {
@@ -79,8 +85,13 @@ export async function POST(req: NextRequest) {
 
     const documentId = `epub-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
 
-    // Create the Audiobook row (no chapters yet — the GitHub Actions job will
-    // create them via the callback route when TTS generation is complete)
+    // Create the Audiobook row + ALL AudiobookChapter rows upfront.
+    // Chapters land with status='pending' and cleanedText populated from the
+    // parser. The user selects which to convert via the /convert route; this
+    // route does NOT dispatch GitHub Actions anymore.
+    //
+    // READY_TO_SELECT tells the library UI to show a "Select chapters" affordance
+    // instead of a "Converting…" spinner.
     const audiobook = await db.audiobook.create({
       data: {
         userId,
@@ -88,69 +99,26 @@ export async function POST(req: NextRequest) {
         title,
         author,
         fullText,
-        status: 'PENDING',
+        status: 'READY_TO_SELECT',
         prepStatus: 'pending',
+        chapters: {
+          create: chapters.map((ch, idx) => ({
+            chapterOrder: ch.order ?? idx,
+            chapterIndex: ch.order ?? idx,
+            title: ch.title,
+            rawText: ch.rawText,
+            cleanedText: ch.rawText,
+            status: 'pending',
+          })),
+        },
       },
       select: { id: true, title: true },
     })
 
-    // Create an AudiobookJob and dispatch the GitHub Actions workflow
-    const job = await db.audiobookJob.create({
-      data: {
-        userId,
-        documentId,
-        audiobookId: audiobook.id,
-        epubUrl: epubBlobUrl,
-        status: 'queued',
-      },
-    })
-
-    // Dispatch the GitHub Actions workflow
-    const dispatchRes = await fetch(
-      `https://api.github.com/repos/V1BHOR-28/super-chainsaw/actions/workflows/audiobook-convert.yml/dispatches`,
-      {
-        method: 'POST',
-        headers: {
-          Authorization: `Bearer ${process.env.GITHUB_DISPATCH_TOKEN}`,
-          Accept: 'application/vnd.github+json',
-          'Content-Type': 'application/json',
-        },
-        body: JSON.stringify({
-          ref: 'main',
-          inputs: {
-            job_id: job.id,
-            epub_url: epubBlobUrl,
-            audiobook_id: audiobook.id,
-          },
-        }),
-      }
-    )
-
-    if (!dispatchRes.ok) {
-      const errText = await dispatchRes.text().catch(() => '')
-      console.error('[audiobooks.upload-epub] GitHub dispatch failed:', dispatchRes.status, errText)
-      await db.audiobookJob.update({
-        where: { id: job.id },
-        data: { status: 'failed', errorMessage: 'Could not start conversion job' },
-      })
-      await db.audiobook.update({
-        where: { id: audiobook.id },
-        data: { status: 'FAILED' },
-      })
-      return NextResponse.json({ error: 'Could not start audiobook conversion. Make sure GITHUB_DISPATCH_TOKEN is set.' }, { status: 502 })
-    }
-
-    // Update audiobook status to GENERATING
-    await db.audiobook.update({
-      where: { id: audiobook.id },
-      data: { status: 'GENERATING' },
-    })
-
-    console.log(`[audiobooks.upload-epub] Created audiobook "${title}" with ${chapters.length} chapters, dispatched job ${job.id}`)
+    console.log(`[audiobooks.upload-epub] Created audiobook "${title}" with ${chapters.length} chapters (READY_TO_SELECT — awaiting user chapter selection)`)
 
     return NextResponse.json({
       audiobookId: audiobook.id,
-      jobId: job.id,
       title: audiobook.title,
       chapterCount: chapters.length,
     })

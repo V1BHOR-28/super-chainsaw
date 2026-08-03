@@ -1,10 +1,11 @@
 "use client";
 
 import { useState, useEffect, useCallback } from "react";
-import { Play, Trash2, BookOpen, ArrowLeft } from "lucide-react";
+import { Play, Trash2, BookOpen, ArrowLeft, ListChecks } from "lucide-react";
 import { AmbientGlow, GradientText } from "./primitives";
 import { ScrollReveal } from "./scroll-reveal";
 import { BookCover } from "./book-cover";
+import { ChapterSelector } from "./chapter-selector";
 import { usePlayerStore, type CurrentAudiobook, type PlayerChapter } from "@/lib/player-store";
 import { useAriaStore } from "@/lib/store";
 import { formatDuration } from "@/lib/audiobooks";
@@ -21,7 +22,7 @@ interface AudiobookListItem {
   progressCharOffset: number;
   chapterCount: number;
   narratedCount: number;
-  status: string; // PENDING | GENERATING | COMPLETED | COMPLETED_WITH_ERRORS | FAILED
+  status: string; // READY_TO_SELECT | PENDING | GENERATING | COMPLETED | COMPLETED_WITH_ERRORS | FAILED
   prepProgress?: number;
   prepTotal?: number;
 }
@@ -38,6 +39,7 @@ export function LibraryView() {
   const [error, setError] = useState<string | null>(null);
   const [hoveredBook, setHoveredBook] = useState<string | null>(null);
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
+  const [selectorBook, setSelectorBook] = useState<AudiobookListItem | null>(null);
 
   const fetchAudiobooks = useCallback(async () => {
     setLoading(true);
@@ -68,7 +70,7 @@ export function LibraryView() {
   // just re-fetch the audiobook list every 5 seconds to pick up status changes.
   // The callback route updates the audiobook status when the GitHub Actions job completes.
   useEffect(() => {
-    const hasPending = audiobooks.some(b => b.status === 'PENDING' || b.status === 'GENERATING');
+    const hasPending = audiobooks.some(b => b.status === 'READY_TO_SELECT' || b.status === 'PENDING' || b.status === 'GENERATING');
     if (!hasPending) return;
 
     const poll = async () => {
@@ -89,6 +91,13 @@ export function LibraryView() {
   }, [audiobooks]);
 
   const handleOpen = async (book: AudiobookListItem) => {
+    // READY_TO_SELECT: book just uploaded, user needs to pick chapters first.
+    // Opens the chapter selector modal instead of the player.
+    if (book.status === 'READY_TO_SELECT') {
+      setSelectorBook(book);
+      return;
+    }
+
     // Don't allow opening the player until the audiobook is at least partially ready.
     // COMPLETED_WITH_ERRORS means some chapters failed but the rest are playable —
     // still allow playback, the failed chapters will use live-narration fallback.
@@ -110,6 +119,13 @@ export function LibraryView() {
       const chapters: PlayerChapter[] = data.chapters || [];
       if (chapters.length === 0) {
         toast({ title: "No readable text found", description: "This audiobook has no content" });
+        return;
+      }
+      // Only open the player if at least one chapter is ready; otherwise
+      // route to the chapter selector so the user can pick what to convert.
+      const readyCount = chapters.filter(c => c.status === 'ready').length;
+      if (readyCount === 0) {
+        setSelectorBook(book);
         return;
       }
       const current: CurrentAudiobook = {
@@ -248,6 +264,22 @@ export function LibraryView() {
                         </div>
                       )}
 
+                      {/* Add Chapters button for COMPLETED books (top-right, hover only) */}
+                      {(book.status === 'COMPLETED' || book.status === 'COMPLETED_WITH_ERRORS') && (
+                        <button
+                          onClick={(e) => { e.stopPropagation(); setSelectorBook(book); }}
+                          className={`absolute top-3 right-3 px-2 py-1 rounded-lg text-[10px] font-medium transition-all flex items-center gap-1 ${
+                            hoveredBook === book.id ? "opacity-100" : "opacity-0"
+                          } bg-black/50 hover:bg-black/70`}
+                          style={{ color: 'var(--aria-accent-glow)', border: '1px solid rgba(245,158,11,0.3)' }}
+                          title="Add more chapters"
+                          aria-label="Add more chapters"
+                        >
+                          <ListChecks size={11} />
+                          Chapters
+                        </button>
+                      )}
+
                       {/* delete button (top-left, hover only) */}
                       {confirmDelete === book.id ? (
                         <div className="absolute top-3 left-3 flex items-center gap-1">
@@ -286,7 +318,14 @@ export function LibraryView() {
                         {book.author ? `by ${book.author}` : 'Author unknown'}
                       </p>
                       <div className="flex items-center gap-2 mt-1">
-                        {book.status === 'COMPLETED' || book.status === 'COMPLETED_WITH_ERRORS' ? (
+                        {book.status === 'READY_TO_SELECT' ? (
+                          <>
+                            <p className="text-[11px] text-[var(--aria-accent-glow)] flex items-center gap-1">
+                              <ListChecks size={11} />
+                              {book.chapterCount} chapters · select to convert
+                            </p>
+                          </>
+                        ) : book.status === 'COMPLETED' || book.status === 'COMPLETED_WITH_ERRORS' ? (
                           <>
                             {book.status === 'COMPLETED_WITH_ERRORS' && (
                               <p className="text-[11px] text-[#f59e0b]" title="Some chapters failed to generate and will use live narration instead">
@@ -312,29 +351,7 @@ export function LibraryView() {
                             <button
                               onClick={(e) => {
                                 e.stopPropagation()
-                                // Reset status to trigger re-polling
-                                setAudiobooks(prev => prev.map(b =>
-                                  b.id === book.id ? { ...b, status: 'GENERATING' } : b
-                                ))
-                                // Call enqueue to re-dispatch the GitHub Actions job
-                                fetch(`/api/audiobooks/enqueue`, {
-                                  method: 'POST',
-                                  headers: { 'Content-Type': 'application/json' },
-                                  body: JSON.stringify({ audiobookId: book.id }),
-                                })
-                                  .then(res => res.json())
-                                  .then(data => {
-                                    if (data.error) {
-                                      setAudiobooks(prev => prev.map(b =>
-                                        b.id === book.id ? { ...b, status: 'FAILED' } : b
-                                      ))
-                                    }
-                                  })
-                                  .catch(() => {
-                                    setAudiobooks(prev => prev.map(b =>
-                                      b.id === book.id ? { ...b, status: 'FAILED' } : b
-                                    ))
-                                  })
+                                setSelectorBook(book)
                               }}
                               className="px-3 py-1.5 rounded-lg text-[12px] font-medium transition-all"
                               style={{
@@ -346,7 +363,7 @@ export function LibraryView() {
                                 minWidth: '60px',
                               }}
                             >
-                              Retry generation
+                              Select chapters
                             </button>
                           </div>
                         ) : (
@@ -366,6 +383,25 @@ export function LibraryView() {
           </div>
         )}
       </div>
+
+      {/* Chapter selector modal — opened for READY_TO_SELECT, FAILED, or via "Chapters" button on COMPLETED books */}
+      {selectorBook && (
+        <ChapterSelector
+          audiobookId={selectorBook.id}
+          title={selectorBook.title}
+          author={selectorBook.author}
+          accent={selectorBook.accent}
+          onClose={() => setSelectorBook(null)}
+          onConvertStarted={() => {
+            // Optimistically flip the audiobook status to GENERATING so the
+            // library card shows the spinner immediately.
+            setAudiobooks(prev => prev.map(b =>
+              b.id === selectorBook.id ? { ...b, status: 'GENERATING' } : b
+            ));
+          }}
+          showListenNow={selectorBook.status === 'COMPLETED' || selectorBook.status === 'COMPLETED_WITH_ERRORS'}
+        />
+      )}
     </div>
   );
 }

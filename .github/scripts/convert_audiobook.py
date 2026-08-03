@@ -63,6 +63,19 @@ BLOB_TOKEN       = os.environ["BLOB_READ_WRITE_TOKEN"]
 APP_BASE_URL     = os.environ["APP_BASE_URL"]
 CALLBACK_SECRET  = os.environ["APP_CALLBACK_SECRET"]
 
+# Optional: comma-separated list of chapter `order` values to convert.
+# Empty/missing = convert the whole book (legacy behavior). When populated,
+# the parser still parses all chapters (for correct spine/TOC reconciliation)
+# but only the listed ones are sent to TTS — the rest are dropped from the
+# results so the callback route never sees them and doesn't touch their rows.
+CHAPTER_INDICES_RAW = os.environ.get("CHAPTER_INDICES", "")
+CHAPTER_INDICES = set()
+if CHAPTER_INDICES_RAW.strip():
+    for tok in CHAPTER_INDICES_RAW.split(","):
+        tok = tok.strip()
+        if tok.lstrip("-").isdigit():
+            CHAPTER_INDICES.add(int(tok))
+
 GCS_BUCKET         = os.environ["GCS_AUDIOBOOK_BUCKET"]
 GCP_PROJECT        = os.environ["GCP_PROJECT_ID"]
 GCP_REGION         = "us-central1"   # Long Audio API endpoint region
@@ -726,6 +739,19 @@ async def main_async():
             mark_status("failed", error_message="No readable chapters found")
             return
 
+        # Filter to the user-selected chapters if CHAPTER_INDICES was provided.
+        # The parser runs on the full EPUB (so spine/TOC reconciliation works
+        # correctly — see tts_brain.epub_parser), but only the selected chapters
+        # are sent to TTS. This is the selective-conversion feature: users pick
+        # which chapters to convert from the UI, and this script honors that.
+        if CHAPTER_INDICES:
+            selected = [ch for ch in chapters if ch["order"] in CHAPTER_INDICES]
+            print(f"[convert] Selective conversion: {len(selected)}/{len(chapters)} chapters selected (indices: {sorted(CHAPTER_INDICES)})")
+            if not selected:
+                mark_status("failed", error_message=f"No chapters matched the selected indices {sorted(CHAPTER_INDICES)}")
+                return
+            chapters = selected
+
         # Semaphore governs concurrent SYNTHESIS (submit + poll only).
         # Download/convert/upload happens outside the semaphore, so this
         # limits Google API load, not total I/O. Google's project-wide limit
@@ -742,7 +768,7 @@ async def main_async():
             return
 
         print(f"[convert] Done! {len(succeeded)}/{len(chapters)} chapters generated")
-        mark_status("complete", chapter_urls=chapter_results)  # full list incl. failures — callback only rows chapters with non-null url
+        mark_status("complete", chapter_urls=chapter_results)  # full list incl. failures — callback uses job.chapterIndices to decide which rows to update
 
 
 def main():
