@@ -25,6 +25,7 @@ import {
   getDownloadUrl,
   sendHeartbeat,
   resetToChapters,
+  getJobChapters,
   deleteJob,
   isPollingStatus,
   type MyJob,
@@ -176,7 +177,7 @@ export function LibraryView() {
     }
   };
 
-  const handleOpen = (card: LibraryCard) => {
+  const handleOpen = async (card: LibraryCard) => {
     if (card.status === "done") {
       openPlayer({
         jobId: card.jobId,
@@ -188,9 +189,19 @@ export function LibraryView() {
       return;
     }
     if (card.status === "analyzed" || card.status === "optimized") {
-      // We don't have the analyzeResponse anymore — open the selector in
-      // "whole-book" mode (just voice + convert the whole book).
-      setWholeBookJob(card);
+      // Fetch the chapter list from the Flask app so the selector opens
+      // with per-chapter checkboxes (not the 'whole book' fallback).
+      setResetting(card.jobId);
+      try {
+        const chaptersResp = await getJobChapters(card.jobId);
+        setAnalyzeResponse(chaptersResp);
+      } catch (err) {
+        console.error("[library-view] could not load chapters", err);
+        // Fall back to whole-book mode if the chapter data is unavailable
+        setWholeBookJob(card);
+      } finally {
+        setResetting(null);
+      }
       return;
     }
     if (isPollingStatus(card.status)) {
@@ -208,20 +219,26 @@ export function LibraryView() {
   };
 
   // Reset a done job back to 'analyzed' so the user can pick different
-  // chapters + voice and re-generate. The Flask app keeps the parsed chapter
-  // data in memory for 18h, so this works as long as the job hasn't expired.
+  // chapters + voice and re-generate. Fetches the chapter list from the
+  // Flask app's in-memory state (job['info'].chapters) so the selector
+  // opens with per-chapter checkboxes, not the 'whole book' fallback.
   const handleConvertMore = async (card: LibraryCard) => {
     setResetting(card.jobId);
     try {
+      // Fetch the chapter list FIRST (before reset) — the reset endpoint
+      // doesn't return chapters, and we need them to open the selector.
+      const chaptersResp = await getJobChapters(card.jobId);
+      // Now reset the job so it can be re-generated
       await resetToChapters(card.jobId);
-      // Optimistically flip to 'analyzed' + open the selector in whole-book mode
+      // Optimistically flip to 'analyzed' + open the selector with the
+      // real chapter list (not whole-book mode)
       setCards((prev) =>
         prev.map((c) => (c.jobId === card.jobId ? { ...c, status: "analyzed" as JobStatus } : c)),
       );
-      setWholeBookJob({ ...card, status: "analyzed" });
+      setAnalyzeResponse(chaptersResp);
       toast({
         title: "Ready for new chapters",
-        description: "Pick which chapters to convert next.",
+        description: `${chaptersResp.total_chapters} chapters available — pick which to convert.`,
       });
     } catch (err) {
       console.error("[library-view] reset failed", err);

@@ -9652,6 +9652,51 @@ def api_delete_job(job_id):
     return jsonify({"status": "deleted"})
 
 
+@app.route("/api/job_chapters/<job_id>", methods=["GET"])
+def api_job_chapters(job_id):
+    """Return the chapter list for an existing analyzed/done/error job.
+
+    Used by the ARIA library UI when the user clicks 'More chapters' on a
+    done job — we need the chapter list to re-render the chapter selector
+    with per-chapter checkboxes instead of the 'whole book' fallback.
+
+    Returns the same chapter shape as /api/analyze so the frontend can
+    reuse the same component.
+    """
+    job, err, sc = _check_job_owner(job_id)
+    if err is not None:
+        if sc == 404:
+            return jsonify({"error": "Job not found. The book data may have expired — re-upload the EPUB."}), 404
+        return err, sc
+    info = job.get("info")
+    if not info or not info.chapters:
+        return jsonify({"error": "Book data no longer available. Please re-upload the file."}), 400
+
+    chapters = []
+    _total_secs = 0.0
+    for ch in info.chapters:
+        _secs = (ch.word_count or 0) / 2.5  # 150 wpm = 2.5 words/sec
+        _total_secs += _secs
+        chapters.append({
+            "index": ch.index, "title": ch.title,
+            "words": ch.word_count, "chars": ch.char_count,
+            "estimated_minutes": round(_secs / 60.0, 1),
+        })
+
+    return jsonify({
+        "job_id": job_id,
+        "title": info.title,
+        "author": info.author,
+        "language": info.language,
+        "total_chapters": len(info.chapters),
+        "total_words": info.total_words,
+        "total_chars": info.total_chars,
+        "estimated_minutes": round(_total_secs / 60.0, 1),
+        "chapters": chapters,
+        "has_cover": bool(job.get("cover_path") or job.get("cover_hires")),
+    })
+
+
 @app.route("/api/reset_to_chapters/<job_id>", methods=["POST"])
 def api_reset_to_chapters(job_id):
     """Reset a completed job back to 'analyzed' so the user can select different chapters."""

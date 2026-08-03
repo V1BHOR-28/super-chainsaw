@@ -250,6 +250,30 @@ export async function resetToChapters(jobId: string): Promise<void> {
 }
 
 /**
+ * Fetch the chapter list for an existing analyzed/done/error job.
+ *
+ * Used when the user clicks "More chapters" on a done job — we need the
+ * chapter list to re-render the chapter selector with per-chapter checkboxes
+ * instead of the "whole book" fallback. Returns the same shape as analyzeEpub
+ * (minus preview_text) so the frontend can reuse the same component.
+ *
+ * Returns the AnalyzeResponse. Throws if the job has expired (18h retention)
+ * — the caller should prompt the user to re-upload the EPUB.
+ */
+export async function getJobChapters(jobId: string): Promise<AnalyzeResponse> {
+  const res = await fetch(`${ABM_BASE}/job_chapters/${jobId}`, {
+    credentials: "include",
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(
+      (body && (body.error || body.message)) || `Chapter fetch failed (${res.status})`,
+    );
+  }
+  return (await res.json()) as AnalyzeResponse;
+}
+
+/**
  * Permanently delete a job and all its files. Works for any job status.
  * If the job is generating, it's cancelled first. Idempotent — deleting a
  * non-existent job returns success.
