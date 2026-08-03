@@ -6,6 +6,7 @@ import { BookOpen, Link2, FileText, X, Loader2, Trash2, BookMarked, Upload, File
 import { toast } from 'sonner'
 import { useAriaStore } from '@/lib/store'
 import { chunkText } from '@/lib/chunk-text'
+import { analyzeEpub } from '@/lib/abm-api'
 
 type FeedTab = 'text' | 'url' | 'file' | 'library' | 'quotes'
 type FeedState = 'idle' | 'reading' | 'refining' | 'embedding' | 'parsing' | 'indexing' | 'done'
@@ -170,68 +171,43 @@ export function FeedAriaModal() {
     setState('parsing')
 
     try {
-      const formData = new FormData()
-      formData.append('file', epubFile)
-
-      const res = await fetch('/api/audiobooks/upload-epub', {
-        method: 'POST',
-        body: formData,
-      })
-
-      const data = await res.json()
-
-      if (!res.ok) {
-        throw new Error(data.error || 'Failed to upload EPUB')
-      }
-
-      // If this EPUB was already uploaded, don't create a duplicate.
-      if (data.alreadyExists) {
-        toast.info(`"${data.title}" is already in your library — opening it now.`)
-        setFile(null)
-        setEpubUploading(false)
-        if (fileInputRef.current) fileInputRef.current.value = ''
-        setTimeout(() => {
-          setState('idle')
-          setFeedAriaOpen(false)
-          setActiveWorkspace('audiobooks')
-        }, 1500)
-        return
-      }
+      // Call the Flask audiobook-maker service via the /api/abm proxy.
+      // The Flask app parses the EPUB and returns the chapter list + metadata,
+      // stashing the parsed state in-memory keyed by the returned job_id.
+      const data = await analyzeEpub(epubFile)
 
       // Also store the full text as Knowledge for chat/RAG
-      // (so ARIA can still reference the book in conversations)
+      // (so ARIA can still reference the book in conversations).
+      // The analyze response doesn't include full chapter text (only word/char
+      // counts + titles), so we can't build RAG chunks from it here. RAG indexing
+      // is skipped for EPUBs in the new Flask-based architecture — the book is
+      // parsed on the Flask service, not in the Next.js process. If you need RAG
+      // over EPUB content, upload the book as text via the "Paste Text" tab instead.
       try {
-        // Fetch the audiobook's chapters to get the full text for RAG
-        const chaptersRes = await fetch(`/api/audiobooks/${data.audiobookId}/chapters`)
-        if (chaptersRes.ok) {
-          const chaptersData = await chaptersRes.json()
-          const fullText = (chaptersData.chapters || [])
-            .map((ch: any) => ch.cleanedText || ch.rawText || '')
-            .join('\n\n')
+        // Use the preview text from the analyze response as a minimal RAG entry
+        // so the book is at least searchable by title + preview.
+        const previewText = data.preview_text || ''
+        if (previewText.length > 100) {
+          const chunks = chunkText(`${data.title}\n\n${previewText}`)
+          const documentId = `epub-${data.job_id}`
+          const BATCH_SIZE = 10
 
-          if (fullText.length > 100) {
-            // Send to knowledge batch for RAG embedding
-            const chunks = chunkText(fullText)
-            const documentId = `epub-${data.audiobookId}`
-            const BATCH_SIZE = 10
-
-            for (let i = 0; i < chunks.length; i += BATCH_SIZE) {
-              const batchChunks = chunks.slice(i, i + BATCH_SIZE)
-              await fetch('/api/knowledge/batch', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({
-                  documentId,
-                  title: data.title,
-                  source: 'epub',
-                  chunks: batchChunks,
-                  batchIndex: Math.floor(i / BATCH_SIZE),
-                  totalBatches: Math.ceil(chunks.length / BATCH_SIZE),
-                  totalChunks: chunks.length,
-                  chunkOffset: i,
-                }),
-              })
-            }
+          for (let i = 0; i < chunks.length; i += BATCH_SIZE) {
+            const batchChunks = chunks.slice(i, i + BATCH_SIZE)
+            await fetch('/api/knowledge/batch', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({
+                documentId,
+                title: data.title,
+                source: 'epub',
+                chunks: batchChunks,
+                batchIndex: Math.floor(i / BATCH_SIZE),
+                totalBatches: Math.ceil(chunks.length / BATCH_SIZE),
+                totalChunks: chunks.length,
+                chunkOffset: i,
+              }),
+            })
           }
         }
       } catch (ragErr) {
@@ -240,14 +216,14 @@ export function FeedAriaModal() {
       }
 
       setState('done')
-      toast.success(`"${data.title}" uploaded with ${data.chapterCount} chapters! Opening audiobook library…`)
+      toast.success(`"${data.title}" parsed with ${data.total_chapters} chapters! Opening audiobook library…`)
 
       setFile(null)
       setEpubUploading(false)
       if (fileInputRef.current) fileInputRef.current.value = ''
 
       // Close the Feed ARIA modal and switch to the Audiobooks workspace
-      // so the user sees their book appear in the library with generation progress.
+      // so the user sees their book appear in the library, ready for chapter selection.
       setTimeout(() => {
         setState('idle')
         setFeedAriaOpen(false)
@@ -461,7 +437,7 @@ export function FeedAriaModal() {
                   onChange={(e) => {
                     const f = e.target.files?.[0]
                     if (f) {
-                      // EPUBs are constrained to 50MB by /api/audiobooks/upload-epub.
+                      // EPUBs are constrained to 50MB by the Flask /api/analyze endpoint.
                       // Reject them client-side to save a round-trip and a confusing 413.
                       // Only accept EPUB files
                       const isEpub = f.name.toLowerCase().endsWith('.epub') || f.type === 'application/epub+zip'
@@ -604,7 +580,7 @@ export function FeedAriaModal() {
                           {k.title}
                         </div>
                         <div className="text-[11px] mt-1" style={{ color: 'var(--aria-fg-dim)' }}>
-                          {k.source === 'url' ? '🌐 URL' : k.source === 'pdf' ? '📄 PDF' : k.source === 'file' ? '📎 File' : '📝 Text'} · {k.contentLength.toLocaleString()} chars{k.chunks > 1 ? ` · ${k.chunks} sections` : ''}
+                          {k.source === 'url' ? '🌐 URL' : k.source === 'pdf' ? '📄 PDF' : k.source === 'file' ? '📎 File' : '📝 Text'} · {k.contentLength.toLocaleString()} chars{k.chunks && k.chunks > 1 ? ` · ${k.chunks} sections` : ''}
                         </div>
                       </div>
                       <button
