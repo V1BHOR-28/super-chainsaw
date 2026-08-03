@@ -1,7 +1,16 @@
 # Render Blueprint — audiobook-maker Flask service
 # https://render.com/docs/blueprint-spec
 # One-click deploy: connect your GitHub repo, Render reads this file and
-# creates the web service + persistent disk automatically.
+# creates the web service automatically.
+#
+# FREE TIER NOTE: Render's free tier does NOT support persistent disks.
+# This blueprint uses ephemeral storage (/tmp/abm-data) — jobs and generated
+# audio are LOST on every deploy/restart/spin-down. This is fine for testing.
+#
+# To get persistent storage (jobs survive restarts), either:
+#   1. Upgrade to Starter plan ($7/mo) and uncomment the `disk:` section below, OR
+#   2. Configure S3-compatible storage (Cloudflare R2, Backblaze B2, etc.)
+#      by setting the ABM_S3_* env vars in the Render dashboard.
 
 services:
   - type: web
@@ -18,8 +27,11 @@ services:
     envVars:
       - key: ABM_PORT
         value: "5601"
+      # Ephemeral storage on free tier — jobs are lost on restart.
+      # For persistent storage, upgrade to Starter + add the disk section below,
+      # OR configure S3 storage via ABM_S3_* env vars.
       - key: ABM_DATA_DIR
-        value: /opt/data
+        value: /tmp/abm-data
       - key: PYTHON_VERSION
         value: "3.11.9"
       # Optional: enable Gemini TTS (premium voices) by setting these:
@@ -28,7 +40,7 @@ services:
       # - key: ABM_GEMINI_API_KEY
       #   sync: false  # set manually in Render dashboard
       # Optional: enable S3-compatible storage (Cloudflare R2, Backblaze B2, etc.)
-      # instead of local filesystem:
+      # instead of local filesystem — this works on free tier:
       # - key: ABM_S3_ENDPOINT
       #   sync: false
       # - key: ABM_S3_ACCESS_KEY
@@ -37,16 +49,17 @@ services:
       #   sync: false
       # - key: ABM_S3_BUCKET
       #   sync: false
-    # Persistent disk: jobs + generated audio survive deploys and restarts.
-    # 5 GB is the free tier minimum. Upgrade to 20 GB if you generate many books.
-    disk:
-      name: audiobook-data
-      mountPath: /opt/data
-      sizeGB: 5
     # Health check: the Flask app responds to GET / with a 200 (redirect to /en/)
     healthCheckPath: /
     autoDeploy: true
     # Free tier: 0.1 CPU, 512 MB RAM. Spins down after 15 min of inactivity
-    # (first request after spin-down takes ~30s to wake). Upgrade to Starter
-    # ($7/mo) for always-on + 2 GB RAM if you generate long books frequently.
+    # (first request after spin-down takes ~30s to wake).
     plan: free
+
+    # ── PERSISTENT DISK (requires Starter plan or higher, $7/mo) ──
+    # Uncomment this section AFTER upgrading to Starter. It gives you
+    # persistent storage so jobs + audio survive deploys and restarts.
+    # disk:
+    #   name: audiobook-data
+    #   mountPath: /opt/data
+    #   sizeGB: 5
