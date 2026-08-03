@@ -15,6 +15,8 @@ import {
   VolumeX,
   X,
   Clock,
+  ListChecks,
+  Check,
 } from "lucide-react";
 import { usePlayerStore } from "@/lib/player-store";
 import { useAriaStore } from "@/lib/store";
@@ -23,6 +25,7 @@ import { cn } from "@/lib/utils";
 import { AmbientGlow, StatusPill, AriaDivider } from "./primitives";
 import { NowPlayingBars } from "./waveform";
 import { BookCover } from "./book-cover";
+import { getJobChapters, type AnalyzeResponse } from "@/lib/abm-api";
 
 /**
  * PlayerView — plays the single MP3 produced by the audiobook-maker Flask
@@ -51,6 +54,36 @@ export function PlayerView() {
   const closePlayer = usePlayerStore((s) => s.closePlayer);
   const toggleSettings = usePlayerStore((s) => s.toggleSettings);
   const setActiveWorkspace = useAriaStore((s) => s.setActiveWorkspace);
+
+  // Chapter browser drawer state
+  const [showChapters, setShowChapters] = useState(false);
+  const [chaptersData, setChaptersData] = useState<AnalyzeResponse | null>(null);
+  const [chaptersLoading, setChaptersLoading] = useState(false);
+
+  // Lazy-load chapter data when the user opens the browser (or use what was
+  // passed in from the library via job.chapters / job.selectedChapters)
+  const loadChapters = async () => {
+    if (chaptersData || !job) return;
+    setChaptersLoading(true);
+    try {
+      const resp = await getJobChapters(job.jobId);
+      setChaptersData(resp);
+    } catch (err) {
+      console.error("[player-view] could not load chapters", err);
+    } finally {
+      setChaptersLoading(false);
+    }
+  };
+
+  const toggleChapters = () => {
+    const next = !showChapters;
+    setShowChapters(next);
+    if (next) {
+      // Close settings if open (mutually exclusive drawers)
+      if (usePlayerStore.getState().showSettings) toggleSettings();
+      loadChapters();
+    }
+  };
 
   if (!job) return null;
 
@@ -93,6 +126,7 @@ export function PlayerView() {
         </div>
 
         <div className="flex items-center gap-1">
+          <SidePanelToggle kind="chapters" active={showChapters} icon={ListChecks} label="Chapters" onClick={toggleChapters} />
           <SidePanelToggle kind="settings" active={showSettings} icon={Settings2} label="Settings" />
         </div>
       </header>
@@ -214,6 +248,15 @@ export function PlayerView() {
       </main>
 
       {/* ============ Side panels ============ */}
+      <SidePanel open={showChapters} side="right">
+        <ChaptersPanel
+          loading={chaptersLoading}
+          chaptersData={chaptersData}
+          passedChapters={job.chapters}
+          passedSelected={job.selectedChapters ?? chaptersData?.selected_chapters}
+          onClose={toggleChapters}
+        />
+      </SidePanel>
       <SidePanel open={showSettings} side="right">
         <SettingsPanel />
       </SidePanel>
@@ -228,18 +271,19 @@ function SidePanelToggle({
   active,
   icon: Icon,
   label,
+  onClick,
 }: {
-  kind: "settings";
+  kind: "settings" | "chapters";
   active: boolean;
   icon: React.ElementType;
   label: string;
+  onClick?: () => void;
 }) {
-  const toggle = usePlayerStore((s) =>
-    kind === "settings" ? s.toggleSettings : s.toggleSettings,
-  );
+  const toggleSettings = usePlayerStore((s) => s.toggleSettings);
+  const handleClick = onClick ?? toggleSettings;
   return (
     <button
-      onClick={toggle}
+      onClick={handleClick}
       className={cn(
         "w-9 h-9 sm:w-10 sm:h-10 rounded-full flex items-center justify-center transition-all border",
         active
@@ -635,6 +679,137 @@ function SettingsPanel() {
           </div>
         </div>
       </div>
+    </>
+  );
+}
+
+/* ============ Chapters browser panel ============ */
+
+function ChaptersPanel({
+  loading,
+  chaptersData,
+  passedChapters,
+  passedSelected,
+  onClose,
+}: {
+  loading: boolean;
+  chaptersData: AnalyzeResponse | null;
+  passedChapters?: { index: number; title: string; chars: number; estimated_minutes: number }[];
+  passedSelected?: number[];
+  onClose: () => void;
+}) {
+  // Prefer freshly-fetched data; fall back to what was passed from the library
+  const chapters = chaptersData?.chapters ?? passedChapters ?? [];
+  const selectedSet = new Set(
+    chaptersData?.selected_chapters ?? passedSelected ?? []
+  );
+  const totalChapters = chaptersData?.total_chapters ?? chapters.length;
+  const inAudioCount = selectedSet.size;
+
+  return (
+    <>
+      <PanelHeader
+        title="Chapters"
+        subtitle={
+          inAudioCount > 0
+            ? `${inAudioCount} of ${totalChapters} in this audiobook`
+            : `${totalChapters} chapters`
+        }
+        onClose={onClose}
+      />
+      <div className="flex-1 overflow-y-auto px-4 pb-4 space-y-1.5">
+        {loading ? (
+          <div className="text-center py-8 text-[var(--aria-fg-muted)] text-sm">
+            Loading chapters…
+          </div>
+        ) : chapters.length === 0 ? (
+          <div className="text-center py-8 text-[var(--aria-fg-muted)] text-sm">
+            Chapter data unavailable. The job may have expired (18h retention) —
+            re-upload the EPUB to browse chapters.
+          </div>
+        ) : (
+          chapters.map((ch, idx) => {
+            const inAudio = selectedSet.has(ch.index);
+            return (
+              <div
+                key={ch.index}
+                className="flex items-start gap-2.5 p-2.5 rounded-lg"
+                style={{
+                  background: inAudio ? "rgba(34,197,94,0.06)" : "transparent",
+                  border: inAudio
+                    ? "1px solid rgba(34,197,94,0.2)"
+                    : "1px solid transparent",
+                }}
+              >
+                <div className="flex items-center justify-center flex-shrink-0 mt-0.5">
+                  {inAudio ? (
+                    <div
+                      className="w-4 h-4 rounded flex items-center justify-center"
+                      style={{
+                        background: "rgba(34,197,94,0.2)",
+                        border: "1px solid rgba(34,197,94,0.4)",
+                      }}
+                    >
+                      <Check size={10} className="text-green-400" />
+                    </div>
+                  ) : (
+                    <span
+                      className="text-[10px] font-mono w-4 text-center"
+                      style={{ color: "var(--aria-fg-dim)" }}
+                    >
+                      {String(idx + 1).padStart(2, "0")}
+                    </span>
+                  )}
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2">
+                    {inAudio && (
+                      <span
+                        className="text-[10px] font-mono w-4 text-center"
+                        style={{ color: "var(--aria-fg-dim)" }}
+                      >
+                        {String(idx + 1).padStart(2, "0")}
+                      </span>
+                    )}
+                    <span
+                      className="text-sm font-medium truncate"
+                      style={{
+                        color: inAudio
+                          ? "var(--aria-fg)"
+                          : "var(--aria-fg-muted)",
+                      }}
+                    >
+                      {ch.title || `Chapter ${ch.index + 1}`}
+                    </span>
+                  </div>
+                  <div
+                    className="text-[10px] mt-0.5"
+                    style={{ color: "var(--aria-fg-dim)" }}
+                  >
+                    {(ch.chars || 0).toLocaleString()} chars · ~
+                    {ch.estimated_minutes || Math.max(1, Math.round((ch.chars || 0) / 750))} min
+                    {inAudio && (
+                      <span style={{ color: "#22c55e" }}> · in audiobook</span>
+                    )}
+                  </div>
+                </div>
+              </div>
+            );
+          })
+        )}
+      </div>
+      {inAudioCount > 0 && (
+        <div
+          className="px-4 py-3 border-t text-[11px]"
+          style={{
+            borderColor: "var(--aria-border)",
+            color: "var(--aria-fg-muted)",
+          }}
+        >
+          <span style={{ color: "#22c55e" }}>✓ {inAudioCount}</span> of {totalChapters} chapters are narrated in this audiobook.
+          Use &quot;More chapters&quot; in the library to narrate the rest.
+        </div>
+      )}
     </>
   );
 }

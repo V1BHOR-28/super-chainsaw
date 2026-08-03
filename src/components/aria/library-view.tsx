@@ -68,6 +68,9 @@ interface LibraryCard {
   progressCurrent?: number;
   progressTotal?: number;
   progressMessage?: string;
+  /** Which chapter indices are in the current audio. */
+  selectedChapters?: number[];
+  totalChapters?: number;
 }
 
 function toCard(job: MyJob): LibraryCard {
@@ -82,6 +85,8 @@ function toCard(job: MyJob): LibraryCard {
     progressCurrent: job.progress_current,
     progressTotal: job.progress_total,
     progressMessage: job.progress_message,
+    selectedChapters: job.selected_chapters,
+    totalChapters: job.total_chapters,
   };
 }
 
@@ -179,12 +184,23 @@ export function LibraryView() {
 
   const handleOpen = async (card: LibraryCard) => {
     if (card.status === "done") {
+      // Fetch the chapter list so the player can show a chapter browser
+      // with "which chapters are in this audiobook" badges. Non-blocking —
+      // if it fails, the player still works without the browser.
+      let chaptersResp: AnalyzeResponse | null = null;
+      try {
+        chaptersResp = await getJobChapters(card.jobId);
+      } catch (err) {
+        console.warn("[library-view] could not pre-fetch chapters for player", err);
+      }
       openPlayer({
         jobId: card.jobId,
         title: card.title,
         author: card.author ?? "",
         accent: card.accent,
         downloadUrl: getDownloadUrl(card.jobId),
+        selectedChapters: chaptersResp?.selected_chapters ?? card.selectedChapters,
+        chapters: chaptersResp?.chapters,
       });
       return;
     }
@@ -512,6 +528,12 @@ export function LibraryView() {
                             <p className="text-[11px] text-[var(--aria-accent-glow)]">
                               {card.outputFormat?.toUpperCase() || "MP3"} · tap to play
                             </p>
+                            {card.selectedChapters && card.selectedChapters.length > 0 && card.totalChapters ? (
+                              <span className="text-[11px] flex items-center gap-1" style={{ color: "#22c55e" }} title="Chapters already in this audiobook">
+                                <ListChecks size={10} />
+                                {card.selectedChapters.length}/{card.totalChapters} chapters
+                              </span>
+                            ) : null}
                             {resetting === card.jobId ? (
                               <span className="text-[11px] text-[var(--aria-fg-muted)] flex items-center gap-1">
                                 <Loader2 size={10} className="animate-spin" /> Resetting…

@@ -9,12 +9,27 @@ import { persist, createJSONStorage } from "zustand/middleware";
  * stream — there's no chapter list, no per-chapter narration state, and
  * no live-narration fallback.
  */
+export interface PlayerChapterInfo {
+  index: number;
+  title: string;
+  chars: number;
+  estimated_minutes: number;
+}
+
 export interface PlayingJob {
   jobId: string;
   title: string;
   author: string;
   accent: string;
   downloadUrl: string;
+  /** Chapters that are in the current audio (from the Flask job's
+   *  selected_chapters). When present + non-empty, the player shows a
+   *  chapter browser drawer. When absent, no chapter UI is shown. */
+  selectedChapters?: number[];
+  /** Full chapter metadata (title, chars, est minutes) for the chapter
+   *  browser. Fetched lazily by the player via getJobChapters when the
+   *  user opens the browser. */
+  chapters?: PlayerChapterInfo[];
 }
 
 type View = "landing" | "player";

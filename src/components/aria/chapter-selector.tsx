@@ -119,12 +119,21 @@ export function ChapterSelector({
 
   const chapters = analyzeResponse?.chapters ?? [];
 
-  // Default-select every chapter when the analyzeResponse first lands.
+  // Chapters that are already in the current audio (from the last generation).
+  // The user can still re-select them, but we badge them + warn on convert.
+  const alreadyConverted = useMemo(() => {
+    return new Set(analyzeResponse?.selected_chapters ?? []);
+  }, [analyzeResponse]);
+
+  // Default-select every chapter that is NOT already converted. If all chapters
+  // are already converted (re-converting), default-select none so the user
+  // explicitly picks what to re-generate.
   useEffect(() => {
     if (chapters.length > 0 && selected.size === 0) {
-      setSelected(new Set(chapters.map((c) => c.index)));
+      const newChapters = chapters.filter((c) => !alreadyConverted.has(c.index));
+      setSelected(new Set(newChapters.map((c) => c.index)));
     }
-  }, [chapters, selected]);
+  }, [chapters, alreadyConverted, selected]);
 
   // ── Selection helpers ──
   const toggle = (idx: number) => {
@@ -154,8 +163,9 @@ export function ChapterSelector({
     const estMinutes =
       selectedChapters.reduce((sum, c) => sum + (c.estimated_minutes || 0), 0) ||
       Math.max(1, Math.round(totalChars / 750));
-    return { count: selectedChapters.length, totalChars, estMinutes };
-  }, [chapters, selected]);
+    const reconvertCount = selectedChapters.filter((c) => alreadyConverted.has(c.index)).length;
+    return { count: selectedChapters.length, totalChars, estMinutes, reconvertCount };
+  }, [chapters, selected, alreadyConverted]);
 
   const handleConvert = async () => {
     // In chapter-list mode, require at least one chapter. In whole-book
@@ -163,6 +173,17 @@ export function ChapterSelector({
     if (analyzeResponse && selected.size === 0) {
       toast({ title: "No chapters selected", description: "Pick at least one chapter to convert." });
       return;
+    }
+    // Warn if re-converting chapters that are already in the audio — this
+    // overwrites the existing audio file (the Flask app generates a single
+    // merged MP3 per generation, so re-converting replaces the whole file).
+    if (estimate.reconvertCount > 0) {
+      const confirmed = window.confirm(
+        `${estimate.reconvertCount} chapter${estimate.reconvertCount === 1 ? " is" : "s are"} already in your audiobook. ` +
+        `Re-converting will REPLACE the existing audio file with a new one containing only the chapters you select now.\n\n` +
+        `Continue?`
+      );
+      if (!confirmed) return;
     }
     setConverting(true);
     try {
@@ -325,6 +346,11 @@ export function ChapterSelector({
                           <span className="text-sm font-medium truncate" style={{ color: "var(--aria-fg)" }}>
                             {ch.title || `Chapter ${ch.index + 1}`}
                           </span>
+                          {alreadyConverted.has(ch.index) && (
+                            <span className="text-[9px] px-1.5 py-0.5 rounded-full flex items-center gap-1 flex-shrink-0" style={{ background: "rgba(34,197,94,0.15)", color: "#22c55e" }} title="This chapter is already in your audiobook. Re-converting will replace the audio.">
+                              <Check size={8} /> In audiobook
+                            </span>
+                          )}
                         </div>
                         <div className="flex items-center gap-3 mt-0.5">
                           <span className="text-[10px]" style={{ color: "var(--aria-fg-dim)" }}>
@@ -354,8 +380,8 @@ export function ChapterSelector({
 
         {/* Footer — estimate + convert button */}
         <div className="p-5 sm:p-6 border-t" style={{ borderColor: "var(--aria-border)" }}>
-          <div className="flex items-center justify-between mb-4">
-            <div className="flex items-center gap-4 text-xs" style={{ color: "var(--aria-fg-muted)" }}>
+          <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
+            <div className="flex items-center gap-4 text-xs flex-wrap" style={{ color: "var(--aria-fg-muted)" }}>
               <span className="flex items-center gap-1.5">
                 <Sparkles size={12} style={{ color: "var(--aria-accent-glow)" }} />
                 {analyzeResponse
@@ -372,6 +398,12 @@ export function ChapterSelector({
                 <Check size={12} />
                 $0.00 — edge-tts is free
               </span>
+              {estimate.reconvertCount > 0 && (
+                <span className="flex items-center gap-1" style={{ color: "#f59e0b" }} title="Re-converting replaces the existing audio file">
+                  <RotateCcw size={11} />
+                  {estimate.reconvertCount} re-convert{estimate.reconvertCount === 1 ? "" : "s"}
+                </span>
+              )}
             </div>
           </div>
 
@@ -395,16 +427,22 @@ export function ChapterSelector({
                 background:
                   converting || (!!analyzeResponse && selected.size === 0)
                     ? "transparent"
-                    : "var(--aria-accent-glow)",
+                    : estimate.reconvertCount > 0
+                      ? "rgba(245,158,11,0.15)"
+                      : "var(--aria-accent-glow)",
                 border: `1px solid ${
                   converting || (!!analyzeResponse && selected.size === 0)
                     ? "var(--aria-border)"
-                    : "var(--aria-accent-glow)"
+                    : estimate.reconvertCount > 0
+                      ? "rgba(245,158,11,0.5)"
+                      : "var(--aria-accent-glow)"
                 }`,
                 color:
                   converting || (!!analyzeResponse && selected.size === 0)
                     ? "var(--aria-fg-muted)"
-                    : "var(--aria-bg)",
+                    : estimate.reconvertCount > 0
+                      ? "var(--aria-accent-glow)"
+                      : "var(--aria-bg)",
               }}
             >
               {converting ? (
@@ -415,9 +453,11 @@ export function ChapterSelector({
               ) : (
                 <>
                   <RotateCcw size={14} />
-                  {analyzeResponse
-                    ? `Convert ${selected.size > 0 ? `${selected.size} chapter${selected.size === 1 ? "" : "s"}` : "selected"}`
-                    : "Convert whole book"}
+                  {estimate.reconvertCount > 0
+                    ? `Re-convert ${selected.size > 0 ? `${selected.size} chapter${selected.size === 1 ? "" : "s"}` : "selected"}`
+                    : analyzeResponse
+                      ? `Convert ${selected.size > 0 ? `${selected.size} chapter${selected.size === 1 ? "" : "s"}` : "selected"}`
+                      : "Convert whole book"}
                 </>
               )}
             </button>

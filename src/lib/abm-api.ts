@@ -46,6 +46,10 @@ export interface AnalyzeResponse {
   optimized_chapters?: number[];
   max_text_chars?: number;
   max_gemini_text_chars?: number;
+  /** Which chapter indices are already in the current audio (from the last
+   *  generation). Present when fetching via getJobChapters() for an existing
+   *  job. Empty/missing = nothing converted yet (fresh upload) or whole book. */
+  selected_chapters?: number[];
 }
 
 export type JobStatus =
@@ -105,6 +109,11 @@ export interface MyJob {
   title: string;
   output_format?: string;
   created_at?: number;
+  /** Which chapter indices are in the current audio. Empty/missing = whole
+   *  book was converted OR nothing converted yet. Used by the library +
+   *  player UI to show which chapters are downloaded. */
+  selected_chapters?: number[];
+  total_chapters?: number;
   // Present when status === "generating"
   progress_current?: number;
   progress_total?: number;
@@ -118,7 +127,6 @@ export interface MyJob {
   author?: string;
   voice?: string;
   rate?: string;
-  total_chapters?: number;
   current_chapter_num?: number;
   admin_copy?: boolean;
 }

@@ -9694,6 +9694,10 @@ def api_job_chapters(job_id):
         "estimated_minutes": round(_total_secs / 60.0, 1),
         "chapters": chapters,
         "has_cover": bool(job.get("cover_path") or job.get("cover_hires")),
+        # Which chapter indices are already in the current audio (from the
+        # last generation). The frontend uses this to show an "Already in
+        # audiobook" badge on those chapters + warn on re-convert.
+        "selected_chapters": job.get("selected_chapters") or [],
     })
 
 
@@ -9914,6 +9918,11 @@ def api_my_jobs():
                       job.get("original_filename", "")),
             "output_format": job.get("output_format", ""),
             "created_at": job.get("start_time") or job.get("last_poll") or 0,
+            # Which chapter indices are in the current audio. Empty/missing =
+            # whole book was converted. Used by the ARIA UI to show which
+            # chapters are already downloaded + warn on re-convert.
+            "selected_chapters": job.get("selected_chapters") or [],
+            "total_chapters": len(info.chapters) if info else 0,
         }
         if _is_admin_pending:
             entry["admin_copy"] = True
