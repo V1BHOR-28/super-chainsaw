@@ -74,6 +74,23 @@ MAX_CHARS_PER_TASK = 700_000  # Long Audio API limit (~750K chars)
 _tts_client     = texttospeech.TextToSpeechLongAudioSynthesizeClient()
 _storage_client = storage.Client()
 
+# Log GCS bucket location at startup — if it's not us-central1, cross-region
+# writes to it from the TTS backend (us-central1) are slower and fail more often.
+# This is diagnostic: the user sees the location in the Actions log and can
+# relocate the bucket if needed.
+try:
+    _bucket_meta = _storage_client.bucket(GCS_BUCKET)
+    _bucket_meta.reload(requests_params={"timeout": 10})
+    _bucket_location = getattr(_bucket_meta, "location", "unknown") or "unknown"
+    if _bucket_location.lower() not in ("us-central1", "us", "unknown"):
+        print(f"[gcs] WARNING: bucket {GCS_BUCKET} is in {_bucket_location}, but TTS runs in us-central1. "
+              f"Cross-region writes are slower and fail more often. Consider relocating the bucket to us-central1.",
+              file=sys.stderr)
+    else:
+        print(f"[gcs] Bucket {GCS_BUCKET} location: {_bucket_location} (matches TTS region)")
+except Exception as _e:
+    print(f"[gcs] Could not check bucket location (non-fatal): {_e}", file=sys.stderr)
+
 
 # ── Callback ─────────────────────────────────────────────────────────────────
 def mark_status(status, chapter_urls=None, error_message=None):
@@ -413,7 +430,7 @@ def parse_epub_legacy(epub_path: str):
 def start_synthesis_task(text: str, gcs_output_uri: str, chapter_index: int) -> list:
     """
     Start a Long Audio synthesis task and return the operation handle immediately.
-    Does NOT wait for completion — call finish_synthesis_task() for that.
+    Does NOT wait for completion — call wait_for_all_operations() for that.
     Returns a list of (gcs_uri, operation) tuples (one per text segment).
     """
     segments = split_for_tts(force_break_long_sentences(text), max_len=MAX_CHARS_PER_TASK)
@@ -477,44 +494,78 @@ def _wait_for_operation(operation, seg_uri, timeout_s):
             raise RuntimeError(f"TTS operation failed for {seg_uri}: {e}")
 
 
-def finish_synthesis_task(
-    operations: list,        # from start_synthesis_task()
-    output_mp3_path: str,    # final local MP3 path
-    timeout_s: int = 600,    # 10 minutes — generous for long chapters
-) -> None:
+from concurrent.futures import ThreadPoolExecutor
+
+
+def wait_for_all_operations(operations: list, timeout_s: int = 600) -> None:
     """
-    Poll all operations to completion, download each WAV from GCS,
-    convert to MP3 with ffmpeg, clean up GCS objects.
+    Poll ALL operations to completion in PARALLEL.
+
+    For multi-segment chapters (text > 700K chars, split into multiple
+    synthesis operations), this polls all segments concurrently instead of
+    sequentially. A 3-segment chapter that took 6 min to poll serially now
+    takes ~2 min (the slowest segment's duration).
     """
-    mp3_parts = []
+    if not operations:
+        return
+    with ThreadPoolExecutor(max_workers=max(1, len(operations))) as executor:
+        futures = [
+            executor.submit(_wait_for_operation, op, seg_uri, timeout_s)
+            for seg_uri, op in operations
+        ]
+        for f in futures:
+            f.result()  # raises if any operation failed
 
-    for seg_uri, operation in operations:
-        _wait_for_operation(operation, seg_uri, timeout_s)
 
-        # Parse bucket + object path from gs:// URI
-        bucket_name = GCS_BUCKET
-        gcs_object_path = seg_uri.replace(f"gs://{bucket_name}/", "")
-        local_wav = output_mp3_path.replace(".mp3", f"-{len(mp3_parts):04d}.wav")
-        local_mp3 = output_mp3_path.replace(".mp3", f"-{len(mp3_parts):04d}.mp3")
+def download_and_convert_segment(seg_uri: str, output_mp3_path: str, part_index: int) -> str:
+    """
+    Download one WAV from GCS, convert to MP3 with ffmpeg, delete GCS object.
+    Returns the local MP3 path.
+    """
+    bucket_name = GCS_BUCKET
+    gcs_object_path = seg_uri.replace(f"gs://{bucket_name}/", "")
+    local_wav = output_mp3_path.replace(".mp3", f"-{part_index:04d}.wav")
+    local_mp3 = output_mp3_path.replace(".mp3", f"-{part_index:04d}.mp3")
 
-        bucket = _storage_client.bucket(bucket_name)
-        blob = bucket.blob(gcs_object_path)
-        blob.download_to_filename(local_wav)
-        blob.delete()
-        print(f"[tts] Downloaded + cleaned {gcs_object_path} ({os.path.getsize(local_wav)} bytes)")
+    bucket = _storage_client.bucket(bucket_name)
+    blob = bucket.blob(gcs_object_path)
+    blob.download_to_filename(local_wav)
+    blob.delete()
+    print(f"[tts] Downloaded + cleaned {gcs_object_path} ({os.path.getsize(local_wav)} bytes)")
 
-        # Convert WAV → MP3 with ffmpeg
-        result = subprocess.run(
-            ["ffmpeg", "-y", "-i", local_wav,
-             "-codec:a", "libmp3lame", "-qscale:a", "4", local_mp3],
-            capture_output=True, text=True, timeout=300,
-        )
-        try: os.remove(local_wav)
-        except: pass
-        if result.returncode != 0:
-            raise RuntimeError(f"ffmpeg failed: {result.stderr[:300]}")
-        mp3_parts.append(local_mp3)
+    # Convert WAV → MP3 with ffmpeg
+    result = subprocess.run(
+        ["ffmpeg", "-y", "-i", local_wav,
+         "-codec:a", "libmp3lame", "-qscale:a", "4", local_mp3],
+        capture_output=True, text=True, timeout=300,
+    )
+    try: os.remove(local_wav)
+    except: pass
+    if result.returncode != 0:
+        raise RuntimeError(f"ffmpeg failed: {result.stderr[:300]}")
+    return local_mp3
 
+
+def download_and_convert_all_segments(operations: list, output_mp3_path: str) -> list:
+    """
+    Download + convert ALL segments in PARALLEL.
+
+    For multi-segment chapters, this downloads and converts all segments
+    concurrently instead of sequentially. Download is network-bound, ffmpeg
+    is CPU-bound — running them in parallel overlaps I/O with compute.
+    """
+    if not operations:
+        raise RuntimeError("No audio produced")
+    with ThreadPoolExecutor(max_workers=max(1, len(operations))) as executor:
+        futures = [
+            executor.submit(download_and_convert_segment, seg_uri, output_mp3_path, idx)
+            for idx, (seg_uri, op) in enumerate(operations)
+        ]
+        return [f.result() for f in futures]
+
+
+def concat_mp3_parts(mp3_parts: list, output_mp3_path: str) -> None:
+    """Concatenate MP3 parts into final file (or rename if single)."""
     if not mp3_parts:
         raise RuntimeError("No audio produced")
 
@@ -583,23 +634,23 @@ async def synthesize_chapter(chapter, tmp_dir, semaphore):
     Fully synthesize one chapter, retrying with a FRESH operation (not
     re-polling a dead one) on backend failure.
 
-    Each attempt calls start_synthesis_task → finish_synthesis_task →
-    upload_to_blob. If any step throws — including the InternalServerError
-    / ServiceUnavailable cases that _wait_for_operation now lets propagate —
-    we discard the operation, wait with linear backoff, and submit a brand
-    new synthesize_long_audio() call. Reusing the same gcs_uri is fine: a
-    fresh synthesis simply overwrites the previous (failed/incomplete)
-    object at that path.
+    SEMAPHARE SCOPE: covers submit + poll only. Download/convert/upload
+    happens OUTSIDE the semaphore so the next chapter can start synthesizing
+    while this one is still downloading/converting/uploading. This overlaps
+    30-60s of post-synthesis I/O with the next chapter's 2-10min synthesis —
+    saving ~30-60s per chapter, ~17-35min on a 35-chapter book.
 
     Returns {"order": int, "title": str, "url": str | None}.
     """
-    async with semaphore:
-        i = chapter["order"]
-        title = chapter["title"]
-        output_path = os.path.join(tmp_dir, f"chapter_{i:04d}.mp3")
-        gcs_uri = f"gs://{GCS_BUCKET}/tts-tmp/{JOB_ID}/chapter-{i:04d}.wav"
-        loop = asyncio.get_running_loop()
+    i = chapter["order"]
+    title = chapter["title"]
+    output_path = os.path.join(tmp_dir, f"chapter_{i:04d}.mp3")
+    gcs_uri = f"gs://{GCS_BUCKET}/tts-tmp/{JOB_ID}/chapter-{i:04d}.wav"
+    loop = asyncio.get_running_loop()
+    operations = None
 
+    # ── SEMAPHORE-HELD: submit + poll (hits Google's TTS API) ──
+    async with semaphore:
         last_err = None
         for attempt in range(MAX_CHAPTER_ATTEMPTS):
             try:
@@ -607,17 +658,12 @@ async def synthesize_chapter(chapter, tmp_dir, semaphore):
                 operations = await loop.run_in_executor(
                     None, start_synthesis_task, chapter["text"], gcs_uri, i
                 )
-                await loop.run_in_executor(None, finish_synthesis_task, operations, output_path)
-                blob_path = f"audiobooks/{JOB_ID}/chapter-{i:04d}.mp3"
-                url = await upload_to_blob(output_path, blob_path)
-                print(f"[convert] Chapter {i+1} done and uploaded")
-                return {"order": i, "title": title, "url": url}
+                # Poll all operations in parallel (multi-segment chapters)
+                await loop.run_in_executor(None, wait_for_all_operations, operations, 600)
+                break  # success — exit retry loop, semaphore will release
             except Exception as e:
                 last_err = e
-                try:
-                    os.remove(output_path)
-                except Exception:
-                    pass
+                operations = None
                 if attempt < MAX_CHAPTER_ATTEMPTS - 1:
                     # Error-specific backoff: different failure modes clear at
                     # different speeds, so a flat 20s wastes time on fast-clearing
@@ -631,9 +677,30 @@ async def synthesize_chapter(chapter, tmp_dir, semaphore):
                         wait = 8 * (attempt + 1)    # 8s, 16s, 24s — other backend errors (500/503)
                     print(f"[convert] Chapter {i+1} attempt {attempt+1} failed ({type(e).__name__}: {e}) — submitting a FRESH operation in {wait}s", file=sys.stderr)
                     await asyncio.sleep(wait)
+        else:
+            # All attempts failed — semaphore releases on return
+            print(f"[convert] Chapter {i+1} FAILED permanently after {MAX_CHAPTER_ATTEMPTS} fresh attempts: {last_err}", file=sys.stderr)
+            return {"order": i, "title": title, "url": None}
 
-        print(f"[convert] Chapter {i+1} FAILED permanently after {MAX_CHAPTER_ATTEMPTS} fresh attempts: {last_err}", file=sys.stderr)
+    # ── SEMAPHORE RELEASED: download/convert/upload (no Google API calls) ──
+    # These are local/GCS/Blob operations — they don't hit Google's TTS API,
+    # so they don't need rate-limiting. Running them outside the semaphore lets
+    # the next chapter start synthesizing immediately.
+    try:
+        mp3_parts = await loop.run_in_executor(
+            None, download_and_convert_all_segments, operations, output_path
+        )
+        await loop.run_in_executor(None, concat_mp3_parts, mp3_parts, output_path)
+        blob_path = f"audiobooks/{JOB_ID}/chapter-{i:04d}.mp3"
+        url = await upload_to_blob(output_path, blob_path)
+        print(f"[convert] Chapter {i+1} done and uploaded")
+        return {"order": i, "title": title, "url": url}
+    except Exception as e:
+        print(f"[convert] Chapter {i+1} FAILED in post-synthesis (download/convert/upload): {e}", file=sys.stderr)
         return {"order": i, "title": title, "url": None}
+    finally:
+        try: os.remove(output_path)
+        except: pass
 
 
 # ── Main ──────────────────────────────────────────────────────────────────────
@@ -659,13 +726,12 @@ async def main_async():
             mark_status("failed", error_message="No readable chapters found")
             return
 
-        # Single semaphore governs total concurrent chapter pipelines.
-        # Each pipeline = submit + wait + retry-with-fresh-resubmission,
-        # so a value of 2 means at most 2 chapters are simultaneously in
-        # flight at any moment. If transient backend errors persist after
-        # this refactor, drop to Semaphore(1) (fully sequential) as the
-        # next lever — slower but eliminates concurrency-related failures.
-        semaphore = asyncio.Semaphore(2)
+        # Semaphore governs concurrent SYNTHESIS (submit + poll only).
+        # Download/convert/upload happens outside the semaphore, so this
+        # limits Google API load, not total I/O. Google's project-wide limit
+        # is 100 operation-status queries/min; Semaphore(3) = ~3-6 queries/min,
+        # well under quota. Each in-flight chapter polls ~1-2 times/min.
+        semaphore = asyncio.Semaphore(3)
         tasks = [synthesize_chapter(ch, tmp, semaphore) for ch in chapters]
         chapter_results = await asyncio.gather(*tasks)
         chapter_results.sort(key=lambda c: c["order"])
