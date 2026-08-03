@@ -5,38 +5,112 @@ import { db } from '@/lib/db'
 /**
  * POST /api/audiobooks/callback
  *
- * Called by the GitHub Actions workflow when the audiobook conversion
- * is complete (or failed). Authenticated via APP_CALLBACK_SECRET
- * shared between this route and the workflow's environment.
+ * Called by GitHub Actions workflows (parse + convert). Authenticated via
+ * APP_CALLBACK_SECRET shared between this route and the workflows.
  *
- * Body: { jobId, status, chapterUrls?, errorMessage? }
- * chapterUrls is: Array<{ order: number, title: string, url: string | null }>
+ * Two callback types:
  *
- * PARTIAL COMPLETION SUPPORT:
- * The job's `chapterIndices` field lists which chapter orders were in scope
- * for this job. We only update chapters whose order is in that list —
- * unselected chapters (and previously-converted ones from prior jobs) are
- * left untouched. This enables the selective-conversion flow: a user can
- * convert chapters 1-3, then later convert 4-6, and the first batch is
- * preserved.
+ * 1. PARSE callback (from audiobook-parse.yml / parse_epub.py):
+ *    Body: { jobId, status: 'parse_complete', bookTitle, bookAuthor, chapters: [{title, text, order}] }
+ *    or:   { jobId, status: 'parse_failed', errorMessage }
+ *    Creates AudiobookChapter rows and sets the audiobook to READY_TO_SELECT.
  *
- * If `chapterIndices` is empty (legacy behavior / whole-book conversion),
- * we fall back to the old delete-all-then-recreate behavior.
+ * 2. CONVERT callback (from audiobook-convert.yml / convert_audiobook.py):
+ *    Body: { jobId, status: 'complete', chapterUrls: [{order, title, url|null}] }
+ *    or:   { jobId, status: 'failed', errorMessage }
+ *    Updates chapter rows (only those in job.chapterIndices) and sets the
+ *    audiobook status based on aggregate chapter statuses.
  */
 export async function POST(req: NextRequest) {
-  // Verify the callback secret
   const authHeader = req.headers.get('authorization')
   if (authHeader !== `Bearer ${process.env.APP_CALLBACK_SECRET}`) {
     return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
   }
 
   try {
-    const { jobId, status, chapterUrls, errorMessage } = await req.json()
+    const body = await req.json()
+    const { jobId, status, errorMessage } = body
 
     const job = await db.audiobookJob.findUnique({ where: { id: jobId } })
     if (!job) {
       return NextResponse.json({ error: 'Job not found' }, { status: 404 })
     }
+
+    // ── PARSE callbacks ───────────────────────────────────────────────────
+    if (status === 'parse_complete') {
+      const { bookTitle, bookAuthor, chapters } = body as {
+        bookTitle?: string
+        bookAuthor?: string
+        chapters: Array<{ title: string; text: string; order: number }>
+      }
+
+      if (!chapters || chapters.length === 0) {
+        await db.audiobookJob.update({
+          where: { id: jobId },
+          data: { status: 'failed', errorMessage: 'No chapters found' },
+        })
+        if (job.audiobookId) {
+          await db.audiobook.update({
+            where: { id: job.audiobookId },
+            data: { status: 'FAILED' },
+          })
+        }
+        return NextResponse.json({ ok: true })
+      }
+
+      // Update the job status
+      await db.audiobookJob.update({
+        where: { id: jobId },
+        data: { status: 'complete' },
+      })
+
+      if (job.audiobookId) {
+        // Update the audiobook with the real title/author from the EPUB metadata
+        await db.audiobook.update({
+          where: { id: job.audiobookId },
+          data: {
+            title: bookTitle || 'Untitled',
+            author: bookAuthor || null,
+            status: 'READY_TO_SELECT',
+          },
+        })
+
+        // Create AudiobookChapter rows from the parsed chapters
+        await db.audiobookChapter.createMany({
+          data: chapters.map((ch) => ({
+            audiobookId: job.audiobookId!,
+            chapterOrder: ch.order,
+            chapterIndex: ch.order,
+            title: ch.title,
+            rawText: ch.text,
+            cleanedText: ch.text,
+            status: 'pending',
+          })),
+        })
+
+        console.log(`[audiobook.callback] Parse complete: audiobook ${job.audiobookId} "${bookTitle}" — ${chapters.length} chapters created, status → READY_TO_SELECT`)
+      }
+
+      return NextResponse.json({ ok: true })
+    }
+
+    if (status === 'parse_failed') {
+      await db.audiobookJob.update({
+        where: { id: jobId },
+        data: { status: 'failed', errorMessage: errorMessage ?? 'Parse failed' },
+      })
+      if (job.audiobookId) {
+        await db.audiobook.update({
+          where: { id: job.audiobookId },
+          data: { status: 'FAILED' },
+        })
+      }
+      console.error(`[audiobook.callback] Parse failed for job ${jobId}: ${errorMessage}`)
+      return NextResponse.json({ ok: true })
+    }
+
+    // ── CONVERT callbacks ─────────────────────────────────────────────────
+    const { chapterUrls } = body
 
     // Update the job status
     await db.audiobookJob.update({
@@ -48,15 +122,12 @@ export async function POST(req: NextRequest) {
       },
     })
 
-    // If the job is complete and linked to an audiobook, update the chapter rows
     if (status === 'complete' && job.audiobookId && chapterUrls?.length > 0) {
       type ChapterResult = { order: number; title: string; url: string | null }
       const results = chapterUrls as ChapterResult[]
 
       if (job.chapterIndices.length > 0) {
         // ── SELECTIVE CONVERSION: only update chapters in this job's scope ──
-        // Chapters not in `chapterIndices` are left untouched (they may be
-        // `pending` from a future selection, or `ready` from a prior job).
         const inScope = new Set(job.chapterIndices)
         const resultsInScope = results.filter(r => inScope.has(r.order))
 
@@ -70,11 +141,10 @@ export async function POST(req: NextRequest) {
               data: {
                 status: 'ready',
                 audioUrl: r.url,
-                title: r.title,  // sync any title refinements from the parser
+                title: r.title,
               },
             })
           } else {
-            // Chapter failed — mark it so the UI can show a retry affordance
             await db.audiobookChapter.updateMany({
               where: {
                 audiobookId: job.audiobookId,
@@ -85,7 +155,7 @@ export async function POST(req: NextRequest) {
           }
         }
 
-        // Determine aggregate audiobook status based on all chapters now
+        // Determine aggregate audiobook status
         const allChapters = await db.audiobookChapter.findMany({
           where: { audiobookId: job.audiobookId },
           select: { status: true },
@@ -107,16 +177,12 @@ export async function POST(req: NextRequest) {
           data: { status: newStatus },
         })
 
-        console.log(`[audiobook.callback] Job ${jobId} complete (selective): ${resultsInScope.filter(r => r.url).length}/${resultsInScope.length} chapters in scope. Audiobook ${job.audiobookId} → ${newStatus} (ready=${readyCount}, failed=${failedCount}, pending=${pendingCount})`)
+        console.log(`[audiobook.callback] Job ${jobId} complete (selective): ${resultsInScope.filter(r => r.url).length}/${resultsInScope.length} in scope. Audiobook → ${newStatus} (ready=${readyCount}, failed=${failedCount}, pending=${pendingCount})`)
       } else {
         // ── LEGACY: whole-book conversion (no chapterIndices) ──
-        // Delete existing chapters and recreate from the callback payload.
-        // This path is kept for backward compat with any jobs dispatched
-        // before the selective-conversion feature shipped.
         await db.audiobookChapter.deleteMany({
           where: { audiobookId: job.audiobookId },
         })
-
         const succeeded = results.filter(c => c.url)
         await db.audiobookChapter.createMany({
           data: succeeded.map((c) => ({
@@ -131,17 +197,15 @@ export async function POST(req: NextRequest) {
             audioUrl: c.url!,
           })),
         })
-
         const hasFailures = results.some(c => !c.url)
         await db.audiobook.update({
           where: { id: job.audiobookId },
           data: { status: hasFailures ? 'COMPLETED_WITH_ERRORS' : 'COMPLETED' },
         })
-
-        console.log(`[audiobook.callback] Job ${jobId} complete (legacy full-book): ${succeeded.length}/${results.length} chapters, audiobook ${job.audiobookId} → ${hasFailures ? 'COMPLETED_WITH_ERRORS' : 'COMPLETED'}`)
+        console.log(`[audiobook.callback] Job ${jobId} complete (legacy): ${succeeded.length}/${results.length} chapters`)
       }
     } else if (status === 'failed' && job.audiobookId) {
-      // Mark any chapters that were in-scope for this job as failed (not stuck at 'generating')
+      // Mark in-scope generating chapters as failed
       if (job.chapterIndices.length > 0) {
         await db.audiobookChapter.updateMany({
           where: {
@@ -152,22 +216,14 @@ export async function POST(req: NextRequest) {
           data: { status: 'failed' },
         })
       }
-      // Only flip the audiobook to FAILED if NO chapters are ready — otherwise
-      // keep it COMPLETED_WITH_ERRORS so the user can still play what's there
+      // Only flip to FAILED if no chapters are ready
       const readyCount = await db.audiobookChapter.count({
         where: { audiobookId: job.audiobookId, status: 'ready' },
       })
-      if (readyCount === 0) {
-        await db.audiobook.update({
-          where: { id: job.audiobookId },
-          data: { status: 'FAILED' },
-        })
-      } else {
-        await db.audiobook.update({
-          where: { id: job.audiobookId },
-          data: { status: 'COMPLETED_WITH_ERRORS' },
-        })
-      }
+      await db.audiobook.update({
+        where: { id: job.audiobookId },
+        data: { status: readyCount === 0 ? 'FAILED' : 'COMPLETED_WITH_ERRORS' },
+      })
       console.error(`[audiobook.callback] Job ${jobId} failed: ${errorMessage}`)
     }
 

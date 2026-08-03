@@ -1,0 +1,41 @@
+name: Parse Audiobook
+
+# Quick parse-only job: downloads the EPUB, runs the Python tts_brain parser,
+# calls back with the chapter list. This ensures the chapter list the user
+# sees in the selector is identical to what the conversion script will produce.
+# Runs in ~20-30 seconds (no TTS, no GCS, no ffmpeg).
+
+on:
+  workflow_dispatch:
+    inputs:
+      job_id:
+        required: true
+        type: string
+      epub_url:
+        required: true
+        type: string
+
+jobs:
+  parse:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Install Python dependencies
+        run: |
+          pip install ebooklib beautifulsoup4 lxml requests
+
+      - name: Run parser
+        env:
+          JOB_ID: ${{ inputs.job_id }}
+          EPUB_URL: ${{ inputs.epub_url }}
+          APP_BASE_URL: ${{ secrets.APP_BASE_URL }}
+          APP_CALLBACK_SECRET: ${{ secrets.APP_CALLBACK_SECRET }}
+        run: python .github/scripts/parse_epub.py

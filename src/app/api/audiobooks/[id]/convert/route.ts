@@ -32,10 +32,15 @@ export async function POST(
     const userId = await getAuthenticatedUserId()
     if (!userId) return NextResponse.json({ error: 'Unauthorized' }, { status: 401 })
 
-    const { chapterIds } = await req.json()
+    const { chapterIds, voice } = await req.json()
     if (!Array.isArray(chapterIds) || chapterIds.length === 0) {
       return NextResponse.json({ error: 'chapterIds must be a non-empty array' }, { status: 400 })
     }
+
+    // Validate voice if provided (default to en-US-Neural2-F)
+    const selectedVoice = typeof voice === 'string' && voice.startsWith('en-US-Neural2-')
+      ? voice
+      : 'en-US-Neural2-F'
 
     // Verify the audiobook belongs to the user
     const audiobook = await db.audiobook.findFirst({
@@ -44,6 +49,28 @@ export async function POST(
     })
     if (!audiobook) {
       return NextResponse.json({ error: 'Audiobook not found' }, { status: 404 })
+    }
+
+    // ── CONCURRENT JOB GUARD ──
+    // Reject if a conversion job is already running for this audiobook.
+    // This prevents the "previous command runs with the new one" bug where
+    // two GH Actions workflows run in parallel and their callbacks collide.
+    // The user must wait for the current job to finish before starting a new one.
+    const activeJob = await db.audiobookJob.findFirst({
+      where: {
+        audiobookId,
+        status: { in: ['queued', 'running'] },
+      },
+      select: { id: true, status: true, chapterIndices: true },
+    })
+    if (activeJob) {
+      const scope = activeJob.chapterIndices.length > 0
+        ? `${activeJob.chapterIndices.length} chapters`
+        : 'whole book'
+      return NextResponse.json({
+        error: `A conversion job is already running for this audiobook (${scope}). Wait for it to finish before starting another.`,
+        activeJobId: activeJob.id,
+      }, { status: 409 })
     }
 
     // Fetch the requested chapters, validating they belong to this audiobook
@@ -59,12 +86,14 @@ export async function POST(
       return NextResponse.json({ error: 'No matching chapters found for this audiobook' }, { status: 404 })
     }
 
-    // Filter out already-ready chapters (no point re-converting)
-    const toConvert = chapters.filter(c => c.status !== 'ready')
+    // Filter out chapters that are already ready OR currently generating.
+    // Ready chapters don't need reconversion; generating chapters are already
+    // in flight (shouldn't happen due to the guard above, but double-check).
+    const toConvert = chapters.filter(c => c.status !== 'ready' && c.status !== 'generating')
     if (toConvert.length === 0) {
       return NextResponse.json({
         ok: true,
-        message: 'All selected chapters are already ready — nothing to convert',
+        message: 'All selected chapters are already ready or generating — nothing to convert',
         jobId: null,
       })
     }
@@ -127,6 +156,7 @@ export async function POST(
             epub_url: epubUrl,
             audiobook_id: audiobookId,
             chapter_indices: chapterOrders.join(','),
+            voice: selectedVoice,
           },
         }),
       }

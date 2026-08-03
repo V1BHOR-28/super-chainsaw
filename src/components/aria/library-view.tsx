@@ -22,7 +22,7 @@ interface AudiobookListItem {
   progressCharOffset: number;
   chapterCount: number;
   narratedCount: number;
-  status: string; // READY_TO_SELECT | PENDING | GENERATING | COMPLETED | COMPLETED_WITH_ERRORS | FAILED
+  status: string; // PARSING | READY_TO_SELECT | PENDING | GENERATING | COMPLETED | COMPLETED_WITH_ERRORS | FAILED
   prepProgress?: number;
   prepTotal?: number;
 }
@@ -70,7 +70,7 @@ export function LibraryView() {
   // just re-fetch the audiobook list every 5 seconds to pick up status changes.
   // The callback route updates the audiobook status when the GitHub Actions job completes.
   useEffect(() => {
-    const hasPending = audiobooks.some(b => b.status === 'READY_TO_SELECT' || b.status === 'PENDING' || b.status === 'GENERATING');
+    const hasPending = audiobooks.some(b => b.status === 'PARSING' || b.status === 'READY_TO_SELECT' || b.status === 'PENDING' || b.status === 'GENERATING');
     if (!hasPending) return;
 
     const poll = async () => {
@@ -91,7 +91,14 @@ export function LibraryView() {
   }, [audiobooks]);
 
   const handleOpen = async (book: AudiobookListItem) => {
-    // READY_TO_SELECT: book just uploaded, user needs to pick chapters first.
+    // PARSING: book is still being parsed by the Python tts_brain parser on
+    // GitHub Actions. Don't open anything — show a toast.
+    if (book.status === 'PARSING') {
+      toast({ title: "Parsing chapters…", description: "This usually takes ~20-30 seconds. Check back shortly." });
+      return;
+    }
+
+    // READY_TO_SELECT: book parsed, user needs to pick chapters first.
     // Opens the chapter selector modal instead of the player.
     if (book.status === 'READY_TO_SELECT') {
       setSelectorBook(book);
@@ -318,7 +325,12 @@ export function LibraryView() {
                         {book.author ? `by ${book.author}` : 'Author unknown'}
                       </p>
                       <div className="flex items-center gap-2 mt-1">
-                        {book.status === 'READY_TO_SELECT' ? (
+                        {book.status === 'PARSING' ? (
+                          <p className="text-[11px] text-[var(--aria-accent-glow)] flex items-center gap-1">
+                            <span className="status-dot" />
+                            Parsing chapters on GitHub Actions…
+                          </p>
+                        ) : book.status === 'READY_TO_SELECT' ? (
                           <>
                             <p className="text-[11px] text-[var(--aria-accent-glow)] flex items-center gap-1">
                               <ListChecks size={11} />

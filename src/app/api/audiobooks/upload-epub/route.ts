@@ -3,22 +3,22 @@ export const runtime = 'nodejs'
 export const maxDuration = 60
 import { db } from '@/lib/db'
 import { getAuthenticatedUserId } from '@/lib/user'
-import { parseEpub } from '@/lib/epub-parser'
 import { put } from '@vercel/blob'
 
 /**
  * POST /api/audiobooks/upload-epub
  *
- * Accepts an .epub file upload, parses it to extract title/author/chapters,
- * uploads the raw EPUB to Vercel Blob (so GitHub Actions can download it
- * later), and creates the Audiobook row + ALL AudiobookChapter rows upfront
- * with status='pending' and cleanedText populated.
+ * Accepts an .epub file upload, uploads the raw EPUB to Vercel Blob,
+ * creates the Audiobook row, and dispatches a GitHub Actions PARSE job
+ * (not a conversion job). The parse job runs the Python tts_brain parser
+ * (the same parser used for conversion) and calls back with the chapter list.
  *
- * The book lands in the library as READY_TO_SELECT — the user must open it
- * and pick which chapters to convert via the /convert route. This avoids
- * spending TTS quota on chapters the user may not want, and matches the
- * audiobook-maker.com UX where users see a chapter list with checkboxes
- * after upload.
+ * This ensures the chapter list the user sees in the selector is IDENTICAL
+ * to what the conversion script will produce — no TS/Python parser mismatch.
+ *
+ * The book lands as `PARSING`. When the parse callback arrives (~20-30s),
+ * the callback route creates AudiobookChapter rows and sets the book to
+ * `READY_TO_SELECT`.
  *
  * Body (multipart/form-data): { file: Blob (.epub) }
  */
@@ -43,84 +43,109 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: `EPUB too large (${(file.size / 1024 / 1024).toFixed(1)}MB). Maximum is 50MB.` }, { status: 413 })
     }
 
-    // Read the file once — used for both parsing and Blob upload
+    // Read the file for Blob upload
     const arrayBuffer = await file.arrayBuffer()
     const buffer = Buffer.from(arrayBuffer)
 
-    // Parse the EPUB to get title/author/chapters (chapters now persisted upfront)
-    const { title, author, chapters, fullText } = await parseEpub(buffer)
+    // Extract title from filename for dedup check (the Python parser will
+    // give us the real title, but we need something for dedup now)
+    const dedupTitle = fileName.replace(/\.epub$/i, '').replace(/[_-]/g, ' ').trim()
 
-    if (chapters.length === 0) {
-      return NextResponse.json({ error: 'No readable chapters found in this EPUB.' }, { status: 400 })
-    }
-
-    // Dedup: check if an audiobook with the same title already exists
+    // Dedup: check if an audiobook with the same filename-based title exists
     const existing = await db.audiobook.findFirst({
-      where: { userId, title },
+      where: { userId, title: dedupTitle },
       select: { id: true, status: true },
     })
     if (existing) {
       return NextResponse.json({
         audiobookId: existing.id,
-        title,
+        title: dedupTitle,
         chapterCount: 0,
         alreadyExists: true,
       })
     }
 
-    // Upload the raw EPUB file to Vercel Blob so GitHub Actions can download it
-    let epubBlobUrl = ''
-    if (process.env.BLOB_READ_WRITE_TOKEN) {
-      const epubBlob = await put(
-        `epubs/${Date.now()}-${fileName.replace(/[^a-zA-Z0-9.-]/g, '_')}`,
-        buffer,
-        { access: 'public', contentType: 'application/epub+zip', addRandomSuffix: false }
-      )
-      epubBlobUrl = epubBlob.url
-      console.log(`[audiobooks.upload-epub] EPUB uploaded to Blob: ${epubBlobUrl}`)
-    } else {
-      console.warn('[audiobooks.upload-epub] BLOB_READ_WRITE_TOKEN not set — cannot upload EPUB for GitHub Actions')
+    // Upload the raw EPUB file to Vercel Blob
+    if (!process.env.BLOB_READ_WRITE_TOKEN) {
+      console.warn('[audiobooks.upload-epub] BLOB_READ_WRITE_TOKEN not set')
       return NextResponse.json({ error: 'Audio storage is not configured. Set BLOB_READ_WRITE_TOKEN.' }, { status: 500 })
     }
+    const epubBlob = await put(
+      `epubs/${Date.now()}-${fileName.replace(/[^a-zA-Z0-9.-]/g, '_')}`,
+      buffer,
+      { access: 'public', contentType: 'application/epub+zip', addRandomSuffix: false }
+    )
+    const epubBlobUrl = epubBlob.url
+    console.log(`[audiobooks.upload-epub] EPUB uploaded to Blob: ${epubBlobUrl}`)
 
     const documentId = `epub-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
 
-    // Create the Audiobook row + ALL AudiobookChapter rows upfront.
-    // Chapters land with status='pending' and cleanedText populated from the
-    // parser. The user selects which to convert via the /convert route; this
-    // route does NOT dispatch GitHub Actions anymore.
-    //
-    // READY_TO_SELECT tells the library UI to show a "Select chapters" affordance
-    // instead of a "Converting…" spinner.
+    // Create the Audiobook row with status PARSING — the parse callback will
+    // update the title/author from the EPUB metadata and create chapter rows.
     const audiobook = await db.audiobook.create({
       data: {
         userId,
         documentId,
-        title,
-        author,
-        fullText,
-        status: 'READY_TO_SELECT',
+        title: dedupTitle, // temporary — parse callback updates with real title
+        status: 'PARSING',
         prepStatus: 'pending',
-        chapters: {
-          create: chapters.map((ch, idx) => ({
-            chapterOrder: ch.order ?? idx,
-            chapterIndex: ch.order ?? idx,
-            title: ch.title,
-            rawText: ch.rawText,
-            cleanedText: ch.rawText,
-            status: 'pending',
-          })),
-        },
       },
       select: { id: true, title: true },
     })
 
-    console.log(`[audiobooks.upload-epub] Created audiobook "${title}" with ${chapters.length} chapters (READY_TO_SELECT — awaiting user chapter selection)`)
+    // Create a job row for the parse step
+    const job = await db.audiobookJob.create({
+      data: {
+        userId,
+        documentId,
+        audiobookId: audiobook.id,
+        epubUrl: epubBlobUrl,
+        status: 'queued',
+      },
+    })
+
+    // Dispatch the PARSE workflow (not the conversion workflow)
+    const dispatchRes = await fetch(
+      `https://api.github.com/repos/V1BHOR-28/super-chainsaw/actions/workflows/audiobook-parse.yml/dispatches`,
+      {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${process.env.GITHUB_DISPATCH_TOKEN}`,
+          Accept: 'application/vnd.github+json',
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          ref: 'main',
+          inputs: {
+            job_id: job.id,
+            epub_url: epubBlobUrl,
+          },
+        }),
+      }
+    )
+
+    if (!dispatchRes.ok) {
+      const errText = await dispatchRes.text().catch(() => '')
+      console.error('[audiobooks.upload-epub] GitHub dispatch failed:', dispatchRes.status, errText)
+      await db.audiobookJob.update({
+        where: { id: job.id },
+        data: { status: 'failed', errorMessage: 'Could not start parse job' },
+      })
+      await db.audiobook.update({
+        where: { id: audiobook.id },
+        data: { status: 'FAILED' },
+      })
+      return NextResponse.json({ error: 'Could not start parsing. Make sure GITHUB_DISPATCH_TOKEN is set.' }, { status: 502 })
+    }
+
+    console.log(`[audiobooks.upload-epub] Dispatched parse job ${job.id} for audiobook ${audiobook.id}`)
 
     return NextResponse.json({
       audiobookId: audiobook.id,
+      jobId: job.id,
       title: audiobook.title,
-      chapterCount: chapters.length,
+      chapterCount: 0, // chapters not yet available — parse job will create them
+      parsing: true,
     })
   } catch (err) {
     console.error('[audiobooks.upload-epub]', err)

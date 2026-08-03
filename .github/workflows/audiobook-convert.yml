@@ -21,6 +21,13 @@ on:
         required: false
         type: string
         default: ''
+      # Google Cloud TTS Neural2 voice to use. Must start with 'en-US-Neural2-'.
+      # Options: A (female), B (male), C (male), D (male), E (female),
+      # F (female, default), G (female), H (female), I (male).
+      voice:
+        required: false
+        type: string
+        default: 'en-US-Neural2-F'
 
 jobs:
   convert:
@@ -53,6 +60,7 @@ jobs:
           EPUB_URL: ${{ inputs.epub_url }}
           AUDIOBOOK_ID: ${{ inputs.audiobook_id }}
           CHAPTER_INDICES: ${{ inputs.chapter_indices }}
+          TTS_VOICE: ${{ inputs.voice }}
           BLOB_READ_WRITE_TOKEN: ${{ secrets.BLOB_READ_WRITE_TOKEN }}
           APP_BASE_URL: ${{ secrets.APP_BASE_URL }}
           APP_CALLBACK_SECRET: ${{ secrets.APP_CALLBACK_SECRET }}

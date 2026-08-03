@@ -18,6 +18,20 @@ interface ChapterSelectorProps {
   showListenNow?: boolean;
 }
 
+// Available Google Cloud TTS Neural2 voices for en-US.
+// All are standard-tier (no TPU overload issues like Journey voices).
+const NEURAL2_VOICES = [
+  { id: 'en-US-Neural2-A', label: 'A — Female (warm)', gender: 'female' },
+  { id: 'en-US-Neural2-B', label: 'B — Male (deep)', gender: 'male' },
+  { id: 'en-US-Neural2-C', label: 'C — Male (narrative)', gender: 'male' },
+  { id: 'en-US-Neural2-D', label: 'D — Male (deep, steady)', gender: 'male' },
+  { id: 'en-US-Neural2-E', label: 'E — Female (clear)', gender: 'female' },
+  { id: 'en-US-Neural2-F', label: 'F — Female (default, conversational)', gender: 'female' },
+  { id: 'en-US-Neural2-G', label: 'G — Female (mature)', gender: 'female' },
+  { id: 'en-US-Neural2-H', label: 'H — Female (bright)', gender: 'female' },
+  { id: 'en-US-Neural2-I', label: 'I — Male (friendly)', gender: 'male' },
+];
+
 /**
  * ChapterSelector — modal that lets the user pick which chapters to convert.
  *
@@ -46,6 +60,7 @@ export function ChapterSelector({
   const [loading, setLoading] = useState(true);
   const [selected, setSelected] = useState<Set<string>>(new Set());
   const [converting, setConverting] = useState(false);
+  const [voice, setVoice] = useState('en-US-Neural2-F');
 
   const fetchChapters = useCallback(async () => {
     setLoading(true);
@@ -84,9 +99,18 @@ export function ChapterSelector({
     });
   };
 
-  const selectableChapters = chapters.filter(c => c.status !== "ready");
+  const selectableChapters = chapters.filter(c => c.status !== "ready" && c.status !== "generating");
   const selectAll = () => setSelected(new Set(selectableChapters.map(c => c.id)));
   const selectNone = () => setSelected(new Set());
+  const selectInvert = () => {
+    setSelected(prev => {
+      const next = new Set<string>();
+      for (const c of selectableChapters) {
+        if (!prev.has(c.id)) next.add(c.id);
+      }
+      return next;
+    });
+  };
 
   // ── Live estimate ──
   const estimate = useMemo(() => {
@@ -199,24 +223,57 @@ export function ChapterSelector({
           </button>
         </div>
 
-        {/* Bulk actions */}
-        {!loading && selectableChapters.length > 0 && (
-          <div className="flex items-center gap-2 px-5 sm:px-6 py-3 border-b" style={{ borderColor: "var(--aria-border)" }}>
-            <button
-              onClick={selectAll}
-              className="text-xs px-3 py-1.5 rounded-md transition-colors hover:bg-white/5"
-              style={{ color: "var(--aria-fg-muted)", border: "1px solid var(--aria-border)" }}
-            >
-              Select all pending
-            </button>
-            <button
-              onClick={selectNone}
-              className="text-xs px-3 py-1.5 rounded-md transition-colors hover:bg-white/5"
-              style={{ color: "var(--aria-fg-muted)", border: "1px solid var(--aria-border)" }}
-            >
-              Clear
-            </button>
+        {/* Bulk actions + voice selection */}
+        {!loading && chapters.length > 0 && (
+          <div className="flex items-center gap-2 px-5 sm:px-6 py-3 border-b flex-wrap" style={{ borderColor: "var(--aria-border)" }}>
+            {selectableChapters.length > 0 && (
+              <>
+                <button
+                  onClick={selectAll}
+                  className="text-xs px-3 py-1.5 rounded-md transition-colors hover:bg-white/5"
+                  style={{ color: "var(--aria-fg-muted)", border: "1px solid var(--aria-border)" }}
+                >
+                  Select all
+                </button>
+                <button
+                  onClick={selectNone}
+                  className="text-xs px-3 py-1.5 rounded-md transition-colors hover:bg-white/5"
+                  style={{ color: "var(--aria-fg-muted)", border: "1px solid var(--aria-border)" }}
+                >
+                  None
+                </button>
+                <button
+                  onClick={selectInvert}
+                  className="text-xs px-3 py-1.5 rounded-md transition-colors hover:bg-white/5"
+                  style={{ color: "var(--aria-fg-muted)", border: "1px solid var(--aria-border)" }}
+                >
+                  Invert
+                </button>
+              </>
+            )}
             <div className="flex-1" />
+            {/* Voice selector */}
+            <div className="flex items-center gap-2">
+              <label className="text-[10px] font-mono tracking-wider uppercase" style={{ color: "var(--aria-fg-dim)" }}>
+                Voice
+              </label>
+              <select
+                value={voice}
+                onChange={(e) => setVoice(e.target.value)}
+                className="text-xs px-2 py-1.5 rounded-md bg-transparent cursor-pointer"
+                style={{
+                  color: "var(--aria-fg)",
+                  border: "1px solid var(--aria-border)",
+                  background: "var(--aria-bg)",
+                }}
+              >
+                {NEURAL2_VOICES.map(v => (
+                  <option key={v.id} value={v.id} style={{ background: "var(--aria-bg)" }}>
+                    {v.label}
+                  </option>
+                ))}
+              </select>
+            </div>
             {showListenNow && readyCount > 0 && (
               <button
                 onClick={handleListenNow}

@@ -79,7 +79,13 @@ if CHAPTER_INDICES_RAW.strip():
 GCS_BUCKET         = os.environ["GCS_AUDIOBOOK_BUCKET"]
 GCP_PROJECT        = os.environ["GCP_PROJECT_ID"]
 GCP_REGION         = "us-central1"   # Long Audio API endpoint region
-TTS_VOICE          = "en-US-Neural2-F"  # Reliable standard-tier voice — Journey's TPU backend has documented overload issues; Neural2 doesn't share that infra
+# Voice can be overridden per-job via TTS_VOICE env var (from workflow input).
+# Must be a Neural2 voice for reliability — Journey voices have TPU overload issues.
+_VALID_NEURAL2 = {f"en-US-Neural2-{c}" for c in "ABCDEFGHI"}
+TTS_VOICE          = os.environ.get("TTS_VOICE", "en-US-Neural2-F")
+if TTS_VOICE not in _VALID_NEURAL2:
+    print(f"[convert] WARNING: '{TTS_VOICE}' is not a recognized Neural2 voice — falling back to en-US-Neural2-F", file=sys.stderr)
+    TTS_VOICE = "en-US-Neural2-F"
 TTS_LANGUAGE       = "en-US"
 MAX_CHARS_PER_TASK = 700_000  # Long Audio API limit (~750K chars)
 
