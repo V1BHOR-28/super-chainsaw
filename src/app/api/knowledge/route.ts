@@ -393,41 +393,6 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ error: 'Failed to store any chunks. Check database connection.' }, { status: 500 })
     }
 
-    // === AUTO-CREATE AUDIOBOOK for book-length content ===
-    // If the extracted text is long enough to be a real book (>8000 chars —
-    // long enough to exclude short documents/articles uploaded for chat context),
-    // create a linked Audiobook row with the FULL untruncated text (bypasses the
-    // 200K RAG cap on `content`). Chapter preparation does NOT happen here — it
-    // runs in batched, resumable calls via POST /api/audiobooks/[id]/prep-batch,
-    // driven by the client while the library view is open. This avoids the
-    // Vercel fire-and-forget problem (unawaited promises are killed when the
-    // serverless function sends its HTTP response).
-    if (content.length > 8000) {
-      try {
-        // Use rawFullText if available (untruncated); fall back to content if not
-        const audiobookFullText = rawFullText || content
-        await db.audiobook.create({
-          data: {
-            userId,
-            documentId,
-            title: title!,
-            author: null,
-            fullText: audiobookFullText,
-            status: 'PENDING',
-            prepStatus: 'pending',
-          },
-        })
-
-        if (audiobookFullText.length !== content.length) {
-          console.log(`[knowledge.autoAudiobook] Full text ${audiobookFullText.length} chars vs. RAG-capped ${content.length} chars for "${title}"`)
-        }
-        console.log(`[knowledge.autoAudiobook] Created audiobook for "${title}" (${audiobookFullText.length} chars, prep pending client-driven batches)`)
-      } catch (e) {
-        console.error('[knowledge.autoAudiobook]', e)
-        // best-effort — the knowledge upload itself already succeeded, don't fail the request over this
-      }
-    }
-
     // === AUTO-GENERATE BOOK SUMMARY + QUOTES ===
     // After storing chunks, generate a 3-sentence summary and extract notable
     // quotes using a lightweight LLM call. Store as special "summary" and

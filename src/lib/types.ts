@@ -18,16 +18,6 @@ export type Attachment = {
   name: string
 }
 
-export type Message = {
-  id: string
-  conversationId: string
-  role: 'user' | 'assistant' | 'system'
-  content: string
-  attachmentsJson: string | null
-  toolUsed: string | null
-  createdAt: string
-}
-
 export type Memory = {
   id: string
   userId: string

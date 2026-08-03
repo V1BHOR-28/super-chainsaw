@@ -49,10 +49,9 @@ export function FeedAriaModal() {
     }
 
     // === EPUB PIPELINE ===
-    // EPUBs are parsed server-side (the epub2 library needs Node fs).
-    // The upload endpoint extracts the TOC, creates Audiobook + AudiobookChapter
-    // rows, and returns immediately. Chapter cleaning + TTS generation happens
-    // later via the prep-batch route, driven by client polling.
+    // EPUBs are parsed server-side by the Flask audiobook-maker service.
+    // The analyze endpoint parses the EPUB and returns the chapter list.
+    // TTS generation happens via the Flask /api/generate endpoint.
     if (tab === 'file' && file && (file.name.toLowerCase().endsWith('.epub') || file.type === 'application/epub+zip')) {
       return handleEpubUpload(file)
     }
@@ -158,11 +157,11 @@ export function FeedAriaModal() {
 
   /**
    * EPUB upload pipeline:
-   * 1. Send the .epub file to the server for parsing
-   * 2. Server extracts TOC + chapter HTML, creates Audiobook + AudiobookChapter rows
-   * 3. Chapter cleaning + TTS generation happens later via prep-batch polling
+   * 1. Send the .epub file to the Flask audiobook-maker service for parsing
+   * 2. Flask parses the TOC + chapter text and returns the chapter list
+   * 3. TTS generation happens via the Flask /api/generate endpoint
    *
-   * EPUBs are parsed server-side (epub2 needs Node fs), unlike the old
+   * EPUBs are parsed server-side by the Flask audiobook-maker service, unlike the old
    * PDF pipeline which parsed in the browser. This is simpler and more
    * reliable — EPUBs are structured XML, not scanned images.
    */

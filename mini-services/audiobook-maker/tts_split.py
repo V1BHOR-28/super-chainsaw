@@ -478,11 +478,14 @@ async def _edge_tts_call(text, voice, rate, output_path, max_retries=3):
     last_error = None
     for attempt in range(max_retries):
         try:
-            communicate = edge_tts.Communicate(text=text, voice=voice, rate=rate)
+            # Pitch +2Hz adds warmth; default rate -5% slows narration slightly
+            # for a more natural audiobook pace. User's explicit rate overrides.
+            effective_rate = rate if rate and rate.strip() and rate.strip() != "+0%" else "-5%"
+            communicate = edge_tts.Communicate(text=text, voice=voice, rate=effective_rate, pitch="+2Hz")
             await asyncio.wait_for(
                 communicate.save(output_path), timeout=EDGE_TTS_CHUNK_TIMEOUT
             )
-            if _edge_output_looks_truncated(output_path, text, rate):
+            if _edge_output_looks_truncated(output_path, text, effective_rate):
                 try:
                     size = os.path.getsize(output_path)
                 except OSError:

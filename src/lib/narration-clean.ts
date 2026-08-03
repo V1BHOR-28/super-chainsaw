@@ -20,7 +20,7 @@ export function stripOcrArtifacts(text: string): string {
  * - Excessive whitespace from HTML-to-text conversion
  * - Stray HTML entities that weren't fully decoded
  *
- * Does NOT do LLM-level cleanup (that's in audiobook-prep-agent.ts).
+ * Does NOT do LLM-level cleanup (that's handled by the Flask audiobook-maker service).
  */
 export function cleanForNarration(raw: string): string {
   let text = raw

@@ -82,13 +82,6 @@ export interface JobStatusResponse {
   message: string;
 }
 
-export interface GenerateResponse {
-  status?: string; // "started"
-  error?: string;
-  error_code?: string;
-  auto_batch_email?: string;
-}
-
 export interface AbmVoice {
   engine: string; // "edge" | "google" | "gemini" | "speechify"
   gender: string; // "Female" | "Male"
@@ -234,26 +227,12 @@ export async function generate(
   // The Flask app returns {status: "started"} on success — nothing to return.
 }
 
-/** Poll the status of a running or completed job. */
-export async function getJobStatus(jobId: string): Promise<JobStatusResponse> {
-  const res = await fetch(`${ABM_BASE}/job_status/${jobId}`, {
-    credentials: "include",
-  });
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({}));
-    throw new Error(
-      (body && (body.error || body.message)) || `Status fetch failed (${res.status})`,
-    );
-  }
-  return (await res.json()) as JobStatusResponse;
-}
-
 /**
  * Send a heartbeat to keep a generating job alive.
  *
  * The Flask app cancels jobs if no client polls the SSE /api/progress endpoint
- * for 60+ seconds (heartbeat timeout). Since we use polling via getJobStatus
- * instead of SSE, we must call this endpoint periodically to reset the timer.
+ * for 60+ seconds (heartbeat timeout). Since we use polling via the my_jobs
+ * endpoint instead of SSE, we must call this endpoint periodically to reset the timer.
  * Call every 30 seconds while a job is generating.
  */
 export async function sendHeartbeat(jobId: string): Promise<void> {
@@ -356,11 +335,6 @@ export async function getMyJobs(): Promise<MyJobsResponse> {
  */
 export function getDownloadUrl(jobId: string): string {
   return `${ABM_BASE}/download/${jobId}`;
-}
-
-/** Returns the relative cover thumbnail URL for a job (may 404 if no cover). */
-export function getCoverUrl(jobId: string): string {
-  return `${ABM_BASE}/cover/${jobId}`;
 }
 
 /**

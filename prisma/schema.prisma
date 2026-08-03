@@ -226,51 +226,24 @@ model Quote {
 
 // Audiobooks — auto-created when a user feeds ARIA book-length content.
 model Audiobook {
-  id                 String   @id @default(cuid())
-  userId             String
-  documentId         String
-  title              String
-  author             String?
-  accent             String   @default("#f59e0b")
-  fullText           String?
-  status             String   @default("PENDING")
-  chapterBoundaries  Json?
-  prepStatus         String   @default("pending")
-  prepChaptersCleaned Int     @default(0)
-  createdAt          DateTime @default(now())
-  updatedAt          DateTime @updatedAt
-  progressChapter    Int      @default(0)
-  progressCharOffset Int      @default(0)
+  id          String   @id @default(cuid())
+  userId      String
+  documentId  String
+  title       String
+  author      String?
+  accent      String   @default("#f59e0b")
+  fullText    String?
+  status      String   @default("PENDING")
+  prepStatus  String   @default("pending")
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
 
-  user     User              @relation(fields: [userId], references: [id], onDelete: Cascade)
-  chapters AudiobookChapter[]
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
 
   @@index([userId, createdAt])
 }
 
-model AudiobookChapter {
-  id              String   @id @default(cuid())
-  audiobookId     String
-  chapterIndex    Int      @default(0)
-  chapterOrder    Int      @default(0)
-  title           String
-  rawHtml         String   @default("")
-  rawText         String   @default("")
-  cleanedText     String   @default("")
-  status          String   @default("pending")
-  audioUrl        String?
-  durationSeconds Int?
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
-
-  audiobook Audiobook @relation(fields: [audiobookId], references: [id], onDelete: Cascade)
-
-  @@index([audiobookId])
-}
-
-// One-shot job tracking for GitHub Actions audiobook conversion.
-// Created when the user hits "Narrate", updated by the callback route
-// when the GitHub Actions job completes.
+// One-shot job tracking for audiobook conversion.
 model AudiobookJob {
   id              String   @id @default(cuid())
   userId          String
@@ -279,12 +252,6 @@ model AudiobookJob {
   epubUrl         String
   status          String   @default("queued") // queued | running | complete | failed
   errorMessage    String?
-  chapterUrls     String[] @default([])
-  // List of chapter `order` values this job was asked to convert.
-  // Empty/missing = convert the whole book (legacy behavior). Populated by
-  // the /convert route when the user selects specific chapters. The callback
-  // route only updates chapters whose order is in this list, leaving
-  // unselected chapters untouched.
   chapterIndices  Int[]    @default([])
   createdAt       DateTime @default(now())
   updatedAt       DateTime @updatedAt

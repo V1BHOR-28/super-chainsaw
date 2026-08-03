@@ -68,19 +68,6 @@ export function StatusPill({
 }
 
 /**
- * Typing dots indicator.
- */
-export function TypingDots({ className }: { className?: string }) {
-  return (
-    <span className={cn("inline-flex items-center gap-1", className)} aria-label="thinking">
-      <span className="typing-dot" />
-      <span className="typing-dot" />
-      <span className="typing-dot" />
-    </span>
-  );
-}
-
-/**
  * Horizontal divider with soft fade edges.
  */
 export function AriaDivider({ className }: { className?: string }) {

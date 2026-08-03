@@ -201,9 +201,9 @@ Respond with ONLY JSON: {"candidates":[{"text":"...","category":"personal|prefer
     const candidates = merged.filter((c) => !isRecentlyDeclined(c.text)).slice(0, 2)
 
     if (candidates.length === 0) {
-      console.log(`[memory.detect] Zero candidates for message: "${userMessage.slice(0, 80)}"`)
+      console.log(`[memory.detect] Zero candidates (message length: ${userMessage.length})`)
     } else {
-      console.log(`[memory.detect] ${candidates.length} candidate(s) for message: "${userMessage.slice(0, 80)}" — ${candidates.map((c) => `[${c.category}/${c.confidence}] "${c.text.slice(0, 40)}"`).join(', ')}`)
+      console.log(`[memory.detect] ${candidates.length} candidate(s) — categories: ${candidates.map(c => `${c.category}/${c.confidence}`).join(', ')}`)
     }
 
     return NextResponse.json({ candidates })

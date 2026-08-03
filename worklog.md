@@ -159,3 +159,82 @@ Stage Summary:
 - The abm_cid cookie (HttpOnly, SameSite=Lax, set by the Flask /api/voices response) is automatically carried on all same-origin requests through the Caddy gateway, so the Flask app can identify the client across analyze → generate → my_jobs → download calls.
 - Edge cases handled: re-clicking an analyzed job (no chapter data) opens the selector in "whole-book" mode; polling stops when no jobs are in a polling status; upload errors show a toast; convert errors show a toast; the player gracefully handles missing currentJob (returns null).
 - Not tested end-to-end (no agent-browser run per task instructions): the analyze → generate → poll → play flow was verified by reading the Flask source for response shapes, but a real EPUB upload + generation + playback cycle would require manual verification through the Preview Panel.
+
+---
+Task ID: 5
+Agent: main (ARIA Audit Remediation — Items 1–6)
+Task: Fix exactly 6 confirmed audit issues — orphaned Audiobook rows, dead files, dead exports, orphaned Prisma columns, sensitive logging. Plus re-apply TTS prosody fix from stuck commit.
+
+Work Log:
+
+ITEM 1 — Orphaned Audiobook rows on upload
+- Grep evidence: `rg -rn "AUTO-CREATE AUDIOBOOK|audiobook.*create|prep-batch|prepStatus" src/app/api --include="*.ts"` → only `knowledge/route.ts:396` + `chat/route.ts:457` (read-only, not touched)
+- Grep evidence: `rg -rn "status.*PENDING|prepStatus|prep-batch" src --include="*.ts"` → only `knowledge/route.ts` (the bug) + `audiobook-prep-agent.ts` (dead file, deleted in Item 2)
+- Deleted the entire `// === AUTO-CREATE AUDIOBOOK for book-length content ===` block (lines 396–429) from `knowledge/route.ts`
+- No replacement — the Flask service has no "create job from already-uploaded text" endpoint; EPUB upload goes through `analyzeEpub()` which calls the Flask `/api/analyze` endpoint
+- `npx tsc --noEmit` clean for knowledge/route.ts
+
+ITEM 2 — Delete confirmed-dead files
+- Grep: `rg -rn "epub-parser" src --include="*.ts" --include="*.tsx"` → only `src/lib/epub-parser.ts` itself
+- Grep: `rg -rn "audiobook-prep-agent" src --include="*.ts" --include="*.tsx"` → `src/lib/audiobook-prep-agent.ts` + comment in `src/lib/narration-clean.ts:23`
+- Deleted: `src/lib/epub-parser.ts`, `src/lib/audiobook-prep-agent.ts`
+- Updated comment in `narration-clean.ts:23` → "handled by the Flask audiobook-maker service"
+- Grep: `rg -rn "epub2" src --include="*.ts" --include="*.tsx"` → only stale comments in `feed-aria-modal.tsx` (lines 52, 165)
+- Updated both comments in `feed-aria-modal.tsx` to reflect Flask service
+- Removed `epub2` from `package.json`
+- `bun install` succeeded (1 package removed)
+- `npx tsc --noEmit` clean
+
+ITEM 3 — Remove dead exports
+- `src/lib/user.ts`: Grep `requireUserId|getAuthenticatedUser\b` → only in user.ts. Deleted both. Kept `getAuthenticatedUserId()`. tsc clean.
+- `src/components/aria/waveform.tsx`: Grep `Waveform|DecorativeWaveform` → only in waveform.tsx. Deleted both. Kept `NowPlayingBars`. tsc clean.
+- `src/components/aria/primitives.tsx`: Grep `TypingDots` → only in primitives.tsx. Deleted. tsc clean.
+- `src/lib/abm-api.ts`: Grep `getJobStatus|getCoverUrl|GenerateResponse` → only in abm-api.ts. Deleted all three. tsc clean.
+- `src/lib/audiobooks.ts`: Grep `formatDuration` → only in audiobooks.ts. Deleted. Kept `formatTime`. tsc clean.
+- `src/lib/types.ts`: Grep `from.*@/lib/types` → 7 importers, none import `Message`. Deleted `Message` type. tsc clean.
+
+ITEM 4 — Orphaned Prisma columns/model
+- Grep: `chapterBoundaries|prepChaptersCleaned|progressChapter|progressCharOffset|chapterUrls|AudiobookChapter` across src → only stale comment in `feed-aria-modal.tsx:161`
+- Updated the stale comment (removed AudiobookChapter reference)
+- Removed from `prisma/schema.prisma`: `Audiobook.chapterBoundaries`, `Audiobook.prepChaptersCleaned`, `Audiobook.progressChapter`, `Audiobook.progressCharOffset`, `AudiobookJob.chapterUrls`, entire `AudiobookChapter` model, `Audiobook.chapters` relation
+- `npx prisma generate` succeeded
+- `npx tsc --noEmit` clean (no downstream references to removed fields)
+- Created migration: `prisma/migrations/20260803000000_drop_orphaned_audiobook_fields/migration.sql`
+  Contents: DROP TABLE AudiobookChapter; ALTER TABLE Audiobook DROP COLUMN chapterBoundaries, prepChaptersCleaned, progressChapter, progressCharOffset; ALTER TABLE AudiobookJob DROP COLUMN chapterUrls;
+
+ITEM 5 — Skipped (covered by Items 2 and 4)
+
+ITEM 6 — Sensitive logging cleanup
+- Fixed `src/app/api/memory/detect/route.ts` lines 204 + 206
+- Before: logged `userMessage.slice(0, 80)` and `c.text.slice(0, 40)` (raw user content + memory text)
+- After: logs only `userMessage.length` and `candidates.map(c => c.category/c.confidence)`
+- Grep verification: `rg "console\.log.*slice" src/app/api/memory/detect/route.ts` → No matches found
+
+BONUS — Re-applied TTS prosody fix from stuck commit 28b568f
+- `tts_split.py`: edge-tts Communicate now uses `pitch="+2Hz"` + default rate `"-5%"` (warmer, slower, more natural)
+- `render.yaml`: switched LLM from Gemini (region-blocked) to Groq (free, global) + added Google Cloud TTS config
+
+Stage Summary:
+Files changed:
+- src/app/api/knowledge/route.ts (deleted auto-create-audiobook block)
+- src/app/api/memory/detect/route.ts (fixed sensitive logging)
+- src/components/aria/feed-aria-modal.tsx (updated stale comments)
+- src/components/aria/primitives.tsx (deleted TypingDots)
+- src/components/aria/waveform.tsx (deleted Waveform + DecorativeWaveform)
+- src/lib/abm-api.ts (deleted getJobStatus, getCoverUrl, GenerateResponse)
+- src/lib/audiobooks.ts (deleted formatDuration)
+- src/lib/narration-clean.ts (updated stale comment)
+- src/lib/types.ts (deleted Message type)
+- src/lib/user.ts (deleted requireUserId, getAuthenticatedUser)
+- prisma/schema.prisma (removed orphaned fields + AudiobookChapter model)
+- package.json (removed epub2 dependency)
+- bun.lock (updated after epub2 removal)
+- mini-services/audiobook-maker/tts_split.py (edge-tts prosody: pitch +2Hz, rate -5%)
+- render.yaml (Groq LLM + Google Cloud TTS config)
+
+Files deleted:
+- src/lib/epub-parser.ts
+- src/lib/audiobook-prep-agent.ts
+
+Migration file:
+- prisma/migrations/20260803000000_drop_orphaned_audiobook_fields/migration.sql

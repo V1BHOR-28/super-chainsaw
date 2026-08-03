@@ -39,43 +39,38 @@ services:
         value: "604800"
 
       # ── Gemini TTS (premium voices) ──
-      # Uses the Gemini API key for TTS synthesis. Voices prefixed with
-      # "gemini:" in the voice catalog will use this. Edge-tts voices remain
-      # free and work without this key.
       - key: ABM_GEMINI_BACKEND
         value: apikey
       - key: ABM_GEMINI_API_KEY
-        sync: false  # set manually — get from https://aistudio.google.com/apikey
-      # Make Gemini voices free for ARIA users (no PayPal payment required).
-      # The audiobook-maker app was designed for commercial use with PayPal;
-      # ARIA is free, so we set the thresholds high enough that all jobs are free.
+        sync: false
       - key: ABM_GEMINI_FREE_THRESHOLD_EUR
         value: "1000"
       - key: ABM_FREE_QUOTA_EUR_PER_MONTH
         value: "10000"
       - key: ABM_SPEECHIFY_FREE_THRESHOLD_EUR
         value: "1000"
-      # Tolerate failed chunks instead of failing the whole job.
-      # Default 0.0 = ANY silenced chunk triggers full failure + refund.
-      # 0.5 = tolerate up to 50% silenced chunks (Gemini safety filter
-      # on Homeric violence, Bible content, etc. silences some chunks).
-      # The edge-tts fallback fills silenced gaps, so the audiobook is
-      # still complete — just with a different voice on those sections.
       - key: ABM_GEMINI_REFUND_FAILED_RATIO
         value: "0.5"
       - key: ABM_GEMINI_MAX_FAILED_RATIO
         value: "0.8"
 
-      # ── Gemini LLM (text optimization) ──
-      # Rewrites each chapter's text for better TTS quality before synthesis.
-      # Uses Gemini's OpenAI-compatible endpoint. Same API key as TTS.
-      # Note: Google discontinued AIzaSy keys — new keys use the AQ. format.
+      # ── Google Cloud TTS (Chirp3-HD — paid, high quality) ──
+      # User has a GCP billing account. Requires service account JSON.
+      # Upload as Secret File at /etc/secrets/gcp-key.json on Render.
+      - key: ABM_GCP_PROJECT_ID
+        sync: false
+      - key: GOOGLE_APPLICATION_CREDENTIALS
+        value: /etc/secrets/gcp-key.json
+
+      # ── LLM text optimization (Groq — free, global, no CC) ──
+      # Groq works globally (no region restriction). Llama 3.3 70B produces
+      # excellent TTS-optimized text. Get key at https://console.groq.com
       - key: ABM_LLM_API_KEY
-        sync: false  # set manually — same Gemini key as ABM_GEMINI_API_KEY
+        sync: false
       - key: ABM_LLM_API_BASE
-        value: https://generativelanguage.googleapis.com/v1beta/openai/
+        value: https://api.groq.com/openai/v1
       - key: ABM_LLM_MODEL
-        value: gemini-2.5-flash
+        value: llama-3.3-70b-versatile
 
       # ── Cloudflare R2 (persistent storage — survives Render restarts) ──
       # Audio files + download tokens are uploaded to R2 after generation.
