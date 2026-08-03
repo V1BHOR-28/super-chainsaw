@@ -25,11 +25,9 @@ services:
       pip install flask edge-tts ebooklib beautifulsoup4 lxml Pillow pymupdf flask-compress defusedxml
     startCommand: python audiobook_app.py
     envVars:
-      - key: ABM_PORT
-        value: "5601"
-      # Ephemeral storage on free tier — jobs are lost on restart.
-      # For persistent storage, upgrade to Starter + add the disk section below,
-      # OR configure S3 storage via ABM_S3_* env vars.
+      # Render provides $PORT automatically (typically 10000). The Flask app
+      # detects $PORT and binds to 0.0.0.0:$PORT. Do NOT set ABM_PORT here —
+      # it's only used when $PORT is absent (local dev / sandbox).
       - key: ABM_DATA_DIR
         value: /tmp/abm-data
       - key: PYTHON_VERSION

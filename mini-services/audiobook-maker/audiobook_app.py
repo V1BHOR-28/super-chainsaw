@@ -14937,11 +14937,20 @@ _init_log_dedup()
 _ensure_background_threads()
 
 if __name__ == "__main__":
-    PORT = int(os.environ.get("ABM_PORT", "5601"))
+    # Render provides $PORT (typically 10000) and requires binding to 0.0.0.0.
+    # Other hosts (local dev, sandbox) use ABM_PORT (default 5601) and 127.0.0.1.
+    # We detect Render by checking if $PORT is set; if so, bind to 0.0.0.0:$PORT.
+    RENDER_PORT = os.environ.get("PORT")
+    if RENDER_PORT:
+        PORT = int(RENDER_PORT)
+        HOST = "0.0.0.0"
+    else:
+        PORT = int(os.environ.get("ABM_PORT", "5601"))
+        HOST = "127.0.0.1"
     DEBUG = os.environ.get("ABM_DEBUG", "0").strip().lower() in ("1", "true", "yes", "on")
     print(f"\n{'='*50}")
     print(f"  Audiobook Maker v{__version__}")
-    print(f"  http://localhost:{PORT}")
+    print(f"  http://{HOST}:{PORT}")
     print(f"{'='*50}")
     print(f"  Script folder: {SCRIPT_DIR}")
     print(f"  Data folder:   {UPLOAD_DIR}")
@@ -14963,4 +14972,4 @@ if __name__ == "__main__":
     print(f"  Debug mode: {DEBUG} "
           f"({'env ABM_DEBUG' if 'ABM_DEBUG' in os.environ else 'default off'})")
     print(f"{'='*50}\n")
-    app.run(host="127.0.0.1", port=PORT, debug=DEBUG)
+    app.run(host=HOST, port=PORT, debug=DEBUG)
