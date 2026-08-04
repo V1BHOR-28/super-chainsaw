@@ -722,8 +722,20 @@ function ChaptersPanel({
   const selectedSet = new Set(
     chaptersData?.selected_chapters ?? passedSelected ?? []
   );
-  const totalChapters = chaptersData?.total_chapters ?? chapters.length;
-  const inAudioCount = selectedSet.size;
+  // totalChapters: prefer the API value, fall back to chapters array length.
+  // If both are 0 but we have chapterMp3s, use that count instead (happens
+  // when the job data comes from a download token after Flask restart —
+  // the token has chapter_mp3s + selected_chapters but not the full parsed
+  // chapter list, so total_chapters is 0).
+  const totalChapters = chaptersData?.total_chapters
+    || chapters.length
+    || chapterMp3s?.length
+    || selectedSet.size
+    || 0;
+  const inAudioCount = selectedSet.size > 0
+    ? selectedSet.size
+    : chapterMp3s?.length
+    || chapters.length;
   const hasChapterMp3s = !!chapterMp3s && chapterMp3s.length > 0;
 
   // When chapterMp3s is available, use exact durations. Otherwise fall back
@@ -817,10 +829,56 @@ function ChaptersPanel({
       <div className="flex-1 overflow-y-auto px-4 pb-4 space-y-1">
         {loading ? (
           <div className="text-center py-8 text-[var(--aria-fg-muted)] text-sm">Loading chapters…</div>
-        ) : chapters.length === 0 ? (
+        ) : chapters.length === 0 && !hasChapterMp3s ? (
           <div className="text-center py-8 text-[var(--aria-fg-muted)] text-sm">
-            Chapter data unavailable. The job may have expired (18h retention) — re-upload the EPUB to browse chapters.
+            Chapter data unavailable. The job may have expired — re-upload the EPUB to browse chapters.
           </div>
+        ) : chapters.length === 0 && hasChapterMp3s ? (
+          // No full chapter list (job restored from token after restart),
+          // but we have chapter_mp3s — show those as playable entries.
+          (chapterMp3s ?? []).map((ch, idx) => {
+            const isCurrent = idx === activeIdx;
+            const chapterTime = chapterStarts[idx];
+            return (
+              <button
+                key={ch.index}
+                onClick={() => handleChapterClick(idx)}
+                className="w-full flex items-start gap-2.5 p-2.5 rounded-lg transition-colors text-left"
+                style={{
+                  background: isCurrent ? "rgba(245,158,11,0.1)" : "rgba(34,197,94,0.04)",
+                  border: isCurrent ? "1px solid rgba(245,158,11,0.3)" : "1px solid rgba(34,197,94,0.15)",
+                  cursor: "pointer",
+                }}
+              >
+                <div className="flex items-center justify-center flex-shrink-0 mt-0.5">
+                  {isCurrent ? (
+                    <div className="w-4 h-4 rounded flex items-center justify-center" style={{ background: "rgba(245,158,11,0.2)", border: "1px solid rgba(245,158,11,0.5)" }}>
+                      <Play size={9} className="fill-current text-[var(--aria-accent-glow)]" />
+                    </div>
+                  ) : (
+                    <div className="w-4 h-4 rounded flex items-center justify-center" style={{ background: "rgba(34,197,94,0.15)", border: "1px solid rgba(34,197,94,0.3)" }}>
+                      <Check size={10} className="text-green-400" />
+                    </div>
+                  )}
+                </div>
+                <div className="flex-1 min-w-0">
+                  <div className="flex items-center gap-2">
+                    <span className="text-[10px] font-mono w-4 text-center" style={{ color: "var(--aria-fg-dim)" }}>
+                      {String(idx + 1).padStart(2, "0")}
+                    </span>
+                    <span className="text-sm font-medium truncate" style={{ color: isCurrent ? "var(--aria-accent-glow)" : "var(--aria-fg)" }}>
+                      {ch.title || `Chapter ${ch.index + 1}`}
+                    </span>
+                  </div>
+                  <div className="text-[10px] mt-0.5" style={{ color: "var(--aria-fg-dim)" }}>
+                    ~{Math.round((ch.duration_ms || 0) / 60000)} min
+                    {isCurrent && <span style={{ color: "var(--aria-accent-glow)" }}> · playing</span>}
+                    {chapterTime !== undefined && !isCurrent && <span> · {formatTime(chapterTime)}</span>}
+                  </div>
+                </div>
+              </button>
+            );
+          })
         ) : (
           chapters.map((ch, idx) => {
             const inAudio = selectedSet.size === 0 || selectedSet.has(ch.index);
