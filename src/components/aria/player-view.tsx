@@ -830,9 +830,45 @@ function ChaptersPanel({
         {loading ? (
           <div className="text-center py-8 text-[var(--aria-fg-muted)] text-sm">Loading chapters…</div>
         ) : chapters.length === 0 && !hasChapterMp3s ? (
-          <div className="text-center py-8 text-[var(--aria-fg-muted)] text-sm">
-            Chapter data unavailable. The job may have expired — re-upload the EPUB to browse chapters.
-          </div>
+          // No chapter data at all — but if we know which chapters were
+          // narrated (selectedChapters), show those as a simple list.
+          (passedSelected ?? []).length > 0 ? (
+            (passedSelected ?? []).map((chIdx, idx) => {
+              const isCurrent = idx === activeIdx;
+              return (
+                <div
+                  key={chIdx}
+                  className="flex items-start gap-2.5 p-2.5 rounded-lg"
+                  style={{
+                    background: isCurrent ? "rgba(245,158,11,0.1)" : "rgba(34,197,94,0.04)",
+                    border: isCurrent ? "1px solid rgba(245,158,11,0.3)" : "1px solid rgba(34,197,94,0.15)",
+                  }}
+                >
+                  <div className="flex items-center justify-center flex-shrink-0 mt-0.5">
+                    {isCurrent ? (
+                      <div className="w-4 h-4 rounded flex items-center justify-center" style={{ background: "rgba(245,158,11,0.2)", border: "1px solid rgba(245,158,11,0.5)" }}>
+                        <Play size={9} className="fill-current text-[var(--aria-accent-glow)]" />
+                      </div>
+                    ) : (
+                      <div className="w-4 h-4 rounded flex items-center justify-center" style={{ background: "rgba(34,197,94,0.15)", border: "1px solid rgba(34,197,94,0.3)" }}>
+                        <Check size={10} className="text-green-400" />
+                      </div>
+                    )}
+                  </div>
+                  <div className="flex-1 min-w-0">
+                    <span className="text-sm font-medium" style={{ color: isCurrent ? "var(--aria-accent-glow)" : "var(--aria-fg)" }}>
+                      Chapter {chIdx}
+                    </span>
+                    {isCurrent && <span className="text-[10px] ml-2" style={{ color: "var(--aria-accent-glow)" }}>· playing</span>}
+                  </div>
+                </div>
+              );
+            })
+          ) : (
+            <div className="text-center py-8 text-[var(--aria-fg-muted)] text-sm">
+              Chapter data unavailable. The job may have expired — re-upload the EPUB to browse chapters.
+            </div>
+          )
         ) : chapters.length === 0 && hasChapterMp3s ? (
           // No full chapter list (job restored from token after restart),
           // but we have chapter_mp3s — show those as playable entries.
