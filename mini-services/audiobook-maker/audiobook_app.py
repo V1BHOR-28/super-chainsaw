@@ -10624,6 +10624,17 @@ _MY_JOBS_LIVE_STATUSES = (
     "done", "error", "cancelled", "interrupted",
 )
 
+# ARIA: statuses that indicate the in-memory job is ACTIVELY being worked on.
+# When a job is in one of these statuses, /api/my_jobs must NOT let a stale
+# download token (from a previous completed generation) override the live
+# status with "done". This was the root cause of the "More chapters" bug:
+# the second generation started (status="generating"), but the old token
+# from the first generation immediately overwrote the response to "done",
+# causing the frontend to stop polling and never see the new chapter MP3.
+_MY_JOBS_LIVE_ACTIVE_STATUSES = frozenset({
+    "generating", "optimizing", "translating",
+})
+
 
 @app.route("/api/my_jobs")
 def api_my_jobs():
@@ -10703,6 +10714,39 @@ def api_my_jobs():
             continue
         jid = tinfo.get("job_id", "")
         entry = out.setdefault(jid, {"job_id": jid, "created_at": created})
+
+        # ── ARIA: don't let a stale download token mask a live in-memory job ──
+        # The in-memory `jobs` loop above already set the authoritative status
+        # for any job that's currently active (generating / optimizing / etc.).
+        # A download token from a PREVIOUS generation still says "done" — if we
+        # blindly overwrite here, /api/my_jobs returns "done" while the second
+        # generation is still running. The frontend stops polling, the
+        # generation completes with no progress updates, and the new chapter
+        # MP3 never appears in the response (the token's stale chapter_mp3s
+        # clobbers the in-memory job's freshly-merged list).
+        #
+        # Fix: if the in-memory job is in an active status, preserve it + its
+        # chapter_mp3s (which are more up-to-date than the token snapshot).
+        # Only fall back to the token's status/chapter_mp3s when the job is
+        # not in memory (e.g. after a Flask restart).
+        live_status = entry.get("status", "")
+        if live_status in _MY_JOBS_LIVE_ACTIVE_STATUSES:
+            # Preserve the live status + in-memory chapter_mp3s/selected_chapters.
+            # Still update download-token-only fields (download_token, expires_at,
+            # downloaded_at, formats) so the frontend can show the download link.
+            entry.update({
+                "download_token": token,
+                "expires_at": created + retention,
+                "downloaded_at": tinfo.get("downloaded_at") or None,
+                "formats": {
+                    "m4b": bool(tinfo.get("output_m4b")),
+                    "zip": bool(tinfo.get("output_zip")),
+                    "mp3": bool(tinfo.get("output_file")),
+                    "abm": bool(tinfo.get("optimized_abm_path")),
+                },
+            })
+            continue
+
         entry.update({
             "status": "done",
             "title": tinfo.get("book_title") or entry.get("title", ""),
