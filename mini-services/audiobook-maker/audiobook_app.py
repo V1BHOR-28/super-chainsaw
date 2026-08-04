@@ -1096,6 +1096,23 @@ _download_tokens = {}  # token -> {job_id, created_at, download_type, base_url, 
 _TOKENS_FILE = UPLOAD_DIR / "_download_tokens.json"
 _tokens_lock = threading.Lock()
 
+# ── ARIA: durable job registry ──
+# Maps job_id -> {job_id, client_id, file_hash, title, author, total_chapters,
+#                 epub_s3_key, selected_chapters, chapter_mp3s, updated_at}.
+# Written through any time a job is created or its chapter_mp3s /
+# selected_chapters change, and persisted to disk + R2/Storj (mirroring the
+# _save_tokens() / _load_tokens() pattern). Survives Flask process restarts
+# (Render cold starts) so that:
+#   1. /api/analyze can de-duplicate re-uploads by (client_id, file_hash)
+#      even when the in-memory `jobs` dict has been wiped.
+#   2. /api/job_chapters and /api/generate can reconstruct the full in-memory
+#      job (title, author, total_chapters, parsed info.chapters) by
+#      re-downloading the EPUB from Storj — not just the weak chapter_mp3s-only
+#      fallback.
+_job_registry = {}
+_job_registry_lock = threading.Lock()
+_JOB_REGISTRY_FILE = UPLOAD_DIR / "_job_registry.json"
+
 _transfer_tokens = {}  # transfer_token -> {"job_id":..., "created_at":...}
 _TRANSFER_TOKENS_FILE = UPLOAD_DIR / "_transfer_tokens.json"
 _transfer_lock = threading.Lock()
@@ -1642,10 +1659,10 @@ def _save_tokens():
     other workers since our last sync.
     """
     _merge_tokens_from_disk()
+    data = {}  # hoisted so we can sync the job registry from it after the lock
     try:
         with _tokens_lock:
             # Save only serializable data
-            data = {}
             for tok, info in _download_tokens.items():
                 data[tok] = {
                     "job_id": info["job_id"],
@@ -1698,6 +1715,27 @@ def _save_tokens():
                 pass  # non-fatal
     except Exception as e:
         print(f"[tokens] Failed to save tokens: {e}")
+    # ── ARIA: sync the durable job registry from token snapshots ──
+    # Tokens are saved at every generation milestone (per-chapter MP3
+    # produced, generation complete, etc.) and already capture
+    # chapter_mp3s + selected_chapters. This is the natural write-through
+    # point for the registry: any time chapter_mp3s / selected_chapters
+    # change, the registry gets updated too. Best-effort, non-fatal:
+    # never block a token save on a registry write failure.
+    try:
+        for tok, tok_info in data.items():
+            jid = tok_info.get("job_id", "")
+            if not jid:
+                continue
+            _register_job(jid,
+                client_id=tok_info.get("client_id", ""),
+                title=tok_info.get("book_title", ""),
+                selected_chapters=tok_info.get("selected_chapters", []),
+                chapter_mp3s=tok_info.get("chapter_mp3s", []),
+                total_chapters=tok_info.get("total_chapters", 0))
+        _save_job_registry()
+    except Exception as _e_reg:
+        print(f"[registry] token-sync failed (non-fatal): {_e_reg}")
 
 
 def _load_tokens():
@@ -1746,6 +1784,214 @@ def _load_tokens():
             print(f"[tokens] Loaded {loaded} tokens from disk ({expired} expired/invalid)")
     except Exception as e:
         print(f"[tokens] Failed to load tokens: {e}")
+
+
+# ---------------------------------------------------------------------------
+# ARIA durable job registry — persistence + lookup helpers.
+# Pattern mirrors _save_tokens() / _load_tokens(): atomic local JSON write
+# (via community_store.atomic_write_json) + R2/Storj sync if configured, with
+# every failure path being non-fatal (logged but never crashes the caller).
+# ---------------------------------------------------------------------------
+
+def _save_job_registry():
+    """Persist the durable job registry to disk + R2/Storj (best-effort).
+
+    Mirrors _save_tokens(): atomic local write via community_store, then a
+    best-effort upload to R2/Storj so the registry survives Render ephemeral
+    storage wipes. Caller MUST NOT be holding _jobs_lock (this acquires
+    _job_registry_lock internally).
+    """
+    try:
+        with _job_registry_lock:
+            data = {}
+            for jid, rec in _job_registry.items():
+                data[jid] = {
+                    "job_id": jid,
+                    "client_id": rec.get("client_id", ""),
+                    "file_hash": rec.get("file_hash", ""),
+                    "title": rec.get("title", ""),
+                    "author": rec.get("author", ""),
+                    "total_chapters": rec.get("total_chapters", 0),
+                    "epub_s3_key": rec.get("epub_s3_key", ""),
+                    "selected_chapters": rec.get("selected_chapters", []),
+                    "chapter_mp3s": rec.get("chapter_mp3s", []),
+                    "updated_at": rec.get("updated_at", 0),
+                }
+        community_store.atomic_write_json(_JOB_REGISTRY_FILE, data, indent=2)
+        # Sync to R2/S3 if configured — survives Render ephemeral storage wipes.
+        try:
+            import storage_backend
+            if storage_backend.is_enabled():
+                storage_backend.upload_file(str(_JOB_REGISTRY_FILE), "_job_registry.json")
+        except Exception:
+            pass  # non-fatal
+    except Exception as e:
+        print(f"[registry] Failed to save: {e}")
+
+
+def _load_job_registry():
+    """Reload the durable job registry from disk on startup.
+
+    If the local file doesn't exist (ephemeral storage wiped on restart),
+    try downloading from R2/S3 if configured — same fallback as _load_tokens().
+    """
+    global _job_registry
+    if not _JOB_REGISTRY_FILE.exists():
+        try:
+            import storage_backend
+            if storage_backend.is_enabled() and storage_backend.object_exists("_job_registry.json"):
+                _JOB_REGISTRY_FILE.parent.mkdir(parents=True, exist_ok=True)
+                storage_backend.download_file("_job_registry.json", str(_JOB_REGISTRY_FILE))
+                print(f"[registry] Restored _job_registry.json from R2/S3/Storj")
+        except Exception as e:
+            print(f"[registry] S3 restore failed (non-fatal): {e}")
+        if not _JOB_REGISTRY_FILE.exists():
+            return
+    try:
+        with open(_JOB_REGISTRY_FILE, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        if isinstance(data, dict):
+            _job_registry = data
+            print(f"[registry] Loaded {len(_job_registry)} job record(s) from disk")
+    except Exception as e:
+        print(f"[registry] Failed to load: {e}")
+
+
+def _register_job(job_id, **fields):
+    """Update a single job's registry entry IN MEMORY. Best-effort, non-fatal.
+
+    Caller is responsible for calling _save_job_registry() afterwards to flush
+    the change to disk + R2. Used by _save_tokens() to batch-update many
+    entries from token snapshots and flush once at the end.
+    """
+    if not job_id:
+        return
+    try:
+        with _job_registry_lock:
+            rec = _job_registry.get(job_id, {})
+            rec.update(fields)
+            rec["job_id"] = job_id
+            rec["updated_at"] = time.time()
+            _job_registry[job_id] = rec
+    except Exception as e:
+        print(f"[registry] In-memory update failed for {job_id}: {e}")
+
+
+def _register_job_and_flush(job_id, **fields):
+    """Update a single job's registry entry AND persist immediately.
+
+    Used by one-off mutation points (api_analyze, api_reset_to_chapters).
+    Best-effort, non-fatal: a registry write failure is logged but never
+    blocks the caller's request.
+    """
+    _register_job(job_id, **fields)
+    _save_job_registry()
+
+
+def _lookup_job_by_file_hash(client_id, file_hash):
+    """Find a registry entry matching (client_id, file_hash).
+
+    Used by /api/analyze to de-duplicate re-uploads across Flask restarts.
+    Returns the registry entry dict (including `job_id`), or None.
+
+    Matching rule (defensive against legacy entries with no client_id):
+      - file_hash MUST match (the actual content identity);
+      - client_id matches if BOTH sides have one; if either side is empty,
+        the entry is still considered a match (backward-compat with jobs
+        created before client_id enforcement).
+    """
+    if not file_hash:
+        return None
+    with _job_registry_lock:
+        for jid, rec in _job_registry.items():
+            if rec.get("file_hash") != file_hash:
+                continue
+            rec_cid = rec.get("client_id", "")
+            if client_id and rec_cid and rec_cid != client_id:
+                continue
+            return dict(rec)
+    return None
+
+
+def _reconstruct_job_from_storj(job_id, fallback_record=None):
+    """Reconstruct an in-memory job from Storj EPUB + durable registry.
+
+    Shared helper used by /api/generate, /api/job_chapters, and
+    /api/reset_to_chapters when the job is missing from the in-memory `jobs`
+    dict (lost after a Render cold start). Replaces the previously-duplicated
+    inline reconstruction blocks.
+
+    Resolution order for the EPUB S3 key + metadata:
+      1. The durable registry (_job_registry[job_id]) — primary source;
+      2. `fallback_record` (typically a download-token snapshot returned by
+         _check_job_owner) — used when the registry misses this job_id
+         (e.g. jobs created before the registry existed, or registry file
+         was wiped and not yet restored from R2).
+
+    On success: downloads the original EPUB from Storj, re-parses it via
+    _parse_book() (extension-dispatched: epub/pdf/txt/abm), and inserts a
+    fresh 'analyzed' job into the in-memory `jobs` dict. Returns the job dict.
+
+    On failure: raises Exception. Callers are expected to translate this
+    into a 400/404 response (or fall back to a weaker response path, in the
+    case of /api/job_chapters).
+    """
+    if job_id in jobs:
+        return jobs[job_id]
+
+    # Source 1: durable registry
+    with _job_registry_lock:
+        rec = dict(_job_registry.get(job_id, {}))
+
+    # Source 2: download-token snapshot (fallback for fields the registry
+    # doesn't have yet — epub_s3_key, client_id, original_filename, etc.).
+    # The token snapshot stores the book title under "book_title", not "title".
+    if fallback_record and isinstance(fallback_record, dict):
+        for k in ("epub_s3_key", "client_id", "original_filename", "file_hash",
+                  "language_detected", "selected_chapters", "chapter_mp3s",
+                  "total_chapters"):
+            if not rec.get(k) and fallback_record.get(k):
+                rec[k] = fallback_record[k]
+        if not rec.get("title") and fallback_record.get("book_title"):
+            rec["title"] = fallback_record["book_title"]
+
+    epub_s3_key = rec.get("epub_s3_key", "")
+    if not epub_s3_key:
+        raise RuntimeError("no epub_s3_key for job (cannot reconstruct from Storj)")
+
+    import storage_backend
+    if not storage_backend.is_enabled():
+        raise RuntimeError("storage backend not enabled (cannot download EPUB)")
+
+    work_dir = UPLOAD_DIR / job_id
+    work_dir.mkdir(parents=True, exist_ok=True)
+    epub_filename = os.path.basename(epub_s3_key)
+    local_epub_path = str(work_dir / epub_filename)
+    storage_backend.download_file(epub_s3_key, local_epub_path)
+    print(f"[{job_id}] EPUB restored from Storj: {local_epub_path}")
+
+    # Re-parse using the same extension dispatch as /api/analyze.
+    info = _parse_book(local_epub_path)
+
+    with _jobs_lock:
+        jobs[job_id] = {
+            "status": "analyzed",
+            "epub_path": local_epub_path,
+            "epub_s3_key": epub_s3_key,
+            "info": info,
+            "last_poll": time.time(),
+            "original_filename": rec.get("original_filename", epub_filename),
+            "client_id": rec.get("client_id", _get_client_id()),
+            "client_ip": _get_client_ip(),
+            "browser_lang": _get_browser_lang(),
+            "optimized_chapters": [],
+            "file_hash": rec.get("file_hash", ""),
+            "language_detected": rec.get("language_detected", False),
+            "selected_chapters": rec.get("selected_chapters", []),
+            "chapter_mp3s": rec.get("chapter_mp3s", []),
+        }
+    print(f"[{job_id}] Job reconstructed from Storj EPUB: {len(info.chapters)} chapters")
+    return jobs[job_id]
 
 
 # ---------------------------------------------------------------------------
@@ -8098,6 +8344,75 @@ def api_analyze():
                 "optimized_chapters": existing_job.get("optimized_chapters", []),
             })
 
+    # ── ARIA: durable-registry dedup (survives Render cold starts) ──
+    # The in-memory check above only matches jobs still live in `jobs`. After
+    # a Flask restart (Render idles and cold-starts the dyno), `jobs` is empty
+    # but the durable registry (_job_registry, persisted to disk + R2/Storj)
+    # still has the (client_id, file_hash) → job_id mapping. Without this
+    # check, re-uploading the same EPUB after a restart would mint a brand
+    # new job_id and create a duplicate library entry.
+    #
+    # If we get a hit, reconstruct the in-memory job from the Storj EPUB
+    # (re-using the exact same reconstruction logic as /api/generate) and
+    # return the existing job_id with the full analyze response — identical
+    # to the in-memory reuse path above. Reconstruction failures are
+    # non-fatal: we fall through to minting a fresh job_id.
+    _registry_hit = _lookup_job_by_file_hash(client_id, file_hash)
+    if _registry_hit:
+        _reg_jid = _registry_hit.get("job_id", "")
+        if _reg_jid:
+            try:
+                _reconstruct_job_from_storj(_reg_jid, fallback_record=_registry_hit)
+                with _jobs_lock:
+                    _reg_job = jobs.get(_reg_jid)
+                if _reg_job:
+                    _reg_status = _reg_job.get("status", "")
+                    if _reg_status in ("optimizing", "generating"):
+                        return jsonify({
+                            "existing_job_id": _reg_jid,
+                            "status": _reg_status,
+                            "is_running": True,
+                            "progress_current": _reg_job.get("progress_current", 0),
+                            "progress_total": _reg_job.get("progress_total", 0),
+                            "opt_progress_current": _reg_job.get("opt_progress_current", 0),
+                            "opt_progress_total": _reg_job.get("opt_progress_total", 0),
+                        })
+                    _reg_info = _reg_job["info"]
+                    _lang_reg = (getattr(_reg_info, "language", None) or "it")[:2].lower()
+                    _reg_chapters = []
+                    _reg_total_secs = 0.0
+                    for _rch in _reg_info.chapters:
+                        _rsecs = _estimate_chapter_seconds(_rch, _lang_reg)
+                        _reg_total_secs += _rsecs
+                        _reg_chapters.append({
+                            "index": _rch.index, "title": _rch.title,
+                            "words": _rch.word_count, "chars": _rch.char_count,
+                            "estimated_minutes": round(_rsecs / 60.0, 1),
+                        })
+                    print(f"[analyze] Registry hit for file_hash={file_hash[:10]}.. "
+                          f"→ reusing job_id={_reg_jid} (reconstructed from Storj)")
+                    return jsonify({
+                        "job_id": _reg_jid,
+                        "title": _reg_info.title, "author": _reg_info.author,
+                        "language": _reg_info.language,
+                        "language_detected": _reg_job.get("language_detected", False),
+                        "file_type": "abm" if is_abm else ("txt" if is_txt else ("pdf" if is_pdf else "epub")),
+                        "has_cover": bool(_reg_job.get("cover_thumb")),
+                        "total_chapters": len(_reg_info.chapters),
+                        "total_words": _reg_info.total_words,
+                        "total_chars": _reg_info.total_chars,
+                        "estimated_minutes": round(_reg_total_secs / 60.0, 1),
+                        "chapters": _reg_chapters,
+                        "preview_text": _reg_job.get("preview_text", ""),
+                        "llm_available": _llm_available(),
+                        "ai_optimized": _reg_job.get("ai_optimized", False),
+                        "optimized_chapters": _reg_job.get("optimized_chapters", []),
+                    })
+            except Exception as _e_reg_recon:
+                print(f"[analyze] Registry hit reconstruction failed for "
+                      f"job_id={_reg_jid} (non-fatal, will mint new id): {_e_reg_recon}")
+            # Fall through to minting a new job_id below.
+
     abm_cover_info = None  # cover data extracted from .abm file
     try:
         if is_abm:
@@ -8144,6 +8459,7 @@ def api_analyze():
     # When /api/generate is called after a restart (job only in token),
     # the EPUB is downloaded from Storj and re-parsed to reconstruct the
     # in-memory job — enabling "More chapters" without re-upload.
+    _analyzed_epub_s3_key = ""
     try:
         import storage_backend
         if storage_backend.is_enabled():
@@ -8151,9 +8467,26 @@ def api_analyze():
             storage_backend.upload_file(str(file_path), s3_key)
             with _jobs_lock:
                 jobs[job_id]["epub_s3_key"] = s3_key
+            _analyzed_epub_s3_key = s3_key
             print(f"[{job_id}] EPUB uploaded to S3/Storj: {s3_key}")
     except Exception as _e_s3:
         print(f"[{job_id}] EPUB S3 upload failed (non-fatal): {_e_s3}")
+
+    # ── ARIA: write-through to the durable job registry ──
+    # Records the (client_id, file_hash) → job_id mapping + book metadata so
+    # that re-uploads after a Flask restart can be de-duplicated (see the
+    # _lookup_job_by_file_hash check above) and /api/job_chapters can
+    # reconstruct the full in-memory job. Best-effort, non-fatal: a registry
+    # write failure never blocks the analyze response.
+    _register_job_and_flush(job_id,
+        client_id=client_id,
+        file_hash=file_hash,
+        title=info.title,
+        author=info.author,
+        total_chapters=len(info.chapters),
+        epub_s3_key=_analyzed_epub_s3_key,
+        selected_chapters=[],
+        chapter_mp3s=[])
 
     # Extract cover thumbnail for preview (EPUB or ABM; PDF/TXT have no embedded cover)
     has_cover = False
@@ -8812,49 +9145,17 @@ def api_generate():
             return jsonify({"error": "Session expired. Re-upload file."}), 400
         return err, sc
 
-    # ── ARIA: reconstruct in-memory job from token + Storj EPUB ──
-    # If the job is only in a download token (after Flask restart), the
-    # token record is a dict (not a job object with .info). We need to
-    # download the original EPUB from Storj, re-parse it, and reconstruct
-    # the full in-memory job so run_generation can proceed.
+    # ── ARIA: reconstruct in-memory job from durable registry + Storj EPUB ──
+    # If the job is only in the durable registry / download token (after a
+    # Flask restart), the token record is a dict (not a job object with
+    # .info). We delegate to the shared _reconstruct_job_from_storj() helper
+    # — the same one used by /api/job_chapters and /api/reset_to_chapters —
+    # which downloads the original EPUB from Storj, re-parses it, and
+    # inserts a fresh 'analyzed' job into the in-memory `jobs` dict so
+    # run_generation can proceed.
     if job_id not in jobs:
-        epub_s3_key = job.get("epub_s3_key", "")
-        if not epub_s3_key:
-            return jsonify({"error": "Session expired. Re-upload file."}), 400
         try:
-            import storage_backend
-            if not storage_backend.is_enabled():
-                return jsonify({"error": "Session expired. Re-upload file."}), 400
-            # Download EPUB from Storj
-            work_dir = UPLOAD_DIR / job_id
-            work_dir.mkdir(parents=True, exist_ok=True)
-            epub_filename = os.path.basename(epub_s3_key)
-            local_epub_path = str(work_dir / epub_filename)
-            storage_backend.download_file(epub_s3_key, local_epub_path)
-            print(f"[{job_id}] EPUB restored from Storj: {local_epub_path}")
-            # Re-parse the EPUB
-            info = parse_epub(local_epub_path)
-            # Reconstruct the in-memory job
-            with _jobs_lock:
-                jobs[job_id] = {
-                    "status": "analyzed",
-                    "epub_path": local_epub_path,
-                    "epub_s3_key": epub_s3_key,
-                    "info": info,
-                    "last_poll": time.time(),
-                    "original_filename": job.get("original_filename", epub_filename),
-                    "client_id": job.get("client_id", _get_client_id()),
-                    "client_ip": _get_client_ip(),
-                    "browser_lang": _get_browser_lang(),
-                    "optimized_chapters": [],
-                    "file_hash": job.get("file_hash", ""),
-                    "language_detected": job.get("language_detected", False),
-                    "selected_chapters": job.get("selected_chapters", []),
-                    "chapter_mp3s": job.get("chapter_mp3s", []),
-                }
-            # Re-fetch the reconstructed job
-            job = jobs[job_id]
-            print(f"[{job_id}] Job reconstructed from Storj EPUB: {len(info.chapters)} chapters")
+            job = _reconstruct_job_from_storj(job_id, fallback_record=job)
         except Exception as e:
             print(f"[{job_id}] Job reconstruction from Storj failed: {e}")
             return jsonify({"error": "Session expired. Re-upload file."}), 400
@@ -9837,15 +10138,39 @@ def api_job_chapters(job_id):
         return err, sc
     info = job.get("info")
     if not info or not info.chapters:
-        # ARIA fallback: if the in-memory job is gone (Flask restart), the
-        # job dict is a download token snapshot. It has chapter_mp3s +
-        # selected_chapters but no parsed chapter list. Return what we have
-        # so the frontend can at least show the chapter browser + play audio.
+        # ── ARIA PRIMARY reconstruction path ──
+        # The in-memory job is gone (Flask restart wiped `jobs`). The job
+        # dict we just got from _check_job_owner is a download-token snapshot
+        # — it has chapter_mp3s + selected_chapters but no parsed chapter
+        # list, so `info` is missing. Reconstruct the FULL in-memory job from
+        # the durable registry + Storj EPUB using the same helper that
+        # /api/generate uses. This restores the original title, author, and
+        # total_chapters count — none of which the weak fallback below can
+        # provide. Non-fatal: on failure we fall through to the weak path.
+        try:
+            _reconstruct_job_from_storj(job_id, fallback_record=job)
+            with _jobs_lock:
+                job = jobs.get(job_id, job)
+            info = job.get("info")
+        except Exception as _e_recon:
+            print(f"[{job_id}] job_chapters reconstruction from Storj "
+                  f"failed (non-fatal, will use weak fallback): {_e_recon}")
+            info = None
+
+    if not info or not info.chapters:
+        # ── ARIA WEAK fallback ──
+        # Only reached if Storj reconstruction itself failed (e.g.
+        # epub_s3_key missing from both the registry and the token snapshot,
+        # or the storage backend is disabled). Return what we have from the
+        # token snapshot so the frontend can at least show the chapter
+        # browser + play existing audio. This path loses title provenance
+        # (author="" and total_chapters may be 1) — that's why it's a
+        # fallback, not the primary path.
         chapter_mp3s = job.get("chapter_mp3s") or []
         if chapter_mp3s:
             return jsonify({
                 "job_id": job_id,
-                "title": job.get("book_title", ""),
+                "title": job.get("book_title", "") or job.get("title", ""),
                 "author": "",
                 "language": "",
                 "total_chapters": job.get("total_chapters", len(chapter_mp3s)),
@@ -9981,40 +10306,13 @@ def api_reset_to_chapters(job_id):
     if _err is not None:
         return _err, _sc
 
-    # ── ARIA: reconstruct in-memory job from token + Storj EPUB ──
+    # ── ARIA: reconstruct in-memory job from durable registry + Storj EPUB ──
+    # Delegates to the shared _reconstruct_job_from_storj() helper — same
+    # one used by /api/generate and /api/job_chapters — so the reconstruction
+    # path is identical across all entry points.
     if job_id not in jobs:
-        epub_s3_key = _job.get("epub_s3_key", "")
-        if not epub_s3_key:
-            return jsonify({"error": "Job not found"}), 404
         try:
-            import storage_backend
-            if not storage_backend.is_enabled():
-                return jsonify({"error": "Job not found"}), 404
-            work_dir = UPLOAD_DIR / job_id
-            work_dir.mkdir(parents=True, exist_ok=True)
-            epub_filename = os.path.basename(epub_s3_key)
-            local_epub_path = str(work_dir / epub_filename)
-            storage_backend.download_file(epub_s3_key, local_epub_path)
-            print(f"[{job_id}] EPUB restored from Storj for reset: {local_epub_path}")
-            info = parse_epub(local_epub_path)
-            with _jobs_lock:
-                jobs[job_id] = {
-                    "status": "analyzed",
-                    "epub_path": local_epub_path,
-                    "epub_s3_key": epub_s3_key,
-                    "info": info,
-                    "last_poll": time.time(),
-                    "original_filename": _job.get("original_filename", epub_filename),
-                    "client_id": _job.get("client_id", _get_client_id()),
-                    "client_ip": _get_client_ip(),
-                    "browser_lang": _get_browser_lang(),
-                    "optimized_chapters": [],
-                    "file_hash": _job.get("file_hash", ""),
-                    "language_detected": _job.get("language_detected", False),
-                    "selected_chapters": _job.get("selected_chapters", []),
-                    "chapter_mp3s": _job.get("chapter_mp3s", []),
-                }
-            print(f"[{job_id}] Job reconstructed from Storj EPUB for reset: {len(info.chapters)} chapters")
+            _reconstruct_job_from_storj(job_id, fallback_record=_job)
         except Exception as e:
             print(f"[{job_id}] Reset reconstruction from Storj failed: {e}")
             return jsonify({"error": "Job not found"}), 404
@@ -10068,6 +10366,16 @@ def api_reset_to_chapters(job_id):
             job.pop(key, None)
     # Keep: info, epub_path, cover_thumb, cover_mime, original_filename, preview_text,
     #        client_id, client_ip, voice (so preview still works)
+
+    # ── ARIA: clear chapter_mp3s / selected_chapters in the durable registry ──
+    # The reset wiped the in-memory copies; mirror that to the registry so a
+    # subsequent Flask restart doesn't restore stale chapter_mp3s. The book
+    # metadata (title, author, total_chapters, epub_s3_key, file_hash) is
+    # preserved — only the per-generation output is cleared. Best-effort,
+    # non-fatal.
+    _register_job_and_flush(job_id,
+        selected_chapters=[],
+        chapter_mp3s=[])
 
     _log_activity(job_id, job.get("original_filename", ""), "RESET_CHAPTERS",
                   job.get("client_id", ""), job.get("client_ip", ""),
@@ -15252,6 +15560,14 @@ _load_vouchers()
 payment._migrate_paid_opt_to_paid_jobs()
 payment._load_paid_jobs_done()
 payment._recover_orphaned_voucher_charges(jobs)
+
+# ARIA: load the durable job registry (survives Render cold starts) so that
+# /api/analyze can de-duplicate re-uploads by (client_id, file_hash) and
+# /api/job_chapters / /api/generate can reconstruct the in-memory job from
+# Storj EPUB after a restart. Must come AFTER _load_tokens() so the registry
+# is consistent with the token snapshots (the two are kept in sync on every
+# _save_tokens() call).
+_load_job_registry()
 
 # Load persisted client_id → email mapping for cross-job notification fallback
 _load_client_emails()

@@ -238,3 +238,90 @@ Files deleted:
 
 Migration file:
 - prisma/migrations/20260803000000_drop_orphaned_audiobook_fields/migration.sql
+
+---
+Task ID: 6
+Agent: main (ARIA Durable Job Registry — survives Render cold starts)
+Task: Fix the underlying persistence gap that causes (1) duplicate library entries when the same EPUB is re-uploaded after a Render cold start, and (2) /api/job_chapters returning a degraded reconstruction (author lost, total_chapters wrong) when the in-memory job is gone. Add a durable job registry persisted to disk + R2/Storj (mirroring the _save_tokens/_load_tokens pattern), keyed by file_hash → job_id, and extract the inline Storj EPUB reconstruction logic (duplicated in api_generate and api_reset_to_chapters) into a shared _reconstruct_job_from_storj(job_id) helper used by api_generate, api_job_chapters, and api_reset_to_chapters.
+
+Work Log:
+- READ audiobook_app.py (15,381 lines) to map the existing persistence:
+  - _save_tokens()/_load_tokens() at lines 1638/1703 — the pattern to copy (atomic JSON write via community_store.atomic_write_json + R2 sync, all failure paths non-fatal try/except).
+  - _TOKENS_FILE = UPLOAD_DIR / "_download_tokens.json" (line 1096).
+  - api_analyze() at line 7978 — duplicate detection at line 8048-8099 only checks the live `jobs` dict, NOT any durable store.
+  - api_generate() at line 8785 — inline "ARIA: reconstruct in-memory job from token + Storj EPUB" block at line 8815-8860.
+  - api_job_chapters() at line 9823 — weak chapter_mp3s-only fallback at line 9839-9864 (author="", total_chapters=len(chapter_mp3s) which is often 1).
+  - api_reset_to_chapters() at line 9977 — second copy of the inline Storj reconstruction at line 9984-10020.
+  - _check_job_owner() at line 690 — already returns the download-token snapshot as a dict when the job is missing from `jobs` (the source of `fallback_record` for the new helper).
+  - Startup sequence at line 15246 — where to add _load_job_registry().
+  - _parse_book(path) at line 890 — existing extension-dispatched parser (epub/pdf/txt/abm), reused by the new helper.
+
+- ADDED _job_registry dict + _job_registry_lock + _JOB_REGISTRY_FILE (line 1099-1114), placed right after _download_tokens/_TOKENS_FILE/_tokens_lock. Maps job_id → {job_id, client_id, file_hash, title, author, total_chapters, epub_s3_key, selected_chapters, chapter_mp3s, updated_at}.
+
+- ADDED 6 helper functions (lines 1775-1973), placed right after _load_tokens():
+  - _save_job_registry() — atomic local JSON write via community_store.atomic_write_json + R2 sync. Mirrors _save_tokens() exactly. All failure paths non-fatal (try/except + print, never raises).
+  - _load_job_registry() — restores from disk on startup, with R2 fallback if the local file is missing (same fallback as _load_tokens()).
+  - _register_job(job_id, **fields) — updates a single job's registry entry IN MEMORY (no flush). Used by _save_tokens() to batch-update many entries from token snapshots and flush once.
+  - _register_job_and_flush(job_id, **fields) — updates + persists immediately. Used by one-off mutation points (api_analyze, api_reset_to_chapters).
+  - _lookup_job_by_file_hash(client_id, file_hash) — scans the registry for an entry matching (client_id, file_hash). Defensive: matches if either side has empty client_id (backward-compat with legacy entries).
+  - _reconstruct_job_from_storj(job_id, fallback_record=None) — the shared helper. Resolution order: (1) durable registry, (2) fallback_record (download-token snapshot) for fields the registry misses. Downloads the EPUB from Storj, re-parses via _parse_book() (extension-dispatched), inserts a fresh 'analyzed' job into `jobs`. Raises Exception on failure (caller translates to 400/404 or falls back to weaker path).
+
+- HOOKED _save_tokens() (line 1655) to sync the registry from token snapshots AFTER the token file is written. Hoisted `data = {}` outside the _tokens_lock block so it's accessible after the lock releases. Iterates over all token snapshots and calls _register_job() for each (batch), then a single _save_job_registry() flush. This is the "any time chapter_mp3s/selected_chapters change" write-through — tokens are saved at every generation milestone.
+
+- UPDATED api_analyze() (line 8224):
+  - Added durable-registry dedup check (lines 8347-8414) AFTER the existing in-memory check, BEFORE minting a new job_id. Looks up _lookup_job_by_file_hash(client_id, file_hash); on hit, calls _reconstruct_job_from_storj() and returns the existing job_id with the full analyze response (identical shape to the in-memory reuse path). Reconstruction failures are non-fatal — falls through to minting a fresh job_id.
+  - Added _register_job_and_flush() call (lines 8475-8489) AFTER the Storj EPUB upload, recording client_id, file_hash, title, author, total_chapters, epub_s3_key, selected_chapters=[], chapter_mp3s=[]. The epub_s3_key is captured from the upload result (empty string if the upload failed, so the registry still has the metadata).
+
+- REPLACED the inline reconstruction block in api_generate() (was lines 8815-8860) with a 6-line call to _reconstruct_job_from_storj(job_id, fallback_record=job). Same error handling (logs failure, returns 400 "Session expired. Re-upload file.").
+
+- REPLACED the inline reconstruction block in api_reset_to_chapters() (was lines 9984-10020) with a 5-line call to _reconstruct_job_from_storj(job_id, fallback_record=_job). Same error handling (logs failure, returns 404).
+
+- ADDED _register_job_and_flush(job_id, selected_chapters=[], chapter_mp3s=[]) call (lines 10346-10354) in api_reset_to_chapters() AFTER the in-memory reset clears those keys, so the registry mirrors the reset state (book metadata preserved, only per-generation output cleared).
+
+- UPDATED api_job_chapters() (line 10124):
+  - When `info` is missing, FIRST tries _reconstruct_job_from_storj(job_id, fallback_record=job) (the PRIMARY path, lines 10141-10158). This restores title, author, and total_chapters from the re-parsed EPUB.
+  - Only if Storj reconstruction fails (e.g. epub_s3_key missing, storage backend disabled) does it fall through to the weak chapter_mp3s-only response (lines 10160-10189). The weak fallback now reads title from both "book_title" and "title" keys (defensive against different snapshot sources).
+  - The response shape is unchanged — both paths return the same JSON keys.
+
+- ADDED _load_job_registry() to the startup sequence (line 15570), placed AFTER _load_tokens() so the registry is consistent with the token snapshots (the two are kept in sync on every _save_tokens() call).
+
+- VERIFIED end-to-end with a real Flask subprocess (port 5701) using a fake storage_backend module backed by local filesystem (so no real Storj credentials needed). Built a 3-chapter test EPUB programmatically with ebooklib. Test script: spawn Flask → POST /api/analyze → SIGKILL Flask → spawn fresh Flask → POST /api/analyze with the SAME EPUB → assert same job_id → populate chapter_mp3s in registry (simulating partial conversion) → SIGKILL Flask again → spawn fresh Flask → GET /api/job_chapters/<job_id> → assert full title, author, total_chapters=3 (NOT 1, NOT empty author).
+
+- VERIFICATION RESULTS (actual curl-equivalent output, NOT summarized):
+  - file_hash (md5 of EPUB bytes): 69bccd685ce8ce92c75e80df7bc93c8f
+  - POST /api/analyze #1 → job_id=aXUoR0xU520zu7Cz3vodgQ, title="Pride and Prejudice", author="Jane Austen", total_chapters=3
+  - [Flask killed — simulating Render cold-start]
+  - POST /api/analyze #2 (re-upload after restart) → job_id=aXUoR0xU520zu7Cz3vodgQ (SAME), title="Pride and Prejudice", author="Jane Austen", total_chapters=3
+  - [Populated 2 chapter_mp3s in registry — simulating partial conversion]
+  - [Flask killed AGAIN — second cold-start]
+  - GET /api/job_chapters/aXUoR0xU520zu7Cz3vodgQ → 200 OK with:
+    - title: "Pride and Prejudice" (NOT empty)
+    - author: "Jane Austen" (NOT empty)
+    - total_chapters: 3 (NOT 1)
+    - chapters: full 3-chapter list with words/chars/estimated_minutes (NOT just the 2 chapter_mp3s)
+    - chapter_mp3s: the 2 partial-conversion entries preserved
+    - selected_chapters: [1, 2] preserved
+
+- CLEANED UP: removed fake storage_backend.py (restored real one from git checkout), removed test EPUB + verify scripts, restarted the dev environment (Next.js on :3000 + audiobook-maker on :5601, both returning HTTP 200).
+
+- LINT: `bun run lint` passes (exit 0). `python3 -m py_compile audiobook_app.py` passes.
+
+Stage Summary:
+Files changed:
+- mini-services/audiobook-maker/audiobook_app.py (+~290 lines net):
+  - _job_registry data structures (line 1099-1114)
+  - 6 helper functions: _save_job_registry, _load_job_registry, _register_job, _register_job_and_flush, _lookup_job_by_file_hash, _reconstruct_job_from_storj (lines 1775-1973)
+  - _save_tokens() now syncs the registry from token snapshots (lines 1718-1738)
+  - api_analyze() durable-registry dedup check + write-through (lines 8347-8414, 8475-8489)
+  - api_generate() reconstruction delegated to helper (lines 9148-9161)
+  - api_reset_to_chapters() reconstruction delegated to helper + registry clear on reset (lines 10285-10294, 10346-10354)
+  - api_job_chapters() PRIMARY path = _reconstruct_job_from_storj, weak fallback only if Storj fails (lines 10139-10189)
+  - Startup: _load_job_registry() added (line 15570)
+
+API response shapes: UNCHANGED. All endpoints return the same JSON keys as before; only the internal reconstruction path changed.
+
+Constraints honored:
+- Did NOT touch payment, Gemini budget, or translation code paths.
+- Did NOT change any endpoint's response shape.
+- All persistence write-throughs are non-blocking / best-effort (try/except + print, matching the existing storage_backend call style).
+- The shared _reconstruct_job_from_storj() helper is used by ALL THREE endpoints (api_generate, api_job_chapters, api_reset_to_chapters) — no duplicated reconstruction logic remains.
