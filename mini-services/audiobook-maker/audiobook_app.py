@@ -10251,7 +10251,13 @@ def api_my_jobs():
         out[jid] = entry
 
     for token, tinfo in list(_download_tokens.items()):
-        if not isinstance(tinfo, dict) or tinfo.get("client_id") != cid:
+        if not isinstance(tinfo, dict):
+            continue
+        # ARIA: skip only if BOTH the token has a client_id AND it doesn't match.
+        # If the token has no client_id (or it's empty), include it — this
+        # ensures jobs survive Flask restarts (the cookie changes on restart).
+        token_cid = tinfo.get("client_id", "")
+        if token_cid and token_cid != cid:
             continue
         created = tinfo.get("created_at", 0)
         retention = _effective_retention_for_token_info(tinfo)

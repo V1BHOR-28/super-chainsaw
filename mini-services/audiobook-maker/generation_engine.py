@@ -5134,6 +5134,15 @@ def run_generation(job_id, info, voice, rate, single_file, output_format='m4b', 
                               job.get("voice", ""), job.get("browser_lang", ""))
             except Exception:
                 pass
+            # ARIA: always create a download token even without email, so the
+            # job survives Flask restarts (token is persisted to Storj).
+            # Without this, _check_job_owner can't find the job after restart
+            # and 'More chapters' + chapter browser + playback all fail.
+            try:
+                _create_download_token(job_id)
+                print(f"[{job_id}] post-COMPLETE: download token created (no-email path)", flush=True)
+            except Exception as _tok_err:
+                print(f"[{job_id}] token creation failed (non-fatal): {_tok_err}", flush=True)
 
         # Copie amministrative agganciate mentre il job era in corso: ora che è
         # completato, materializza i download token admin-owned (indagine).
