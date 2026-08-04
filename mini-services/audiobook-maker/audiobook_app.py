@@ -10678,6 +10678,12 @@ def api_my_jobs():
             # chapters are already downloaded + warn on re-convert.
             "selected_chapters": job.get("selected_chapters") or [],
             "total_chapters": len(info.chapters) if info else 0,
+            # ARIA per-chapter mode: include chapter_mp3s from the in-memory
+            # job (always up-to-date after a generation merge). Without this,
+            # chapter_mp3s came ONLY from the download token — which was stale
+            # after "More chapters" (the token's snapshot was from the FIRST
+            # generation, so chapters added later never appeared in the library).
+            "chapter_mp3s": job.get("chapter_mp3s") or [],
         }
         if _is_admin_pending:
             entry["admin_copy"] = True
@@ -10766,8 +10772,15 @@ def api_my_jobs():
             # even after a Flask restart (when the in-memory job is gone).
             "selected_chapters": tinfo.get("selected_chapters", []),
             "total_chapters": tinfo.get("total_chapters", 0),
-            "chapter_mp3s": tinfo.get("chapter_mp3s", []),
         })
+        # ARIA: only use the token's chapter_mp3s if the in-memory job didn't
+        # already provide them. The in-memory job's chapter_mp3s are always
+        # more up-to-date (they reflect the latest generation merge). The
+        # token's snapshot may be stale if _create_download_token hasn't been
+        # called yet since the latest generation completed (e.g. the post-
+        # COMPLETE hook is still running).
+        if not entry.get("chapter_mp3s"):
+            entry["chapter_mp3s"] = tinfo.get("chapter_mp3s", [])
 
     ordered = sorted(out.values(),
                      key=lambda e: -(e.get("created_at") or 0))

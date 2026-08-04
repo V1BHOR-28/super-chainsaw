@@ -1400,28 +1400,23 @@ def _create_download_token(job_id):
     job = _jobs.get(job_id)
     if not job:
         return None
-    # Riusa un token gia' esistente per lo stesso job (idempotenza).
-    for tok, rec in _download_tokens.items():
-        if isinstance(rec, dict) and rec.get("job_id") == job_id:
-            return tok
     info = job.get("info", None)
     book_title = (info.title if info else "") or job.get("original_filename", "") or "Audiobook"
     dl_type = job.get("notify_download_type", "audio")
     base_url = job.get("notify_base_url", "").rstrip("/")
     lang = job.get("notify_lang", "en")
-    token = str(uuid.uuid4())
-    _download_tokens[token] = {
-        "job_id": job_id,
-        "created_at": time.time(),
-        "download_type": dl_type,
-        "base_url": base_url,
-        # Snapshot: everything needed to serve download after restart
+    # ARIA: the snapshot of chapter_mp3s + selected_chapters + output paths that
+    # MUST be refreshed from the in-memory job every time _create_download_token
+    # is called. Without this refresh, the token keeps the stale snapshot from
+    # the FIRST generation forever — /api/my_jobs reads chapter_mp3s from the
+    # token (not the in-memory job) and returns the old list, so chapters added
+    # via "More chapters" never appear in the library.
+    _refresh_fields = {
         "book_title": book_title,
         "output_zip": job.get("output_zip", ""),
         "output_name": job.get("output_name", ""),
         "output_file": job.get("output_files", [""])[0] if job.get("output_files") else "",
         "output_m4b": job.get("output_m4b", ""),
-        # Kit ZIP di ripiego (MP3 + capitoli) quando la conversione M4B e' fallita.
         "output_m4b_fallback_zip": job.get("output_m4b_fallback_zip", ""),
         "epub_path": job.get("epub_path", ""),
         "epub_s3_key": job.get("epub_s3_key", ""),
@@ -1435,19 +1430,31 @@ def _create_download_token(job_id):
         "lang": lang,
         "output_format": job.get("output_format", ""),
         "ai_optimized": job.get("ai_optimized", False),
-        # Optional: optimized .abm snapshot (when auto_generate flow produced one)
         "optimized_abm_path": job.get("optimized_abm_path", ""),
         "optimized_abm_name": job.get("optimized_abm_name", ""),
-        # Flag PREMIUM/Gemini: pilota retention 48h vs 18h nei /dl/* e nel cleanup.
         "is_gemini": _is_gemini_voice(job.get("voice", "") or job.get("opt_voice", "")),
         "client_id": job.get("client_id", ""),
-        # ARIA per-chapter mode: persist chapter_mp3s + selected_chapters so
-        # /api/chapter_mp3 and /api/job_chapters can serve them after a Flask
-        # restart (the in-memory jobs dict is lost on restart, but download
-        # tokens persist to _download_tokens.json on disk).
         "chapter_mp3s": job.get("chapter_mp3s", []),
         "selected_chapters": job.get("selected_chapters", []),
         "total_chapters": len(info.chapters) if info else 0,
+    }
+    # Riusa un token gia' esistente per lo stesso job (idempotenza), MA aggiorna
+    # i campi snapshot con i valori correnti del job in memoria. Senza questo
+    # refresh, il token manterrebbe per sempre lo snapshot della PRIMA generazione
+    # (chapter_mp3s=[ch1]) e /api/my_jobs restituirebbe dati stale anche dopo
+    # che la seconda generazione ha mergiato chapter_mp3s=[ch1, ch2].
+    for tok, rec in _download_tokens.items():
+        if isinstance(rec, dict) and rec.get("job_id") == job_id:
+            rec.update(_refresh_fields)
+            _save_tokens()
+            return tok
+    token = str(uuid.uuid4())
+    _download_tokens[token] = {
+        "job_id": job_id,
+        "created_at": time.time(),
+        "download_type": dl_type,
+        "base_url": base_url,
+        **_refresh_fields,
     }
     _save_tokens()
     return token
