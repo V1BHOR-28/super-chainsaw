@@ -24,7 +24,6 @@ import {
   analyzeEpub,
   getDownloadUrl,
   sendHeartbeat,
-  resetToChapters,
   getJobChapters,
   deleteJob,
   isPollingStatus,
@@ -280,8 +279,7 @@ export function LibraryView() {
       // Fetch the chapter list so the selector opens with per-chapter checkboxes.
       // Do NOT call resetToChapters here — that would reset the job status
       // on the Flask side even if the user closes the modal without converting.
-      // resetToChapters is called in handleConvertStarted (when the user
-      // actually clicks "Convert" in the selector).
+      // The Flask /api/generate endpoint handles job reconstruction automatically.
       const chaptersResp = await getJobChapters(card.jobId);
 
       // Do NOT flip status to 'analyzed' yet — keep it as 'done' so the
@@ -321,16 +319,12 @@ export function LibraryView() {
 
   const handleConvertStarted = () => {
     // The user has clicked "Convert" in the chapter selector.
-    // NOW it's safe to reset the job + flip status to 'generating'.
+    // Flip status to 'generating' so the card shows the spinner.
+    // The Flask /api/generate endpoint handles job reconstruction from Storj
+    // automatically — no need to call resetToChapters (which would destroy
+    // the existing audio if the new generation fails).
     const jobId = analyzeResponse?.job_id ?? wholeBookJob?.jobId;
     if (jobId) {
-      // Try to reset the job on the Flask side (non-blocking — if it fails,
-      // the generate call will handle reconstruction from Storj).
-      try {
-        resetToChapters(jobId).catch(() => {});
-      } catch {
-        // non-blocking
-      }
       setCards((prev) =>
         prev.map((c) => (c.jobId === jobId ? { ...c, status: "generating" } : c)),
       );
