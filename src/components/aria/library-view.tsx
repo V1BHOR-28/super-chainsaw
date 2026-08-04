@@ -113,17 +113,51 @@ export function LibraryView() {
   const openPlayer = usePlayerStore((s) => s.openPlayer);
   const setActiveWorkspace = useAriaStore((s) => s.setActiveWorkspace);
   const STORAGE_KEY = "aria-audiobook-library";
+  const DELETED_KEY = "aria-audiobook-deleted";
 
   // Load from localStorage on mount — instant display before the API responds.
   const [cards, setCards] = useState<LibraryCard[]>(() => {
     if (typeof window === "undefined") return [];
     try {
       const stored = localStorage.getItem(STORAGE_KEY);
-      return stored ? JSON.parse(stored) : [];
+      const parsed: LibraryCard[] = stored ? JSON.parse(stored) : [];
+      // Filter out any job_ids the user has explicitly deleted in the past.
+      // Without this, old localStorage entries for deleted books would
+      // reappear on every page load (the merge logic in fetchJobs keeps
+      // cards that aren't in the API response, which is correct for
+      // expired-but-still-on-disk books, but WRONG for user-deleted books).
+      const deletedRaw = localStorage.getItem(DELETED_KEY);
+      const deletedSet: Set<string> = deletedRaw
+        ? new Set(JSON.parse(deletedRaw))
+        : new Set();
+      return parsed.filter((c) => !deletedSet.has(c.jobId));
     } catch {
       return [];
     }
   });
+
+  // Track job_ids the user has explicitly deleted. Persisted to localStorage
+  // so deleted books stay deleted across page refreshes + new tabs. Without
+  // this, the fetchJobs merge logic resurrects deleted cards from localStorage
+  // on every poll (every 5s while any job is generating).
+  const [deletedIds, setDeletedIds] = useState<Set<string>>(() => {
+    if (typeof window === "undefined") return new Set();
+    try {
+      const raw = localStorage.getItem(DELETED_KEY);
+      return raw ? new Set(JSON.parse(raw)) : new Set();
+    } catch {
+      return new Set();
+    }
+  });
+
+  // Persist the deleted-ids set to localStorage whenever it changes.
+  useEffect(() => {
+    try {
+      localStorage.setItem(DELETED_KEY, JSON.stringify([...deletedIds]));
+    } catch {
+      // non-blocking
+    }
+  }, [deletedIds]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [hoveredJob, setHoveredJob] = useState<string | null>(null);
@@ -146,13 +180,20 @@ export function LibraryView() {
   const fetchJobs = useCallback(async () => {
     try {
       const data = await getMyJobs();
-      const apiCards = data.jobs.map(toCard);
+      // Filter out job_ids the user has explicitly deleted. This is the
+      // CRITICAL fix: without this filter, the backend (if not yet
+      // redeployed with _purge_job_completely) still returns deleted jobs
+      // in /api/my_jobs, and the merge logic below would show them.
+      const apiCards = data.jobs.map(toCard).filter((c) => !deletedIds.has(c.jobId));
       // Merge: keep localStorage cards that aren't in the API response (they
       // may be expired on the Flask side but still have audio files on disk).
-      // Update cards that ARE in the API response with fresh data.
+      // BUT filter out any that the user has explicitly deleted — the merge
+      // logic used to resurrect deleted cards from localStorage on every poll.
       setCards((prev) => {
         const apiIds = new Set(apiCards.map((c) => c.jobId));
-        const staleCards = prev.filter((c) => !apiIds.has(c.jobId));
+        const staleCards = prev.filter(
+          (c) => !apiIds.has(c.jobId) && !deletedIds.has(c.jobId),
+        );
         return [...apiCards, ...staleCards];
       });
       setError(null);
@@ -165,7 +206,7 @@ export function LibraryView() {
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [deletedIds]);
 
   useEffect(() => {
     fetchJobs();
@@ -195,6 +236,17 @@ export function LibraryView() {
     setUploading(true);
     try {
       const resp = await analyzeEpub(file);
+      // If the user previously deleted this job_id (e.g. the old backend
+      // resurrected it via file_hash dedup), un-delete it so it shows in
+      // the library again. The user explicitly re-uploaded the EPUB, so
+      // they want it back.
+      if (deletedIds.has(resp.job_id)) {
+        setDeletedIds((prev) => {
+          const next = new Set(prev);
+          next.delete(resp.job_id);
+          return next;
+        });
+      }
       setAnalyzeResponse(resp);
       toast({
         title: "Book analyzed",
@@ -303,6 +355,9 @@ export function LibraryView() {
     } catch {
       // Non-blocking — remove from UI even if the Flask job is already gone
     }
+    // Add to the deleted-ids set so fetchJobs never resurrects it from
+    // localStorage or from a stale backend response.
+    setDeletedIds((prev) => new Set(prev).add(jobId));
     setCards((prev) => prev.filter((c) => c.jobId !== jobId));
     toast({ title: "Audiobook removed" });
     setConfirmDelete(null);
