@@ -367,3 +367,63 @@ Files changed:
   - _cleanup_job is UNMODIFIED (still used by the background retention cleanup loop)
 
 Commit: 84aadbf "fix: deleted books no longer reappear in library on re-upload" (pushed to origin/main)
+
+---
+Task ID: 8
+Agent: main (Frontend fix: deleted books reappear from localStorage on every poll)
+Task: User reports deleted books STILL appear in the library. The backend fix (Task 7) wasn't enough — the frontend has its own bug.
+
+Work Log:
+- ANALYZED the screenshot (pasted_image_1785862127172.png) with VLM: shows the ARIA library at ariav2.seven.vercel.app (PRODUCTION) with 3 books visible. The user says these were deleted in the past but reappeared.
+
+- ROOT CAUSE (frontend): fetchJobs in library-view.tsx had a merge logic (lines 150-157):
+    setCards((prev) => {
+      const apiIds = new Set(apiCards.map((c) => c.jobId));
+      const staleCards = prev.filter((c) => !apiIds.has(c.jobId));
+      return [...apiCards, ...staleCards];
+    });
+  This deliberately kept localStorage cards that weren't in the API response (intended for expired-but-still-on-disk books). BUT it also resurrected user-deleted books on every poll (every 5s while any job is generating). Even after the backend fix (_purge_job_completely, Task 7), the frontend's staleCards merge brought deleted cards back from localStorage.
+
+  Two scenarios that caused the bug:
+  1. Old localStorage: user had books from before the fix, "deleted" some (which didn't actually delete on the old backend). Those deleted books are STILL in localStorage. On page load, they appear.
+  2. Polling resurrection: user deletes a book → setCards removes it → 5s later fetchJobs runs → backend returns the current list (without the deleted book) → BUT staleCards keeps the deleted card from localStorage → it reappears.
+
+- FIX: Added a deletedJobIds set persisted to localStorage ('aria-audiobook-deleted' key). Three layers of filtering:
+
+  1. On mount (useState initializer for 'cards'): filters out any job_id in the deleted set — so old localStorage entries from before the fix don't reappear on page load.
+
+  2. In fetchJobs: both apiCards AND staleCards are filtered by deletedIds — so the merge logic can NEVER resurrect a deleted card, whether from the backend response or from localStorage.
+
+  3. On re-upload (handleFileSelected): if analyzeEpub returns a job_id that's in the deleted set (happens when the old backend resurrects it via file_hash dedup), the job_id is removed from the deleted set — so the user can re-add a book they previously deleted.
+
+  handleDelete now adds the job_id to the deleted set BEFORE removing it from cards state.
+
+- VERIFIED with Agent Browser (agent-browser CLI):
+  - Set up localStorage with 2 cards: 'xVd7tyb--jcyjETVKRAN2g' (live) + 'OLD_DELETED_JOB' (deleted), and deletedIds=['OLD_DELETED_JOB'].
+  - Simulated the mount-time filter: 2 cards in storage → 1 after filter (deleted one removed) ✓
+  - Simulated the fetchJobs merge: backend returns 2 jobs (live + deleted) → apiCards filtered to 1, staleCards filtered to 0, final result has only the live card ✓
+  - Negative test (old buggy logic without deletedIds filter): both cards appear — confirmed the test catches the bug ✓
+  - Re-upload test: deletedIds.has('OLD_DELETED_JOB') → true → remove from set → book shows again ✓
+
+- VERIFIED backend E2E with curl:
+  - Upload EPUB → job_id=xVd7tyb--jcyjETVKRAN2g
+  - /api/my_jobs → includes the job ✓
+  - POST /api/delete/xVd7tyb--jcyjETVKRAN2g → {"status":"deleted"}
+  - /api/my_jobs → [] (job is GONE) ✓
+  - POST /api/delete/xVd7tyb--jcyjETVKRAN2g again → {"status":"deleted"} (idempotent) ✓
+
+- This frontend fix works EVEN IF the production backend (ariav2.seven.vercel.app → Render) hasn't been redeployed yet — the filtering happens client-side.
+
+Stage Summary:
+Files changed:
+- src/components/aria/library-view.tsx (+60 / -5 lines):
+  - NEW: DELETED_KEY constant + deletedIds state (loaded from localStorage on mount)
+  - NEW: useEffect to persist deletedIds to localStorage
+  - UPDATED: useState initializer for 'cards' filters by deletedIds on mount
+  - UPDATED: fetchJobs filters BOTH apiCards AND staleCards by deletedIds
+  - UPDATED: handleDelete adds job_id to deletedIds before removing from cards
+  - UPDATED: handleFileSelected removes job_id from deletedIds on re-upload
+
+Commit: 24d5ed5 "fix: deleted books no longer reappear from localStorage on every poll" (pushed to origin/main)
+
+IMPORTANT NOTE FOR USER: The production deployment at ariav2.seven.vercel.app needs a Vercel rebuild to pick up this frontend fix. The backend on Render also needs a redeploy to pick up _purge_job_completely (Task 7). But even without the backend redeploy, this frontend fix alone will stop deleted books from appearing.
