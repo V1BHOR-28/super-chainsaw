@@ -427,3 +427,44 @@ Files changed:
 Commit: 24d5ed5 "fix: deleted books no longer reappear from localStorage on every poll" (pushed to origin/main)
 
 IMPORTANT NOTE FOR USER: The production deployment at ariav2.seven.vercel.app needs a Vercel rebuild to pick up this frontend fix. The backend on Render also needs a redeploy to pick up _purge_job_completely (Task 7). But even without the backend redeploy, this frontend fix alone will stop deleted books from appearing.
+
+---
+Task ID: 9
+Agent: main (Fix: 'More chapters' doesn't generate — stale token masks live status)
+Task: User reports: "after creating a chapter, clicking 'More chapters' for another one — first it doesn't get created at all, next it shows as a green tick in the chapters list but doesn't even get created at all."
+
+Work Log:
+- REPRODUCED the bug with a real Flask subprocess on port 5700. Built a 3-chapter test EPUB, generated chapter 1 (succeeded), then clicked "More chapters" → generated chapter 2. The poll returned `ok=True status=done` IMMEDIATELY (no progress shown), and chapter 2 MP3 was never created. chapter_mp3s stayed at [1] instead of [1, 2].
+
+- ROOT CAUSE: /api/my_jobs (line 10691) iterates over `_download_tokens` AFTER the in-memory `jobs` loop. For each token, it UNCONDITIONALLY did `entry.update({"status": "done", ...})`. When the user clicks "More chapters" to generate chapter 2:
+  1. First generation completes → creates a download token with status='done' + chapter_mp3s=[ch1]
+  2. Second generation starts → in-memory job has status='generating'
+  3. /api/my_jobs is called (by the 5s frontend poll):
+     - in-memory loop sets status='generating' ✓
+     - token loop OVERWRITES with status='done' + chapter_mp3s=[ch1] ✗
+  4. Frontend sees status='done' → stops polling immediately
+  5. Generation completes in the background, but the frontend never sees the progress or the new chapter_mp3s (the stale token's [ch1] clobbers the in-memory job's freshly-merged [ch1, ch2])
+
+  This explains the user's exact symptoms: "doesn't get created at all" (the generation runs but the frontend never sees it) + "shows as a green tick" (the stale token says 'done').
+
+- FIX: Added `_MY_JOBS_LIVE_ACTIVE_STATUSES = frozenset({'generating', 'optimizing', 'translating'})` (line 10634). In the token loop (line 10707-10737), if the in-memory job already has one of these active statuses, the token does NOT override the status or chapter_mp3s — it only updates download-token-only fields (download_token, expires_at, downloaded_at, formats). The token's status='done' + chapter_mp3s are only used when the job is NOT in memory (e.g. after a Flask restart).
+
+- VERIFIED end-to-end with the same Flask subprocess:
+  STEP 1-4: Upload EPUB (3 chapters), generate ch1 → chapter_mp3s=[ch1] ✓
+  STEP 5: 'More chapters' → /api/job_chapters returns full 3-chapter list ✓
+  STEP 6: Generate ch2 → status correctly shows 'generating' with progress ('Cap. 2/1: Chapter 2... — chunk 2/5') instead of immediately returning 'done' ✓
+  STEP 7-9: chapter_mp3s=[ch1, ch2] — BOTH chapters present, both MP3 files accessible (output_1/001_Chapter_1.mp3 + output_2/001_Chapter_2.mp3) ✓
+
+  Before the fix, STEP 7 returned `ok=True status=done` immediately (the stale token masked the running generation), and STEP 8 showed `chapter_mp3s count: 1` (only ch1, ch2 was never created).
+
+- CLEANUP: removed test script + EPUB. `bun run lint` passes. `python3 -m py_compile` passes. Next.js (port 3000) + audiobook-maker (port 5601) both returning HTTP 200.
+
+Stage Summary:
+Files changed:
+- mini-services/audiobook-maker/audiobook_app.py (+44 lines):
+  - NEW: _MY_JOBS_LIVE_ACTIVE_STATUSES constant (line 10634)
+  - UPDATED: /api/my_jobs token loop — preserves live 'generating'/'optimizing'/'translating' status + in-memory chapter_mp3s instead of letting a stale token override them with 'done' (lines 10707-10737)
+
+Commit: 8216e61 "fix: 'More chapters' doesn't generate — stale token masks live status" (pushed to origin/main)
+
+IMPORTANT NOTE FOR USER: The production deployment at ariav2.seven.vercel.app (backend on Render) needs a redeploy to pick up this backend fix. The frontend doesn't need changes — once the backend stops returning stale 'done' status, the frontend's existing polling logic will correctly track the second generation to completion.
