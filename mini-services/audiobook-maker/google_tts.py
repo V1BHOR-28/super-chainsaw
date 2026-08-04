@@ -84,7 +84,10 @@ def is_available():
         os.environ["GOOGLE_APPLICATION_CREDENTIALS"] = creds_file
 
         try:
-            from google.cloud import texttospeech_v1beta1 as texttospeech
+            try:
+                from google.cloud import texttospeech_v1beta1 as texttospeech
+            except ImportError:
+                from google.cloud import texttospeech
             _gtts_module = texttospeech
             _gtts_client = texttospeech.TextToSpeechClient()
             _gtts_available = True

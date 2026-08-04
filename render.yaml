@@ -56,10 +56,12 @@ services:
 
       # ── Google Cloud TTS (Chirp3-HD — paid, high quality) ──
       # User has a GCP billing account. Requires service account JSON.
-      # Upload as Secret File at /etc/secrets/gcp-key.json on Render.
+      # Upload as Secret File named gcp-key.json on Render (mounted at /etc/secrets/gcp-key.json).
       - key: ABM_GCP_PROJECT_ID
         sync: false
       - key: GOOGLE_APPLICATION_CREDENTIALS
+        value: /etc/secrets/gcp-key.json
+      - key: ABM_GOOGLE_CREDENTIALS_FILE
         value: /etc/secrets/gcp-key.json
 
       # ── LLM text optimization (Groq — free, global, no CC) ──
