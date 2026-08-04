@@ -6,7 +6,6 @@ import { AmbientGlow } from "./primitives";
 import {
   generate,
   getVoices,
-  resetToChapters,
   type AnalyzeResponse,
   type VoicesResponse,
   type AbmVoice,
@@ -195,17 +194,8 @@ export function ChapterSelector({
     setConverting(true);
     try {
       const selectedArr = analyzeResponse ? Array.from(selected).sort((a, b) => a - b) : [];
-      // Reset the job to 'analyzed' state BEFORE generating. The Flask
-      // /api/generate endpoint rejects jobs that are already 'done' with
-      // "Generation already running or completed." This reset is safe because
-      // it only happens when the user has explicitly clicked "Convert" —
-      // not when opening or closing the selector.
-      try {
-        await resetToChapters(jobId);
-      } catch {
-        // Non-blocking: if reset fails (job already analyzed, or token-only
-        // after restart), the generate call will handle reconstruction.
-      }
+      // resetToChapters is already called by handleConvertMore in library-view
+      // BEFORE the selector opens. No need to call it again here.
       await generate(jobId, voice, selectedArr, "mp3");
       toast({
         title: "Conversion started",
