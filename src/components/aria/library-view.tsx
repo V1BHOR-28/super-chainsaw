@@ -319,10 +319,9 @@ export function LibraryView() {
 
   const handleConvertStarted = () => {
     // The user has clicked "Convert" in the chapter selector.
-    // Flip status to 'generating' so the card shows the spinner.
-    // The Flask /api/generate endpoint handles job reconstruction from Storj
-    // automatically — no need to call resetToChapters (which would destroy
-    // the existing audio if the new generation fails).
+    // The resetToChapters call happens inside the selector's handleConvert
+    // (before generate()), not here. This callback just flips the UI status
+    // and refreshes the job list.
     const jobId = analyzeResponse?.job_id ?? wholeBookJob?.jobId;
     if (jobId) {
       setCards((prev) =>
