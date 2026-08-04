@@ -277,24 +277,16 @@ export function LibraryView() {
   const handleConvertMore = async (card: LibraryCard) => {
     setResetting(card.jobId);
     try {
-      // Fetch the chapter list FIRST (before reset) — the reset endpoint
-      // doesn't return chapters, and we need them to open the selector.
+      // Fetch the chapter list so the selector opens with per-chapter checkboxes.
+      // Do NOT call resetToChapters here — that would reset the job status
+      // on the Flask side even if the user closes the modal without converting.
+      // resetToChapters is called in handleConvertStarted (when the user
+      // actually clicks "Convert" in the selector).
       const chaptersResp = await getJobChapters(card.jobId);
 
-      // Try to reset the job so it can be re-generated.
-      // If this fails (job only in token after restart), skip it —
-      // the chapter selector will open anyway with the token data.
-      try {
-        await resetToChapters(card.jobId);
-      } catch (resetErr) {
-        console.warn("[library-view] reset failed (non-blocking — using token data)", resetErr);
-      }
-
-      // Optimistically flip to 'analyzed' + open the selector with the
-      // real chapter list (not whole-book mode)
-      setCards((prev) =>
-        prev.map((c) => (c.jobId === card.jobId ? { ...c, status: "analyzed" as JobStatus } : c)),
-      );
+      // Do NOT flip status to 'analyzed' yet — keep it as 'done' so the
+      // card still shows the existing audio as playable. The status only
+      // changes when the user actually starts a new conversion.
       setAnalyzeResponse(chaptersResp);
       toast({
         title: "Ready for new chapters",
@@ -328,10 +320,17 @@ export function LibraryView() {
   };
 
   const handleConvertStarted = () => {
-    // Optimistically flip the job to "generating" so the card shows the
-    // spinner immediately, then refresh from the server on the next poll.
+    // The user has clicked "Convert" in the chapter selector.
+    // NOW it's safe to reset the job + flip status to 'generating'.
     const jobId = analyzeResponse?.job_id ?? wholeBookJob?.jobId;
     if (jobId) {
+      // Try to reset the job on the Flask side (non-blocking — if it fails,
+      // the generate call will handle reconstruction from Storj).
+      try {
+        resetToChapters(jobId).catch(() => {});
+      } catch {
+        // non-blocking
+      }
       setCards((prev) =>
         prev.map((c) => (c.jobId === jobId ? { ...c, status: "generating" } : c)),
       );
@@ -576,7 +575,7 @@ export function LibraryView() {
                             ) : null}
                             {resetting === card.jobId ? (
                               <span className="text-[11px] text-[var(--aria-fg-muted)] flex items-center gap-1">
-                                <Loader2 size={10} className="animate-spin" /> Resetting…
+                                <Loader2 size={10} className="animate-spin" /> Loading…
                               </span>
                             ) : (
                               <button
@@ -595,9 +594,19 @@ export function LibraryView() {
                             {card.progressMessage || `Converting… ${pct}%`}
                           </p>
                         ) : isError ? (
-                          <p className="text-[11px] text-[#ef4444]">
-                            {card.status === "cancelled" ? "Cancelled" : "Generation failed"}
-                          </p>
+                          <div className="flex items-center gap-2">
+                            <p className="text-[11px] text-[#ef4444]">
+                              {card.status === "cancelled" ? "Cancelled" : "Generation failed"}
+                            </p>
+                            <button
+                              onClick={(e) => { e.stopPropagation(); handleConvertMore(card); }}
+                              className="text-[11px] px-2 py-0.5 rounded-md flex items-center gap-1 transition-colors hover:bg-white/5"
+                              style={{ color: "var(--aria-fg-muted)", border: "1px solid var(--aria-border)" }}
+                              title="Try again"
+                            >
+                              <RotateCcw size={10} /> Retry
+                            </button>
+                          </div>
                         ) : (
                           <p className="text-[11px] text-[var(--aria-accent-glow)] flex items-center gap-1">
                             <ListChecks size={11} />
