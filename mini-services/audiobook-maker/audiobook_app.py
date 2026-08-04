@@ -6885,6 +6885,39 @@ def admin_api_gemini_recalc_params():
     })
 
 
+@app.route("/api/debug/gcp")
+def api_debug_gcp():
+    """Diagnostic endpoint — checks if GCP credentials are accessible."""
+    import os as _os
+    creds_file = _os.environ.get("ABM_GOOGLE_CREDENTIALS_FILE", "") or \
+                 _os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", "")
+    result = {
+        "ABM_GOOGLE_CREDENTIALS_FILE": _os.environ.get("ABM_GOOGLE_CREDENTIALS_FILE", ""),
+        "GOOGLE_APPLICATION_CREDENTIALS": _os.environ.get("GOOGLE_APPLICATION_CREDENTIALS", ""),
+        "ABM_GCP_PROJECT_ID": _os.environ.get("ABM_GCP_PROJECT_ID", ""),
+        "creds_file_path": creds_file,
+        "creds_file_exists": _os.path.isfile(creds_file) if creds_file else False,
+        "google_tts_module": google_tts is not None,
+        "google_tts_available": google_tts.is_available() if google_tts is not None else False,
+    }
+    # List /etc/secrets/ directory
+    try:
+        result["etc_secrets_listing"] = _os.listdir("/etc/secrets/") if _os.path.isdir("/etc/secrets/") else "dir not found"
+    except Exception as e:
+        result["etc_secrets_listing"] = f"error: {e}"
+    # Check if the file has valid JSON
+    if creds_file and _os.path.isfile(creds_file):
+        try:
+            with open(creds_file, "r") as f:
+                data = json.load(f)
+                result["creds_type"] = data.get("type", "unknown")
+                result["creds_project_id"] = data.get("project_id", "unknown")
+                result["creds_client_email"] = data.get("client_email", "unknown")
+        except Exception as e:
+            result["creds_json_error"] = str(e)
+    return jsonify(result)
+
+
 @app.route("/api/voices")
 def api_voices():
     try:
