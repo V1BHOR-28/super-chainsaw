@@ -323,7 +323,7 @@ def synthesize(text, voice_id, rate="+0%", output_path="output.mp3"):
     NON deduce caratteri dal budget (il chiamante deve farlo).
     """
     if not is_available():
-        raise RuntimeError("Google Cloud TTS not available")
+        raise RuntimeError(f"Google Cloud TTS not available (is_available={_gtts_available}, creds={os.environ.get('ABM_GOOGLE_CREDENTIALS_FILE', '') or os.environ.get('GOOGLE_APPLICATION_CREDENTIALS', '')})")
 
     lang_code, real_voice_name = parse_voice_id(voice_id)
     speaking_rate = _rate_to_speaking_rate(rate)
@@ -341,6 +341,7 @@ def synthesize(text, voice_id, rate="+0%", output_path="output.mp3"):
             speaking_rate=speaking_rate,
         )
 
+        print(f"[google-tts] Synthesizing {len(text)} chars with voice={real_voice_name}, lang={lang_code}, rate={speaking_rate}", flush=True)
         response = _gtts_client.synthesize_speech(
             input=synthesis_input,
             voice=voice_params,
@@ -350,10 +351,11 @@ def synthesize(text, voice_id, rate="+0%", output_path="output.mp3"):
         with open(output_path, "wb") as out:
             out.write(response.audio_content)
 
+        print(f"[google-tts] Success: {len(response.audio_content)} bytes written to {output_path}", flush=True)
         return True
 
     except Exception as e:
-        print(f"[google-tts] Synthesis error for voice {real_voice_name}: {e}")
+        print(f"[google-tts] Synthesis FAILED for voice {real_voice_name} (lang={lang_code}, {len(text)} chars): {type(e).__name__}: {e}", flush=True)
         raise
 
 
