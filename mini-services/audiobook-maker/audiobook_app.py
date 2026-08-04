@@ -1658,6 +1658,7 @@ def _save_tokens():
                     "output_name": info.get("output_name", ""),
                     "output_file": info.get("output_file", ""),
                     "epub_path": info.get("epub_path", ""),
+                    "epub_s3_key": info.get("epub_s3_key", ""),
                     "podcast_safe_name": info.get("podcast_safe_name", ""),
                     "podcast_ready": info.get("podcast_ready", False),
                     "podcast_mp3s": info.get("podcast_mp3s", []),
@@ -8139,6 +8140,21 @@ def api_analyze():
                          "optimized_chapters": [], "file_hash": file_hash,
                          "language_detected": language_detected}
 
+    # Upload the original EPUB to Storj/S3 so it survives Flask restarts.
+    # When /api/generate is called after a restart (job only in token),
+    # the EPUB is downloaded from Storj and re-parsed to reconstruct the
+    # in-memory job — enabling "More chapters" without re-upload.
+    try:
+        import storage_backend
+        if storage_backend.is_enabled():
+            s3_key = f"epubs/{job_id}/{safe_name}"
+            storage_backend.upload_file(str(file_path), s3_key)
+            with _jobs_lock:
+                jobs[job_id]["epub_s3_key"] = s3_key
+            print(f"[{job_id}] EPUB uploaded to S3/Storj: {s3_key}")
+    except Exception as _e_s3:
+        print(f"[{job_id}] EPUB S3 upload failed (non-fatal): {_e_s3}")
+
     # Extract cover thumbnail for preview (EPUB or ABM; PDF/TXT have no embedded cover)
     has_cover = False
     if is_abm and abm_cover_info:
@@ -8795,6 +8811,53 @@ def api_generate():
         if sc == 404:
             return jsonify({"error": "Session expired. Re-upload file."}), 400
         return err, sc
+
+    # ── ARIA: reconstruct in-memory job from token + Storj EPUB ──
+    # If the job is only in a download token (after Flask restart), the
+    # token record is a dict (not a job object with .info). We need to
+    # download the original EPUB from Storj, re-parse it, and reconstruct
+    # the full in-memory job so run_generation can proceed.
+    if job_id not in jobs:
+        epub_s3_key = job.get("epub_s3_key", "")
+        if not epub_s3_key:
+            return jsonify({"error": "Session expired. Re-upload file."}), 400
+        try:
+            import storage_backend
+            if not storage_backend.is_enabled():
+                return jsonify({"error": "Session expired. Re-upload file."}), 400
+            # Download EPUB from Storj
+            work_dir = UPLOAD_DIR / job_id
+            work_dir.mkdir(parents=True, exist_ok=True)
+            epub_filename = os.path.basename(epub_s3_key)
+            local_epub_path = str(work_dir / epub_filename)
+            storage_backend.download_file(epub_s3_key, local_epub_path)
+            print(f"[{job_id}] EPUB restored from Storj: {local_epub_path}")
+            # Re-parse the EPUB
+            info = parse_epub(local_epub_path)
+            # Reconstruct the in-memory job
+            with _jobs_lock:
+                jobs[job_id] = {
+                    "status": "analyzed",
+                    "epub_path": local_epub_path,
+                    "epub_s3_key": epub_s3_key,
+                    "info": info,
+                    "last_poll": time.time(),
+                    "original_filename": job.get("original_filename", epub_filename),
+                    "client_id": job.get("client_id", _get_client_id()),
+                    "client_ip": _get_client_ip(),
+                    "browser_lang": _get_browser_lang(),
+                    "optimized_chapters": [],
+                    "file_hash": job.get("file_hash", ""),
+                    "language_detected": job.get("language_detected", False),
+                    "selected_chapters": job.get("selected_chapters", []),
+                    "chapter_mp3s": job.get("chapter_mp3s", []),
+                }
+            # Re-fetch the reconstructed job
+            job = jobs[job_id]
+            print(f"[{job_id}] Job reconstructed from Storj EPUB: {len(info.chapters)} chapters")
+        except Exception as e:
+            print(f"[{job_id}] Job reconstruction from Storj failed: {e}")
+            return jsonify({"error": "Session expired. Re-upload file."}), 400
 
     # Store format and podcast URL for email/download handlers
     job["output_format"] = output_format
@@ -9912,6 +9975,44 @@ def api_reset_to_chapters(job_id):
     _job, _err, _sc = _check_job_owner(job_id)
     if _err is not None:
         return _err, _sc
+
+    # ── ARIA: reconstruct in-memory job from token + Storj EPUB ──
+    if job_id not in jobs:
+        epub_s3_key = _job.get("epub_s3_key", "")
+        if not epub_s3_key:
+            return jsonify({"error": "Job not found"}), 404
+        try:
+            import storage_backend
+            if not storage_backend.is_enabled():
+                return jsonify({"error": "Job not found"}), 404
+            work_dir = UPLOAD_DIR / job_id
+            work_dir.mkdir(parents=True, exist_ok=True)
+            epub_filename = os.path.basename(epub_s3_key)
+            local_epub_path = str(work_dir / epub_filename)
+            storage_backend.download_file(epub_s3_key, local_epub_path)
+            print(f"[{job_id}] EPUB restored from Storj for reset: {local_epub_path}")
+            info = parse_epub(local_epub_path)
+            with _jobs_lock:
+                jobs[job_id] = {
+                    "status": "analyzed",
+                    "epub_path": local_epub_path,
+                    "epub_s3_key": epub_s3_key,
+                    "info": info,
+                    "last_poll": time.time(),
+                    "original_filename": _job.get("original_filename", epub_filename),
+                    "client_id": _job.get("client_id", _get_client_id()),
+                    "client_ip": _get_client_ip(),
+                    "browser_lang": _get_browser_lang(),
+                    "optimized_chapters": [],
+                    "file_hash": _job.get("file_hash", ""),
+                    "language_detected": _job.get("language_detected", False),
+                    "selected_chapters": _job.get("selected_chapters", []),
+                    "chapter_mp3s": _job.get("chapter_mp3s", []),
+                }
+            print(f"[{job_id}] Job reconstructed from Storj EPUB for reset: {len(info.chapters)} chapters")
+        except Exception as e:
+            print(f"[{job_id}] Reset reconstruction from Storj failed: {e}")
+            return jsonify({"error": "Job not found"}), 404
     with _jobs_lock:
         if job_id not in jobs:
             return jsonify({"error": "Job not found"}), 404

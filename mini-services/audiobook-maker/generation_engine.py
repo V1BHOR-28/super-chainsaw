@@ -1424,6 +1424,7 @@ def _create_download_token(job_id):
         # Kit ZIP di ripiego (MP3 + capitoli) quando la conversione M4B e' fallita.
         "output_m4b_fallback_zip": job.get("output_m4b_fallback_zip", ""),
         "epub_path": job.get("epub_path", ""),
+        "epub_s3_key": job.get("epub_s3_key", ""),
         "podcast_safe_name": job.get("podcast_safe_name", ""),
         "podcast_ready": job.get("podcast_ready", False),
         "podcast_mp3s": job.get("podcast_mp3s", []),
