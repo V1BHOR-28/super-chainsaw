@@ -55,11 +55,28 @@ export function ChapterSelector({
   const [voices, setVoices] = useState<VoicesResponse | null>(null);
   const [voicesLoading, setVoicesLoading] = useState(true);
   const [selected, setSelected] = useState<Set<number>>(new Set());
-  const [voice, setVoice] = useState<string>("en-US-AriaNeural");
+  const [voice, setVoice] = useState<string>("gcloud:en-US-Chirp3-HD-Achernar");
   const [converting, setConverting] = useState(false);
 
-  // Default voice depends on the book's detected language — but we only
-  // know it after voices load, so set it in that effect.
+  // Curated list of the 10 best narration voices (8 female, 2 male).
+  // No Gemini voices (region-blocked). Only edge-tts + Google Cloud TTS (Chirp3-HD).
+  const CURATED_VOICES: AbmVoice[] = [
+    // 8 Best Female voices
+    { id: "gcloud:en-US-Chirp3-HD-Achernar", name: "Achernar (Chirp3-HD)", engine: "google", gender: "Female", gender_icon: "♀", locale: "en-US" },
+    { id: "gcloud:en-US-Chirp3-HD-Aoede", name: "Aoede (Chirp3-HD)", engine: "google", gender: "Female", gender_icon: "♀", locale: "en-US" },
+    { id: "gcloud:en-US-Chirp3-HD-Leda", name: "Leda (Chirp3-HD)", engine: "google", gender: "Female", gender_icon: "♀", locale: "en-US" },
+    { id: "gcloud:en-US-Chirp3-HD-Laomedeia", name: "Laomedeia (Chirp3-HD)", engine: "google", gender: "Female", gender_icon: "♀", locale: "en-US" },
+    { id: "en-US-AriaNeural", name: "Aria (Edge)", engine: "edge", gender: "Female", gender_icon: "♀", locale: "en-US" },
+    { id: "en-US-JennyNeural", name: "Jenny (Edge)", engine: "edge", gender: "Female", gender_icon: "♀", locale: "en-US" },
+    { id: "en-US-AnaNeural", name: "Ana (Edge)", engine: "edge", gender: "Female", gender_icon: "♀", locale: "en-US" },
+    { id: "en-US-MichelleNeural", name: "Michelle (Edge)", engine: "edge", gender: "Female", gender_icon: "♀", locale: "en-US" },
+    // 2 Best Male voices
+    { id: "gcloud:en-US-Chirp3-HD-Charon", name: "Charon (Chirp3-HD)", engine: "google", gender: "Male", gender_icon: "♂", locale: "en-US" },
+    { id: "en-US-GuyNeural", name: "Guy (Edge)", engine: "edge", gender: "Male", gender_icon: "♂", locale: "en-US" },
+  ];
+
+  // No need to fetch voices from the API — we have a curated list.
+  // Still fetch to check which engines are available (google vs edge).
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -67,26 +84,18 @@ export function ChapterSelector({
         const data = await getVoices();
         if (cancelled) return;
         setVoices(data);
-        // Pick a sensible default voice based on the book's language.
-        const bookLang = (analyzeResponse?.language || "en").slice(0, 2).toLowerCase();
-        const group = data[bookLang] as AbmLanguageGroup | undefined;
-        if (group && Array.isArray(group.voices) && group.voices.length > 0) {
-          // Prefer en-US-AriaNeural when available (matches the ARIA theme)
-          const aria = group.voices.find(
-            (v) => v.id === "en-US-AriaNeural" || v.id.toLowerCase().includes("arianeural"),
-          );
-          setVoice((aria ?? group.voices[0]).id);
-        } else {
-          // Fallback: first English voice, or first voice of the first language
-          const enGroup = data.en as AbmLanguageGroup | undefined;
-          if (enGroup && enGroup.voices.length > 0) {
-            const aria = enGroup.voices.find((v) => v.id === "en-US-AriaNeural");
-            setVoice((aria ?? enGroup.voices[0]).id);
-          }
+        // Check if Google Cloud TTS is available; if not, default to edge-tts
+        const hasGoogle = Object.values(data).some(
+          (g) => typeof g === "object" && g !== null && "voices" in g &&
+            Array.isArray((g as any).voices) &&
+            (g as any).voices.some((v: any) => v.engine === "google")
+        );
+        if (!hasGoogle) {
+          setVoice("en-US-AriaNeural");
         }
-      } catch (err) {
-        console.error("[chapter-selector] voices fetch failed", err);
-        // Non-fatal — the user can still type a voice ID, though the dropdown will be empty.
+      } catch {
+        // Non-fatal — curated voices work without the API
+        setVoice("en-US-AriaNeural");
       } finally {
         if (!cancelled) setVoicesLoading(false);
       }
@@ -96,26 +105,20 @@ export function ChapterSelector({
     };
   }, [analyzeResponse]);
 
-  // ── Build a flat list of voices grouped by language, English first ──
-  const voiceGroups = useMemo(() => {
-    if (!voices) return [] as { langCode: string; langName: string; voices: AbmVoice[] }[];
-    const groups: { langCode: string; langName: string; voices: AbmVoice[] }[] = [];
-    for (const [langCode, group] of Object.entries(voices)) {
-      if (langCode.startsWith("_")) continue; // skip _premium_status, _translate_available
-      if (!group || typeof group !== "object") continue;
-      if (!Array.isArray((group as AbmLanguageGroup).voices)) continue;
-      const g = group as AbmLanguageGroup;
-      if (!g.voices.length) continue;
-      groups.push({ langCode, langName: g.name || langCode, voices: g.voices });
-    }
-    // English first, then alphabetical by language name
-    groups.sort((a, b) => {
-      if (a.langCode === "en") return -1;
-      if (b.langCode === "en") return 1;
-      return a.langName.localeCompare(b.langName);
-    });
-    return groups;
+  // Check if Google Cloud TTS is available (from the API response).
+  // If not, filter out gcloud voices from the curated list.
+  const hasGoogleTTS = useMemo(() => {
+    if (!voices) return true; // assume available if API hasn't loaded yet
+    return Object.values(voices).some(
+      (g) => typeof g === "object" && g !== null && "voices" in g &&
+        Array.isArray((g as any).voices) &&
+        (g as any).voices.some((v: any) => v.engine === "google")
+    );
   }, [voices]);
+
+  const availableVoices = useMemo(() => {
+    return hasGoogleTTS ? CURATED_VOICES : CURATED_VOICES.filter((v) => v.engine === "edge");
+  }, [CURATED_VOICES, hasGoogleTTS]);
 
   const chapters = analyzeResponse?.chapters ?? [];
 
@@ -278,7 +281,7 @@ export function ChapterSelector({
             </>
           )}
           <div className="flex-1" />
-          {/* Voice selector */}
+          {/* Voice selector — curated list of 10 best narration voices */}
           <div className="flex items-center gap-2">
             <label className="text-[10px] font-mono tracking-wider uppercase" style={{ color: "var(--aria-fg-dim)" }}>
               Voice
@@ -287,7 +290,7 @@ export function ChapterSelector({
               value={voice}
               onChange={(e) => setVoice(e.target.value)}
               disabled={voicesLoading}
-              className="text-xs px-2 py-1.5 rounded-md bg-transparent cursor-pointer max-w-[220px]"
+              className="text-xs px-2 py-1.5 rounded-md bg-transparent cursor-pointer max-w-[260px]"
               style={{
                 color: "var(--aria-fg)",
                 border: "1px solid var(--aria-border)",
@@ -296,14 +299,10 @@ export function ChapterSelector({
             >
               {voicesLoading && <option>Loading voices…</option>}
               {!voicesLoading &&
-                voiceGroups.map((g) => (
-                  <optgroup key={g.langCode} label={`${g.langName} (${g.langCode})`}>
-                    {g.voices.map((v) => (
-                      <option key={v.id} value={v.id} style={{ background: "var(--aria-bg)" }}>
-                        {v.name} ({v.gender}) — {v.id}
-                      </option>
-                    ))}
-                  </optgroup>
+                availableVoices.map((v) => (
+                  <option key={v.id} value={v.id} style={{ background: "var(--aria-bg)" }}>
+                    {v.gender_icon} {v.name}
+                  </option>
                 ))}
             </select>
           </div>
