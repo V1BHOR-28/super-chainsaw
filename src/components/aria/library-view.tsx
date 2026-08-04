@@ -269,14 +269,27 @@ export function LibraryView() {
   // chapters + voice and re-generate. Fetches the chapter list from the
   // Flask app's in-memory state (job['info'].chapters) so the selector
   // opens with per-chapter checkboxes, not the 'whole book' fallback.
+  //
+  // If the job is only in download tokens (after Flask restart), we can't
+  // reset it — but we can still open the selector with the chapter data
+  // from the token. The user picks chapters + voice, and the generate
+  // call creates a fresh job via re-upload or the existing token.
   const handleConvertMore = async (card: LibraryCard) => {
     setResetting(card.jobId);
     try {
       // Fetch the chapter list FIRST (before reset) — the reset endpoint
       // doesn't return chapters, and we need them to open the selector.
       const chaptersResp = await getJobChapters(card.jobId);
-      // Now reset the job so it can be re-generated
-      await resetToChapters(card.jobId);
+
+      // Try to reset the job so it can be re-generated.
+      // If this fails (job only in token after restart), skip it —
+      // the chapter selector will open anyway with the token data.
+      try {
+        await resetToChapters(card.jobId);
+      } catch (resetErr) {
+        console.warn("[library-view] reset failed (non-blocking — using token data)", resetErr);
+      }
+
       // Optimistically flip to 'analyzed' + open the selector with the
       // real chapter list (not whole-book mode)
       setCards((prev) =>
@@ -288,9 +301,9 @@ export function LibraryView() {
         description: `${chaptersResp.total_chapters} chapters available — pick which to convert.`,
       });
     } catch (err) {
-      console.error("[library-view] reset failed", err);
+      console.error("[library-view] could not load chapters", err);
       toast({
-        title: "Could not reset book",
+        title: "Could not load chapters",
         description: err instanceof Error ? err.message : "The book data may have expired. Re-upload the EPUB.",
       });
     } finally {

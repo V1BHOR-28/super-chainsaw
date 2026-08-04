@@ -219,6 +219,8 @@ export async function generate(
       msg = body?.error || "Selection too large. Reduce the number of chapters.";
     } else if (errorCode === "invalid_voice") {
       msg = "Invalid voice selected. Pick a different voice.";
+    } else if (body?.error === "Session expired. Re-upload file.") {
+      msg = "This book's session has expired (server restarted). Re-upload the EPUB to convert more chapters.";
     } else {
       msg = (body && (body.error || body.message)) || `Generate failed (${res.status})`;
     }
