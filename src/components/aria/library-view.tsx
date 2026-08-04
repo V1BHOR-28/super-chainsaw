@@ -24,7 +24,6 @@ import {
   analyzeEpub,
   getDownloadUrl,
   sendHeartbeat,
-  resetToChapters,
   getJobChapters,
   deleteJob,
   isPollingStatus,
@@ -277,20 +276,10 @@ export function LibraryView() {
   const handleConvertMore = async (card: LibraryCard) => {
     setResetting(card.jobId);
     try {
-      // Reset the job FIRST so the in-memory job is reconstructed from
-      // Storj (if needed). This ensures getJobChapters returns the FULL
-      // chapter list (e.g. 63 chapters), not just the token data (1 chapter).
-      // The reset only flips status from 'done' to 'analyzed' — it does NOT
-      // destroy existing audio. The audio is preserved in the output_{epoch}/
-      // directory and is still downloadable.
-      try {
-        await resetToChapters(card.jobId);
-      } catch (resetErr) {
-        console.warn("[library-view] reset failed (non-blocking — using token data)", resetErr);
-      }
-
-      // NOW fetch the chapter list — it will come from the in-memory job
-      // (full list) if the reset succeeded, or from the token (partial) if not.
+      // Fetch the chapter list. The Flask /api/generate endpoint now
+      // accepts jobs with status='done' directly (no resetToChapters needed).
+      // The gen_epoch mechanism creates a new output directory for each
+      // generation, preserving previous audio.
       const chaptersResp = await getJobChapters(card.jobId);
       setAnalyzeResponse(chaptersResp);
       toast({

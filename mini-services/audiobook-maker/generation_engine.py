@@ -4647,7 +4647,14 @@ def run_generation(job_id, info, voice, rate, single_file, output_format='m4b', 
             # re-generating existing chapters, (2) exact chapter seeking
             # (each file = one chapter), (3) gapless playlist playback.
             if output_format == 'mp3':
-                job["chapter_mp3s"] = []
+                # ARIA: PRESERVE previous chapter_mp3s from prior generations.
+                # Instead of replacing the list, we MERGE: keep existing entries
+                # (from previous generations) and add/update with new ones.
+                # This enables the "More chapters" flow: generate ch1, then
+                # generate ch2 → both are in chapter_mp3s.
+                prev_mp3s = job.get("chapter_mp3s") or []
+                prev_by_index = {ch["index"]: ch for ch in prev_mp3s}
+                new_mp3s = []
                 for i, mp3_path in enumerate(mp3_files):
                     ch_idx = mp3_chapter_indices[i] if i < len(mp3_chapter_indices) else i
                     ch = chapter_by_idx.get(ch_idx)
@@ -4655,7 +4662,7 @@ def run_generation(job_id, info, voice, rate, single_file, output_format='m4b', 
                         m4b_chapters[i]["end"] - m4b_chapters[i]["start"]
                         if i < len(m4b_chapters) else 0
                     )
-                    job["chapter_mp3s"].append({
+                    new_entry = {
                         "index": ch_idx,
                         "title": ch.title if ch else f"Chapter {ch_idx}",
                         "filename": os.path.basename(mp3_path),
@@ -4663,18 +4670,34 @@ def run_generation(job_id, info, voice, rate, single_file, output_format='m4b', 
                         "duration_ms": dur,
                         "start_ms": m4b_chapters[i]["start"] if i < len(m4b_chapters) else 0,
                         "end_ms": m4b_chapters[i]["end"] if i < len(m4b_chapters) else dur,
-                    })
+                    }
+                    new_mp3s.append(new_entry)
+                    # Update the prev_by_index map so the merge below picks up
+                    # the new entry (overwrites old entry for same chapter index)
+                    prev_by_index[ch_idx] = new_entry
+
+                # Merge: keep previous entries (chapters not in this generation)
+                # + add new entries (chapters generated in this run).
+                # If a chapter was re-generated, the new entry replaces the old.
+                for prev_ch in prev_mp3s:
+                    if prev_ch["index"] not in {c["index"] for c in new_mp3s}:
+                        new_mp3s.append(prev_ch)
+                # Sort by chapter index for consistent ordering
+                new_mp3s.sort(key=lambda c: c["index"])
+                job["chapter_mp3s"] = new_mp3s
+
                 # Upload to R2/S3 if configured — survives Render restarts.
                 # The chapter_mp3 endpoint redirects to presigned URLs when
                 # local files are missing (after a restart).
                 try:
                     import storage_backend
                     if storage_backend.is_enabled():
-                        for ch_entry in job["chapter_mp3s"]:
-                            s3_key = f"chapters/{job_id}/{ch_entry['filename']}"
-                            storage_backend.upload_file(ch_entry["path"], s3_key)
-                            ch_entry["s3_key"] = s3_key
-                        print(f"[{job_id}] Uploaded {len(job['chapter_mp3s'])} chapter MP3s to R2/S3")
+                        for ch_entry in new_mp3s:
+                            if "s3_key" not in ch_entry and os.path.exists(ch_entry.get("path", "")):
+                                s3_key = f"chapters/{job_id}/{ch_entry['filename']}"
+                                storage_backend.upload_file(ch_entry["path"], s3_key)
+                                ch_entry["s3_key"] = s3_key
+                        print(f"[{job_id}] Uploaded new chapter MP3s to R2/S3 (total: {len(job['chapter_mp3s'])})")
                 except Exception as _e_s3:
                     print(f"[{job_id}] R2/S3 upload failed (non-fatal): {_e_s3}")
                 job["output_files"] = mp3_files

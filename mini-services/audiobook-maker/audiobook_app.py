@@ -9317,11 +9317,16 @@ def api_generate():
     client_id = job.get("client_id", "")
     client_ip = job.get("client_ip", "")
     with _jobs_lock:
-        if job["status"] not in ("analyzed", "optimized"):
+        # ARIA: allow re-generation of completed jobs without requiring
+        # resetToChapters first. The gen_epoch mechanism creates a new
+        # output_{epoch}/ directory for each generation, preserving previous
+        # audio. This eliminates the need for the frontend to call
+        # resetToChapters (which destroyed previous chapter_mp3s data).
+        if job["status"] not in ("analyzed", "optimized", "done"):
             _refund_payment_on_orphan(job_id, job, "status_conflict")
             try: gemini_tts.release_reservation(job_id)
             except Exception: pass
-            return jsonify({"error": "Generation already running or completed."}), 400
+            return jsonify({"error": "Generation already running."}), 400
         if client_id and MAX_CONCURRENT_PER_CLIENT > 0:
             if _active_generating_for_client_unlocked(client_id) >= MAX_CONCURRENT_PER_CLIENT:
                 _refund_payment_on_orphan(job_id, job, "concurrent_limit")
