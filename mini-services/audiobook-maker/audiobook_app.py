@@ -6900,9 +6900,29 @@ def api_debug_gcp():
         "google_tts_module": google_tts is not None,
         "google_tts_available": google_tts.is_available() if google_tts is not None else False,
     }
-    # List /etc/secrets/ directory
+    # List /etc/secrets/ directory + resolve symlinks
     try:
-        result["etc_secrets_listing"] = _os.listdir("/etc/secrets/") if _os.path.isdir("/etc/secrets/") else "dir not found"
+        secrets_dir = "/etc/secrets/"
+        listing = _os.listdir(secrets_dir) if _os.path.isdir(secrets_dir) else "dir not found"
+        result["etc_secrets_listing"] = listing
+        # Try to resolve the ..data symlink and list its contents
+        for item in listing:
+            full_path = _os.path.join(secrets_dir, item)
+            if _os.path.isdir(full_path) or _os.path.islink(full_path):
+                try:
+                    result[f"etc_secrets_{item}_contents"] = _os.listdir(full_path)
+                except Exception:
+                    pass
+        # Try common alternate names
+        for name in ["gcp-key.json", "gcp-key", "gcp_key.json", "gcp-key-file.json"]:
+            test_path = _os.path.join(secrets_dir, name)
+            if _os.path.isfile(test_path):
+                result["found_at"] = test_path
+                break
+        # Check ..data symlink target
+        data_link = _os.path.join(secrets_dir, "..data")
+        if _os.path.islink(data_link):
+            result["data_symlink_target"] = _os.readlink(data_link)
     except Exception as e:
         result["etc_secrets_listing"] = f"error: {e}"
     # Check if the file has valid JSON
