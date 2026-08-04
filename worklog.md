@@ -468,3 +468,44 @@ Files changed:
 Commit: 8216e61 "fix: 'More chapters' doesn't generate — stale token masks live status" (pushed to origin/main)
 
 IMPORTANT NOTE FOR USER: The production deployment at ariav2.seven.vercel.app (backend on Render) needs a redeploy to pick up this backend fix. The frontend doesn't need changes — once the backend stops returning stale 'done' status, the frontend's existing polling logic will correctly track the second generation to completion.
+
+---
+Task ID: 10
+Agent: main (Fix: chapter count wrong + already-converted chapters missing green tick)
+Task: User reports: "after creating chapters the frontend doesn't update itself — even after 3 chapters it shows 2/34, and when creating again it shows chapters 1-2 as not in the audiobook even though they are."
+
+Work Log:
+- ROOT CAUSE: `selected_chapters` was OVERWRITTEN per generation (only had the latest batch — e.g. [3] after generating ch3), while `chapter_mp3s` was correctly MERGED ([ch1,ch2,ch3]). The frontend used `selected_chapters` for BOTH the chapter count badge AND the `alreadyConverted` set in the chapter selector. So:
+  - Library card showed "1/34" or "2/34" instead of "3/34"
+  - Chapter selector showed ch1+ch2 as "not in audiobook" (no green tick) because `alreadyConverted` only had [3]
+
+- FIVE fixes applied across 3 files:
+
+  FIX 1 (generation_engine.py, commit 266a0da): `_create_download_token` now REFRESHES the existing token's fields (chapter_mp3s, selected_chapters, output paths) instead of returning the stale snapshot from the FIRST generation. Previously the token kept chapter_mp3s=[ch1] forever.
+
+  FIX 2 (audiobook_app.py /api/my_jobs): the in-memory jobs loop now includes `chapter_mp3s` (was missing — came ONLY from the stale token). The token loop no longer overrides `chapter_mp3s` when the in-memory job already provided it.
+
+  FIX 3 (audiobook_app.py /api/my_jobs + /api/job_chapters): `selected_chapters` is now DERIVED from `chapter_mp3s` (the merged, authoritative source) via `sorted({ch['index'] for ch in chapter_mp3s})`. This ensures the complete set of chapters across ALL "More chapters" runs is returned, not just the latest batch.
+
+  FIX 4 (library-view.tsx): the chapter count badge now prefers `chapterMp3s.length` (merged) over `selectedChapters.length` (per-gen).
+
+  FIX 5 (chapter-selector.tsx): `alreadyConverted` now derives from BOTH `chapter_mp3s` (merged) AND `selected_chapters` (fallback), so chapters from previous generations correctly show the green tick.
+
+- VERIFIED end-to-end with a real Flask subprocess on port 5700:
+  - After ch1: selected_chapters=[1], chapter_mp3s_count=1 ✓
+  - After ch2: selected_chapters=[1,2], chapter_mp3s_count=2 ✓ (was [2] before fix)
+  - After ch3: selected_chapters=[1,2,3], chapter_mp3s_count=3 ✓ (was [3] before fix)
+  - /api/job_chapters returns selected_chapters=[1,2,3] ✓
+  - Library card shows "3/3 chapters" (not "2/3" or "1/3") ✓
+  - All 3 chapters would show green tick in selector ✓
+
+Stage Summary:
+Files changed (this commit d07955e):
+- mini-services/audiobook-maker/audiobook_app.py (+38 / -20 lines): selected_chapters derived from chapter_mp3s in /api/my_jobs + /api/job_chapters; in-memory loop includes chapter_mp3s; token loop doesn't override it
+- src/components/aria/library-view.tsx (+14 / -5 lines): chapter count badge prefers chapterMp3s.length
+- src/components/aria/chapter-selector.tsx (+10 / -4 lines): alreadyConverted derives from chapter_mp3s + selected_chapters
+
+Files changed (previous commit 266a0da):
+- mini-services/audiobook-maker/generation_engine.py: _create_download_token refreshes existing token fields
+
+Commit: d07955e (pushed to origin/main)
