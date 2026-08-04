@@ -10090,33 +10090,158 @@ def api_heartbeat(job_id):
     return "", 404
 
 
+def _purge_job_completely(job_id):
+    """User-initiated hard delete — removes EVERYTHING for a job, ignoring the
+    retention / email-marker / active-token guards that _cleanup_job respects.
+
+    Called by /api/delete/<job_id> when the user explicitly clicks 'Delete' in
+    the library UI. Without this, deleted jobs reappear in /api/my_jobs
+    (because their download tokens survive) AND are resurrected on re-upload
+    of the same EPUB (because the durable registry entry + Storj EPUB survive).
+
+    Removals (each best-effort, non-fatal):
+      1. All download tokens for this job_id (regardless of retention).
+      2. The durable _job_registry entry (so /api/analyze dedup + the
+         _reconstruct_job_from_storj helper can't bring it back).
+      3. In-memory jobs[job_id] (also cancels a generating worker).
+      4. Local work_dir on disk.
+      5. Cold (R2/Storj) objects under three prefixes:
+           - <job_id>/         (output files: m4b/mp3/zip/abm)
+           - epubs/<job_id>/   (the original uploaded EPUB)
+           - chapters/<job_id>/  (per-chapter MP3s from ARIA per-chapter mode)
+
+    The existing _cleanup_job() is NOT modified — it's the right tool for the
+    background retention-based cleanup loop (which must respect email markers
+    + active tokens). This helper is the user-intent path.
+    """
+    if not job_id:
+        return
+    # 1. Revoke ALL download tokens for this job (force, ignore retention).
+    try:
+        revoked = 0
+        with _tokens_lock:
+            for tok in list(_download_tokens.keys()):
+                info = _download_tokens.get(tok)
+                if isinstance(info, dict) and info.get("job_id") == job_id:
+                    _download_tokens.pop(tok, None)
+                    revoked += 1
+        if revoked:
+            print(f"[purge] {job_id} revoked {revoked} download token(s)")
+            _save_tokens()  # persists to disk + R2 + syncs the registry
+    except Exception as e:
+        print(f"[purge] {job_id} token revoke failed (non-fatal): {e}")
+
+    # 2. Remove the durable registry entry so /api/analyze dedup +
+    #    _reconstruct_job_from_storj can't resurrect this job.
+    try:
+        with _job_registry_lock:
+            existed = job_id in _job_registry
+            _job_registry.pop(job_id, None)
+        if existed:
+            print(f"[purge] {job_id} removed from durable registry")
+            _save_job_registry()
+    except Exception as e:
+        print(f"[purge] {job_id} registry removal failed (non-fatal): {e}")
+
+    # 3. Cancel + remove the in-memory job (so a running worker stops).
+    try:
+        with _jobs_lock:
+            job = jobs.get(job_id)
+            if job:
+                job["cancelled"] = True
+                job["status"] = "cancelled"
+            jobs.pop(job_id, None)
+    except Exception as e:
+        print(f"[purge] {job_id} in-memory removal failed (non-fatal): {e}")
+
+    # 4. Remove the local work_dir (shutil.rmtree is tolerant of missing dirs
+    #    via ignore_errors; we don't need the forensic/email-marker guards
+    #    because the user explicitly asked to delete).
+    try:
+        work_dir = UPLOAD_DIR / job_id
+        if work_dir.exists():
+            shutil.rmtree(str(work_dir), ignore_errors=True)
+            print(f"[purge] {job_id} removed local work_dir")
+    except Exception as e:
+        print(f"[purge] {job_id} local dir removal failed (non-fatal): {e}")
+
+    # 5. Delete cold (R2/Storj) objects under all three prefixes used by this
+    #    job. _delete_cold_for_job only handles <job_id>/ — we also need to
+    #    purge the EPUB (epubs/<job_id>/) and per-chapter MP3s
+    #    (chapters/<job_id>/) so reconstruction can't find them later.
+    try:
+        if storage_backend.is_enabled():
+            for prefix in (f"{job_id}/", f"epubs/{job_id}/",
+                           f"chapters/{job_id}/"):
+                try:
+                    storage_backend.delete_prefix(prefix)
+                except Exception as _e_cold:
+                    print(f"[purge] {job_id} cold delete failed for "
+                          f"{prefix} (non-fatal): {_e_cold}")
+            print(f"[purge] {job_id} removed cold objects (3 prefixes)")
+    except Exception as e:
+        print(f"[purge] {job_id} cold cleanup failed (non-fatal): {e}")
+
+    print(f"[purge] {job_id} hard-delete complete")
+
+
 @app.route("/api/delete/<job_id>", methods=["POST", "DELETE"])
 def api_delete_job(job_id):
-    """Permanently delete a job and all its files.
+    """Permanently delete a job and ALL its files / tokens / registry entries.
 
     Used by the ARIA library UI when the user clicks 'Delete' on a book card.
-    Calls _cleanup_job() which removes the in-memory entry + the work_dir on disk.
-    Works for any job status (generating/done/error/analyzed).
+    Calls _purge_job_completely() — a hard delete that removes:
+      - all download tokens (so /api/my_jobs stops listing the job)
+      - the durable _job_registry entry (so re-uploading the same EPUB does
+        NOT resurrect this job via the file_hash dedup check)
+      - the in-memory jobs[job_id] entry (cancels a generating worker)
+      - the local work_dir on disk
+      - all cold (R2/Storj) objects under <job_id>/, epubs/<job_id>/,
+        and chapters/<job_id>/
+
+    The previous implementation called _cleanup_job(), which is the
+    retention-based background cleanup helper. _cleanup_job returns early
+    WITHOUT deleting tokens/files when an active download token exists
+    (almost always true for completed jobs) — so deleted jobs reappeared
+    in /api/my_jobs and were resurrected on re-upload. _purge_job_completely
+    bypasses those guards because the user explicitly asked to delete.
+
+    Works for any job status (generating/done/error/analyzed). Idempotent:
+    deleting an already-deleted job returns success.
     """
     _job, _err, _sc = _check_job_owner(job_id)
     if _err is not None:
-        # Already gone — treat as success (idempotent delete)
+        # Already gone from in-memory + tokens — but the durable registry
+        # might still have an entry (e.g. if the job was deleted on a previous
+        # request that crashed mid-purge). Clean it up so a re-upload doesn't
+        # resurrect it. Treat the overall call as success (idempotent delete).
         if _sc == 404:
+            try:
+                with _job_registry_lock:
+                    existed = job_id in _job_registry
+                    _job_registry.pop(job_id, None)
+                if existed:
+                    _save_job_registry()
+                    print(f"[delete] {job_id} purged lingering registry entry")
+            except Exception as e:
+                print(f"[delete] {job_id} lingering registry purge failed (non-fatal): {e}")
             return jsonify({"status": "deleted"})
         return _err, _sc
-    # If the job is currently generating, cancel it first so the worker thread stops
+    # If the job is currently generating, cancel it first so the worker thread
+    # stops. _purge_job_completely also sets the cancel flag, but we set it
+    # here too and sleep briefly so the worker can notice before we rip the
+    # job dict out from under it.
     with _jobs_lock:
         if job_id in jobs:
             jobs[job_id]["cancelled"] = True
             jobs[job_id]["status"] = "cancelled"
-    # Small grace period so the worker thread can notice the cancel flag
     time.sleep(0.2)
     try:
-        _cleanup_job(job_id, reason="user_delete")
+        _purge_job_completely(job_id)
     except Exception as e:
-        print(f"[delete] {job_id} cleanup failed: {e}")
-        # Still return success — the job entry may be partially cleaned but
-        # the user's intent (remove from library) is fulfilled.
+        print(f"[delete] {job_id} purge failed: {e}")
+        # Still return success — the user's intent (remove from library) is
+        # fulfilled even if some cold-storage cleanup step failed.
     return jsonify({"status": "deleted"})
 
 
