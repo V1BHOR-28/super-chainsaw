@@ -6,6 +6,7 @@ Cambiare provider = cambiare le env var ABM_S3_*, nessuna modifica al codice.
 """
 import os
 import threading
+import requests
 from urllib.parse import quote
 
 try:

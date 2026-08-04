@@ -59,15 +59,20 @@ def init(data_dir):
 
 
 def is_available():
-    """Verifica se Google Cloud TTS è configurato e disponibile."""
+    """Verifica se Google Cloud TTS è configurato e disponibile.
+    Only caches True (once it works, it works). Never caches False —
+    retries on every call so that credentials mounted after startup
+    (Render Secret Files) are picked up on the next request.
+    """
     global _gtts_available, _gtts_module, _gtts_client
 
-    if _gtts_available is not None:
-        return _gtts_available
+    # Only return cached result if it was True
+    if _gtts_available is True:
+        return True
 
     with _gtts_lock:
-        if _gtts_available is not None:
-            return _gtts_available
+        if _gtts_available is True:
+            return True
 
         # Check credenziali
         creds_file = os.environ.get("ABM_GOOGLE_CREDENTIALS_FILE", "") or \
