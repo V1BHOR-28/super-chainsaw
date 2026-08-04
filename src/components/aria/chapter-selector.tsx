@@ -60,19 +60,20 @@ export function ChapterSelector({
 
   // Curated list of the 10 best narration voices (8 female, 2 male).
   // No Gemini voices (region-blocked). Only edge-tts + Google Cloud TTS (Chirp3-HD).
+  // The edge-tts voices use the fine-tuned prosody (pitch +2Hz, rate -5%) from tts_split.py.
   const CURATED_VOICES: AbmVoice[] = [
-    // 8 Best Female voices
-    { id: "gcloud:en-US-Chirp3-HD-Achernar", name: "Achernar (Chirp3-HD)", engine: "google", gender: "Female", gender_icon: "♀", locale: "en-US" },
-    { id: "gcloud:en-US-Chirp3-HD-Aoede", name: "Aoede (Chirp3-HD)", engine: "google", gender: "Female", gender_icon: "♀", locale: "en-US" },
-    { id: "gcloud:en-US-Chirp3-HD-Leda", name: "Leda (Chirp3-HD)", engine: "google", gender: "Female", gender_icon: "♀", locale: "en-US" },
-    { id: "gcloud:en-US-Chirp3-HD-Laomedeia", name: "Laomedeia (Chirp3-HD)", engine: "google", gender: "Female", gender_icon: "♀", locale: "en-US" },
-    { id: "en-US-AriaNeural", name: "Aria (Edge)", engine: "edge", gender: "Female", gender_icon: "♀", locale: "en-US" },
-    { id: "en-US-JennyNeural", name: "Jenny (Edge)", engine: "edge", gender: "Female", gender_icon: "♀", locale: "en-US" },
-    { id: "en-US-AnaNeural", name: "Ana (Edge)", engine: "edge", gender: "Female", gender_icon: "♀", locale: "en-US" },
-    { id: "en-US-MichelleNeural", name: "Michelle (Edge)", engine: "edge", gender: "Female", gender_icon: "♀", locale: "en-US" },
-    // 2 Best Male voices
-    { id: "gcloud:en-US-Chirp3-HD-Charon", name: "Charon (Chirp3-HD)", engine: "google", gender: "Male", gender_icon: "♂", locale: "en-US" },
-    { id: "en-US-GuyNeural", name: "Guy (Edge)", engine: "edge", gender: "Male", gender_icon: "♂", locale: "en-US" },
+    // ── 8 Best Female voices ──
+    { id: "gcloud:en-US-Chirp3-HD-Achernar", name: "Achernar — BEST Female", engine: "google", gender: "Female", gender_icon: "♀", locale: "en-US" },
+    { id: "gcloud:en-US-Chirp3-HD-Aoede", name: "Aoede — BEST Female", engine: "google", gender: "Female", gender_icon: "♀", locale: "en-US" },
+    { id: "gcloud:en-US-Chirp3-HD-Leda", name: "Leda — Warm Female", engine: "google", gender: "Female", gender_icon: "♀", locale: "en-US" },
+    { id: "gcloud:en-US-Chirp3-HD-Laomedeia", name: "Laomedeia — Expressive Female", engine: "google", gender: "Female", gender_icon: "♀", locale: "en-US" },
+    { id: "en-US-AriaNeural", name: "Aria — BEST Edge (fine-tuned)", engine: "edge", gender: "Female", gender_icon: "♀", locale: "en-US" },
+    { id: "en-US-JennyNeural", name: "Jenny — Conversational Female (fine-tuned)", engine: "edge", gender: "Female", gender_icon: "♀", locale: "en-US" },
+    { id: "en-US-AnaNeural", name: "Ana — Young Female (fine-tuned)", engine: "edge", gender: "Female", gender_icon: "♀", locale: "en-US" },
+    { id: "en-US-MichelleNeural", name: "Michelle — Mature Female (fine-tuned)", engine: "edge", gender: "Female", gender_icon: "♀", locale: "en-US" },
+    // ── 2 Best Male voices ──
+    { id: "gcloud:en-US-Chirp3-HD-Charon", name: "Charon — BEST Male", engine: "google", gender: "Male", gender_icon: "♂", locale: "en-US" },
+    { id: "en-US-GuyNeural", name: "Guy — BEST Edge Male (fine-tuned)", engine: "edge", gender: "Male", gender_icon: "♂", locale: "en-US" },
   ];
 
   // No need to fetch voices from the API — we have a curated list.
