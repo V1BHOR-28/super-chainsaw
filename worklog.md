@@ -325,3 +325,45 @@ Constraints honored:
 - Did NOT change any endpoint's response shape.
 - All persistence write-throughs are non-blocking / best-effort (try/except + print, matching the existing storage_backend call style).
 - The shared _reconstruct_job_from_storj() helper is used by ALL THREE endpoints (api_generate, api_job_chapters, api_reset_to_chapters) — no duplicated reconstruction logic remains.
+
+---
+Task ID: 7
+Agent: main (Fix: deleted books reappear in library on re-upload)
+Task: Fix the bug where uploading an EPUB causes all previously-deleted books to reappear in the library. Test in sandbox, commit only if tests pass.
+
+Work Log:
+- ROOT CAUSE: /api/delete/<job_id> (line 10093) called _cleanup_job(job_id, reason="user_delete"). _cleanup_job is the retention-based background cleanup helper — it has an early-return guard at line 15230 that says "if _email_marker_protects(work_dir, now) or _has_active_download_tokens(job_id, now): return". For any completed job (which always has an active download token), this guard triggered and _cleanup_job returned WITHOUT deleting: (a) the download tokens, (b) the durable _job_registry entry, (c) the EPUB on Storj (epubs/<job_id>/), (d) the chapter MP3s on Storj (chapters/<job_id>/). Only the in-memory jobs[job_id] entry was popped. Result: on the next /api/my_jobs call, the deleted job reappeared (from the surviving token), AND re-uploading the same EPUB resurrected the deleted job via the registry's file_hash dedup check.
+
+- ADDED _purge_job_completely(job_id) helper (lines 10093-10185) — a hard delete that forcefully removes EVERYTHING, bypassing the retention/email-marker/active-token guards:
+  1. All download tokens for the job_id (force, ignore retention) + _save_tokens()
+  2. The durable _job_registry entry + _save_job_registry()
+  3. In-memory jobs[job_id] (also sets cancelled=True + status="cancelled" so a generating worker stops)
+  4. Local work_dir (shutil.rmtree with ignore_errors)
+  5. Cold (R2/Storj) objects under THREE prefixes: <job_id>/ (outputs), epubs/<job_id>/ (original EPUB), chapters/<job_id>/ (per-chapter MP3s). The existing _delete_cold_for_job only handles <job_id>/ — the EPUB + chapter prefixes were never purged before.
+  Each step is best-effort, non-fatal (try/except + print, matching the existing storage_backend call style). _cleanup_job is NOT modified — it remains the right tool for the background retention cleanup loop.
+
+- UPDATED api_delete_job (lines 10188-10245) to call _purge_job_completely instead of _cleanup_job. Also added a registry-cleanup branch in the 404 path (idempotent delete): if the job is already gone from in-memory + tokens but a previous delete crashed mid-purge leaving a lingering registry entry, this branch purges it so a re-upload doesn't resurrect it.
+
+- VERIFIED end-to-end with a real Flask subprocess (port 5705) + fake local-filesystem storage_backend. Test scenario: upload EPUB A + B, delete A, re-upload A, restart Flask, check /api/my_jobs at each step. Also verified the durable registry, the Storj EPUB, and the download tokens are all gone after delete.
+
+- VERIFICATION RESULTS (actual curl-equivalent output):
+  STEP 1: Upload A + B → job_id_A=W5OhsyZDs8TpHlNdF1CbAw (Pride and Prejudice), job_id_B=SRZ1ZEbqXO2YouJYSaQuww (Frankenstein). Both in /api/my_jobs + registry + Storj.
+  STEP 2: DELETE /api/delete/W5OhsyZDs8TpHlNdF1CbAw → 200 {"status":"deleted"}
+  STEP 3: /api/my_jobs after delete → jobs=['SRZ1ZEbqXO2YouJYSaQuww'] (A is GONE, B remains) ✓
+  STEP 4: Registry after delete → keys=['SRZ1ZEbqXO2YouJYSaQuww'] (A's entry GONE, B preserved) ✓
+  STEP 5: Storj after delete → epubs/W5OhsyZDs8TpHlNdF1CbAw/ has no objects (EPUB A purged) ✓
+  STEP 6: Re-upload EPUB A → job_id_new=Odvr1Gu9GVyjEJtqNGpRRQ (NEW job_id, NOT the deleted one — no resurrection) ✓
+  STEP 7: Kill + restart Flask, /api/my_jobs → jobs=['Odvr1Gu9GVyjEJtqNGpRRQ', 'SRZ1ZEbqXO2YouJYSaQuww'] (deleted A stays gone, B + new A survive via tokens) ✓
+
+- NEGATIVE TEST: temporarily reverted api_delete_job to use _cleanup_job (the old behavior), re-ran the test. It FAILED at STEP 4: "job_id_A still in durable registry after delete!" — confirming the test catches the bug. Then restored the fixed version.
+
+- CLEANUP: removed fake storage_backend.py (restored real one from git), removed test EPUBs + verify script + test data. `bun run lint` passes. `python3 -m py_compile audiobook_app.py` passes. Next.js (port 3000) + audiobook-maker (port 5601) both returning HTTP 200.
+
+Stage Summary:
+Files changed:
+- mini-services/audiobook-maker/audiobook_app.py (+135 / -10 lines):
+  - NEW: _purge_job_completely(job_id) helper (lines 10093-10185)
+  - UPDATED: api_delete_job now calls _purge_job_completely + handles lingering registry cleanup in the 404 path (lines 10188-10245)
+  - _cleanup_job is UNMODIFIED (still used by the background retention cleanup loop)
+
+Commit: 84aadbf "fix: deleted books no longer reappear in library on re-upload" (pushed to origin/main)
