@@ -611,12 +611,19 @@ export function LibraryView() {
                             <p className="text-[11px] text-[var(--aria-accent-glow)]">
                               {card.outputFormat?.toUpperCase() || "MP3"} · tap to play
                             </p>
-                            {card.selectedChapters && card.selectedChapters.length > 0 && card.totalChapters ? (
-                              <span className="text-[11px] flex items-center gap-1" style={{ color: "#22c55e" }} title="Chapters already in this audiobook">
-                                <ListChecks size={10} />
-                                {card.selectedChapters.length}/{card.totalChapters} chapters
-                              </span>
-                            ) : null}
+                            {/* ARIA: prefer chapterMp3s.length (the merged,
+                                authoritative count) over selectedChapters.length
+                                (which is overwritten per generation). Falls back
+                                to selectedChapters if chapterMp3s is missing. */}
+                            {(() => {
+                              const chCount = card.chapterMp3s?.length || card.selectedChapters?.length || 0;
+                              return chCount > 0 && card.totalChapters ? (
+                                <span className="text-[11px] flex items-center gap-1" style={{ color: "#22c55e" }} title="Chapters already in this audiobook">
+                                  <ListChecks size={10} />
+                                  {chCount}/{card.totalChapters} chapters
+                                </span>
+                              ) : null;
+                            })()}
                             {resetting === card.jobId ? (
                               <span className="text-[11px] text-[var(--aria-fg-muted)] flex items-center gap-1">
                                 <Loader2 size={10} className="animate-spin" /> Loading…

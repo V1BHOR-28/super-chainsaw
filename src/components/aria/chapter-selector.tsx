@@ -123,10 +123,18 @@ export function ChapterSelector({
 
   const chapters = analyzeResponse?.chapters ?? [];
 
-  // Chapters that are already in the current audio (from the last generation).
-  // The user can still re-select them, but we badge them + warn on convert.
+  // ARIA: chapters already in the audiobook. Derive from BOTH chapter_mp3s
+  // (the merged, authoritative source — has ALL chapters from every "More
+  // chapters" run) AND selected_chapters (fallback for older backends that
+  // don't return chapter_mp3s). Without chapter_mp3s, only the LATEST
+  // generation's chapters would show the green tick — chapters from previous
+  // generations would appear "not in the audiobook" even though they are.
   const alreadyConverted = useMemo(() => {
-    return new Set(analyzeResponse?.selected_chapters ?? []);
+    const mp3Indices = new Set(
+      (analyzeResponse?.chapter_mp3s ?? []).map((ch) => ch.index),
+    );
+    const selIndices = new Set(analyzeResponse?.selected_chapters ?? []);
+    return new Set([...mp3Indices, ...selIndices]);
   }, [analyzeResponse]);
 
   // Default-select every chapter that is NOT already converted. If all chapters

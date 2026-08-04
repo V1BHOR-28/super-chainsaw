@@ -10308,7 +10308,11 @@ def api_job_chapters(job_id):
                     for ch in chapter_mp3s
                 ],
                 "has_cover": False,
-                "selected_chapters": job.get("selected_chapters", []),
+                # ARIA: derive from chapter_mp3s (merged + authoritative).
+                "selected_chapters": sorted({
+                    ch["index"] for ch in chapter_mp3s
+                    if isinstance(ch, dict) and "index" in ch
+                }),
                 "chapter_mp3s": chapter_mp3s,
             })
         return jsonify({"error": "Book data no longer available. Please re-upload the file."}), 400
@@ -10335,10 +10339,17 @@ def api_job_chapters(job_id):
         "estimated_minutes": round(_total_secs / 60.0, 1),
         "chapters": chapters,
         "has_cover": bool(job.get("cover_path") or job.get("cover_hires")),
-        # Which chapter indices are already in the current audio (from the
-        # last generation). The frontend uses this to show an "Already in
-        # audiobook" badge on those chapters + warn on re-convert.
-        "selected_chapters": job.get("selected_chapters") or [],
+        # ARIA: derive selected_chapters from chapter_mp3s (the MERGED,
+        # authoritative source across all generations). The job's
+        # `selected_chapters` field is OVERWRITTEN per generation (only has
+        # the latest batch), so using it directly would miss chapters from
+        # previous "More chapters" runs. chapter_mp3s is correctly merged
+        # in generation_engine.py (prev_mp3s + new_mp3s), so its indices are
+        # the complete set of chapters currently in the audiobook.
+        "selected_chapters": sorted({
+            ch["index"] for ch in (job.get("chapter_mp3s") or [])
+            if isinstance(ch, dict) and "index" in ch
+        }) or (job.get("selected_chapters") or []),
         # Per-chapter MP3 metadata. Present when the job was generated with
         # output_format='mp3' + single_file=False (ARIA per-chapter mode).
         # Each entry: {index, title, filename, duration_ms, start_ms, end_ms}.
@@ -10666,6 +10677,16 @@ def api_my_jobs():
         if status not in _MY_JOBS_LIVE_STATUSES:
             continue
         info = job.get("info")
+        # ARIA: derive selected_chapters from chapter_mp3s (the MERGED,
+        # authoritative source). job['selected_chapters'] is OVERWRITTEN per
+        # generation (only has the latest batch), so using it directly would
+        # show "2/34 chapters" after generating 3 chapters across multiple
+        # "More chapters" runs. chapter_mp3s is correctly merged.
+        _chapter_mp3s = job.get("chapter_mp3s") or []
+        _derived_selected = sorted({
+            ch["index"] for ch in _chapter_mp3s
+            if isinstance(ch, dict) and "index" in ch
+        }) or (job.get("selected_chapters") or [])
         entry = {
             "job_id": jid,
             "status": status,
@@ -10673,17 +10694,9 @@ def api_my_jobs():
                       job.get("original_filename", "")),
             "output_format": job.get("output_format", ""),
             "created_at": job.get("start_time") or job.get("last_poll") or 0,
-            # Which chapter indices are in the current audio. Empty/missing =
-            # whole book was converted. Used by the ARIA UI to show which
-            # chapters are already downloaded + warn on re-convert.
-            "selected_chapters": job.get("selected_chapters") or [],
+            "selected_chapters": _derived_selected,
             "total_chapters": len(info.chapters) if info else 0,
-            # ARIA per-chapter mode: include chapter_mp3s from the in-memory
-            # job (always up-to-date after a generation merge). Without this,
-            # chapter_mp3s came ONLY from the download token — which was stale
-            # after "More chapters" (the token's snapshot was from the FIRST
-            # generation, so chapters added later never appeared in the library).
-            "chapter_mp3s": job.get("chapter_mp3s") or [],
+            "chapter_mp3s": _chapter_mp3s,
         }
         if _is_admin_pending:
             entry["admin_copy"] = True
@@ -10767,10 +10780,6 @@ def api_my_jobs():
                 "mp3": bool(tinfo.get("output_file")),
                 "abm": bool(tinfo.get("optimized_abm_path")),
             },
-            # ARIA per-chapter mode: return from the persisted token snapshot
-            # so the frontend can show chapter count + build the playlist player
-            # even after a Flask restart (when the in-memory job is gone).
-            "selected_chapters": tinfo.get("selected_chapters", []),
             "total_chapters": tinfo.get("total_chapters", 0),
         })
         # ARIA: only use the token's chapter_mp3s if the in-memory job didn't
@@ -10781,6 +10790,17 @@ def api_my_jobs():
         # COMPLETE hook is still running).
         if not entry.get("chapter_mp3s"):
             entry["chapter_mp3s"] = tinfo.get("chapter_mp3s", [])
+        # ARIA: derive selected_chapters from chapter_mp3s (the MERGED,
+        # authoritative source). The token's `selected_chapters` snapshot is
+        # from a SINGLE generation (the one that created the token), so using
+        # it directly would show "2/34" after 3 chapters were generated across
+        # multiple "More chapters" runs. Deriving from chapter_mp3s gives the
+        # complete set of chapters currently in the audiobook.
+        _tok_chapter_mp3s = entry.get("chapter_mp3s") or []
+        entry["selected_chapters"] = sorted({
+            ch["index"] for ch in _tok_chapter_mp3s
+            if isinstance(ch, dict) and "index" in ch
+        }) or tinfo.get("selected_chapters", [])
 
     ordered = sorted(out.values(),
                      key=lambda e: -(e.get("created_at") or 0))
