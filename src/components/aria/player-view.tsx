@@ -196,8 +196,8 @@ export function PlayerView() {
               </span>
               <span>
                 {job.chapterMp3s && job.chapterMp3s.length > 0
-                  ? `${job.chapterMp3s.length} chapter${job.chapterMp3s.length === 1 ? "" : "s"} · edge-tts`
-                  : "Single MP3 · edge-tts"}
+                  ? `${job.chapterMp3s.length} chapter${job.chapterMp3s.length === 1 ? "" : "s"}`
+                  : "Single MP3"}
               </span>
               {playbackRate !== 1 && (
                 <span className="flex items-center gap-1" style={{ color: "var(--aria-accent-glow)" }}>
@@ -223,9 +223,11 @@ export function PlayerView() {
                 ? job.chapterMp3s[currentChapterIdx].title
                 : job.title}
             </h2>
-            <p className="text-sm text-[var(--aria-fg-muted)] mt-2 leading-relaxed max-w-xl">
-              {job.author ? `by ${job.author} · edge-tts` : "Narrated by edge-tts"}
-            </p>
+            {job.author && (
+              <p className="text-sm text-[var(--aria-fg-muted)] mt-2 leading-relaxed max-w-xl">
+                by {job.author}
+              </p>
+            )}
           </div>
 
           {/* Progress bar */}

@@ -406,9 +406,9 @@ export function ChapterSelector({
                   ~{estimate.estMinutes} min
                 </span>
               )}
-              <span className="flex items-center gap-1.5" style={{ color: "#22c55e" }} title="edge-tts is free, no Google Cloud TTS">
+              <span className="flex items-center gap-1.5" style={{ color: "#22c55e" }} title="Free, no Google Cloud TTS">
                 <Check size={12} />
-                $0.00 — edge-tts is free
+                $0.00 — free
               </span>
               {estimate.reconvertCount > 0 && (
                 <span className="flex items-center gap-1" style={{ color: "#f59e0b" }} title="Re-converting replaces the existing audio file">

@@ -506,7 +506,7 @@ export function LibraryView() {
             </div>
             <div className="flex items-center gap-3">
               <p className="text-sm text-[var(--aria-fg-muted)] max-w-xs hidden sm:block">
-                Upload an EPUB and ARIA narrates it with edge-tts — free, fast,
+                Upload an EPUB and ARIA narrates it — free, fast,
                 and yours to keep.
               </p>
               <input
