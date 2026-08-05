@@ -3,36 +3,42 @@
 import { cn } from "@/lib/utils";
 
 /**
- * Book cover — shows an AI-generated cover image when available, otherwise
- * falls back to a gradient + monogram cover generated from the title's first
- * letter and the book's accent color.
+ * Book cover — shows the EPUB's embedded cover image (extracted by the Flask
+ * app during /api/analyze) when available, otherwise falls back to a gradient
+ * + monogram cover generated from the title's first letter and the book's
+ * accent color.
  *
- * The AI cover is generated on upload via /api/cover-art (z-ai-web-dev-sdk
- * image generation). It's stored as a data URL in localStorage
- * (aria-cover-<jobId>) and passed in as coverUrl.
+ * The cover image is served by the Flask endpoint /api/cover/<job_id>,
+ * which extracts the cover from the EPUB on upload. No AI generation —
+ * consistent, instant, always available.
  */
 export function BookCover({
   title,
   accent = "#f59e0b",
-  coverUrl,
+  coverImgUrl,
   className,
 }: {
   title: string;
   accent?: string;
-  /** Optional AI-generated cover image (data URL or regular URL).
-   *  When provided, the image is shown instead of the CSS monogram. */
-  coverUrl?: string;
+  /** Optional cover image URL (from /api/cover/<job_id>). When provided,
+   *  the EPUB's embedded cover is shown instead of the CSS monogram. */
+  coverImgUrl?: string;
   className?: string;
 }) {
-  // If we have an AI-generated cover, show it with a subtle gradient overlay
-  // + the ARIA Audiobooks label at the top (for brand consistency).
-  if (coverUrl) {
+  // If we have a cover image from the Flask /api/cover endpoint, show it
+  // with a subtle gradient overlay + the ARIA Audiobooks label.
+  if (coverImgUrl) {
     return (
       <div className={cn("relative overflow-hidden", className)}>
         <img
-          src={coverUrl}
+          src={coverImgUrl}
           alt={`Cover art for ${title}`}
           className="absolute inset-0 w-full h-full object-cover"
+          onError={(e) => {
+            // If the cover image fails to load (e.g. Flask restart wiped
+            // the extracted cover), hide the img so the fallback shows.
+            (e.currentTarget as HTMLImageElement).style.display = "none";
+          }}
         />
         {/* Gradient overlay for readability + brand consistency */}
         <div className="absolute inset-0 bg-gradient-to-t from-black/50 via-transparent to-black/20" />

@@ -24,12 +24,11 @@ import {
   getMyJobs,
   analyzeEpub,
   getDownloadUrl,
+  getCoverUrl,
   sendHeartbeat,
   getJobChapters,
   deleteJob,
   isPollingStatus,
-  generateCoverArt,
-  loadCachedCover,
   type MyJob,
   type AnalyzeResponse,
   type JobStatus,
@@ -74,13 +73,16 @@ interface LibraryCard {
   selectedChapters?: number[];
   totalChapters?: number;
   chapterMp3s?: ChapterMp3Info[];
-  /** AI-generated cover art (data URL). Loaded from localStorage. */
-  coverUrl?: string;
+  /** Whether the EPUB had an embedded cover. When true, coverImgUrl is set. */
+  hasCover?: boolean;
+  /** URL to the Flask /api/cover/<jobId> endpoint. Empty string when no cover. */
+  coverImgUrl?: string;
 }
 
 function toCard(job: MyJob): LibraryCard {
   const jobId = job.job_id;
   const title = job.title || "Untitled";
+  const hasCover = job.has_cover ?? false;
   return {
     jobId,
     title,
@@ -95,8 +97,10 @@ function toCard(job: MyJob): LibraryCard {
     selectedChapters: job.selected_chapters,
     totalChapters: job.total_chapters,
     chapterMp3s: job.chapter_mp3s,
-    // Load cached cover from localStorage (instant — no network call)
-    coverUrl: loadCachedCover(jobId) ?? undefined,
+    hasCover,
+    // Cover URL from the Flask /api/cover endpoint — available immediately
+    // after upload (the Flask app extracts it from the EPUB during analyze).
+    coverImgUrl: getCoverUrl(jobId, hasCover) || undefined,
   };
 }
 
@@ -237,32 +241,6 @@ export function LibraryView() {
           return [...apiCards, ...staleCards];
         });
         setError(null);
-
-        // ARIA: retroactive cover art generation for books that don't have a
-        // cover yet. This handles books uploaded BEFORE the cover-art feature
-        // was deployed (their covers were never generated). We fire-and-forget
-        // up to 2 at a time (to avoid hammering the image API) — each takes
-        // 10-30s. When a cover resolves, the card updates in place.
-        const cardsNeedingCovers = apiCards.filter(
-          (c) => !c.coverUrl && (c.status === "done" || c.status === "analyzed"),
-        );
-        if (cardsNeedingCovers.length > 0) {
-          const toGenerate = cardsNeedingCovers.slice(0, 2);
-          toGenerate.forEach((card) => {
-            generateCoverArt(card.jobId, card.title, card.author ?? undefined).then(
-              (coverUrl) => {
-                if (coverUrl) {
-                  setCards((prev) =>
-                    prev.map((c) =>
-                      c.jobId === card.jobId ? { ...c, coverUrl } : c,
-                    ),
-                  );
-                }
-              },
-            );
-          });
-        }
-
         return; // success — exit the retry loop
       } catch (err) {
         lastErr = err;
@@ -342,24 +320,10 @@ export function LibraryView() {
         title: "Book analyzed",
         description: `${resp.title} — ${resp.total_chapters} chapters detected`,
       });
-
-      // ARIA: fire-and-forget AI cover art generation. This takes 10-30s
-      // server-side — we don't block the upload flow. When it resolves,
-      // we update the card in the library so the cover appears.
-      // If it fails or localStorage is full, the CSS monogram fallback is used.
-      const jobId = resp.job_id;
-      const title = resp.title;
-      const author = resp.author || undefined;
-      generateCoverArt(jobId, title, author).then((coverUrl) => {
-        if (coverUrl) {
-          // Update the card in state so the cover renders immediately
-          setCards((prev) =>
-            prev.map((c) =>
-              c.jobId === jobId ? { ...c, coverUrl } : c,
-            ),
-          );
-        }
-      });
+      // Note: cover art is extracted from the EPUB by the Flask /api/analyze
+      // endpoint and served from /api/cover/<job_id>. No client-side
+      // generation needed — the cover appears immediately when the card
+      // is rendered (toCard() sets coverImgUrl from getCoverUrl()).
     } catch (err) {
       console.error("[library-view] analyze failed", err);
       toast({
@@ -391,7 +355,7 @@ export function LibraryView() {
         selectedChapters: chaptersResp?.selected_chapters ?? card.selectedChapters,
         chapters: chaptersResp?.chapters,
         chapterMp3s: chaptersResp?.chapter_mp3s ?? card.chapterMp3s,
-        coverUrl: card.coverUrl,
+        coverImgUrl: card.coverImgUrl,
       });
       return;
     }
@@ -668,7 +632,7 @@ export function LibraryView() {
                       <BookCover
                         title={card.title}
                         accent={card.accent}
-                        coverUrl={card.coverUrl}
+                        coverImgUrl={card.coverImgUrl}
                         className="absolute inset-0"
                       />
                       {/* gradient overlay */}

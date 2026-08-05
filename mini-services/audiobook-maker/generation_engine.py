@@ -1437,6 +1437,12 @@ def _create_download_token(job_id):
         "chapter_mp3s": job.get("chapter_mp3s", []),
         "selected_chapters": job.get("selected_chapters", []),
         "total_chapters": len(info.chapters) if info else 0,
+        # ARIA: has_cover so /api/my_jobs can return it for the library UI
+        # (the cover is extracted from the EPUB during /api/analyze and stored
+        # at job["cover_thumb"]). Without this, the token loop in my_jobs
+        # can't tell the frontend whether a cover exists for done jobs after
+        # a Flask restart (when the in-memory job is gone).
+        "has_cover": bool(job.get("cover_thumb")),
     }
     # Riusa un token gia' esistente per lo stesso job (idempotenza), MA aggiorna
     # i campi snapshot con i valori correnti del job in memoria. Senza questo

@@ -162,7 +162,7 @@ export function PlayerView() {
               <BookCover
                 title={job.title}
                 accent={job.accent}
-                coverUrl={job.coverUrl}
+                coverImgUrl={job.coverImgUrl}
                 className="absolute inset-0"
               />
               <div className="absolute inset-0 bg-gradient-to-t from-black/60 via-transparent to-transparent" />

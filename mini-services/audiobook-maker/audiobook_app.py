@@ -10697,6 +10697,10 @@ def api_my_jobs():
             "selected_chapters": _derived_selected,
             "total_chapters": len(info.chapters) if info else 0,
             "chapter_mp3s": _chapter_mp3s,
+            # ARIA: has_cover so the frontend can show the EPUB's embedded
+            # cover (served from /api/cover/<job_id>) instead of the CSS
+            # monogram fallback.
+            "has_cover": bool(job.get("cover_thumb")),
         }
         if _is_admin_pending:
             entry["admin_copy"] = True
@@ -10781,6 +10785,10 @@ def api_my_jobs():
                 "abm": bool(tinfo.get("optimized_abm_path")),
             },
             "total_chapters": tinfo.get("total_chapters", 0),
+            # ARIA: has_cover from the token snapshot (persisted by
+            # _create_download_token) so the frontend can show the cover
+            # even after a Flask restart when the in-memory job is gone.
+            "has_cover": bool(tinfo.get("has_cover", False)),
         })
         # ARIA: only use the token's chapter_mp3s if the in-memory job didn't
         # already provide them. The in-memory job's chapter_mp3s are always
