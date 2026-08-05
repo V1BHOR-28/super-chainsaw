@@ -181,7 +181,11 @@ export const usePlayerStore = create<PlayerState>()(
       isPlaying: false,
       currentTime: 0,
       duration: 0,
-      playbackRate: 1,
+      // ARIA: default playback rate 0.7× — 1.0× sounds too fast for audiobook
+      // narration. 0.7× is a comfortable listening pace. The user can still
+      // change this via the SpeedControl (0.7, 0.85, 1, 1.15, ...) and their
+      // choice is persisted to localStorage.
+      playbackRate: 0.7,
       volume: 0.85,
       muted: false,
 
