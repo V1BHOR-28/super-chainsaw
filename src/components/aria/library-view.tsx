@@ -237,6 +237,32 @@ export function LibraryView() {
           return [...apiCards, ...staleCards];
         });
         setError(null);
+
+        // ARIA: retroactive cover art generation for books that don't have a
+        // cover yet. This handles books uploaded BEFORE the cover-art feature
+        // was deployed (their covers were never generated). We fire-and-forget
+        // up to 2 at a time (to avoid hammering the image API) — each takes
+        // 10-30s. When a cover resolves, the card updates in place.
+        const cardsNeedingCovers = apiCards.filter(
+          (c) => !c.coverUrl && (c.status === "done" || c.status === "analyzed"),
+        );
+        if (cardsNeedingCovers.length > 0) {
+          const toGenerate = cardsNeedingCovers.slice(0, 2);
+          toGenerate.forEach((card) => {
+            generateCoverArt(card.jobId, card.title, card.author ?? undefined).then(
+              (coverUrl) => {
+                if (coverUrl) {
+                  setCards((prev) =>
+                    prev.map((c) =>
+                      c.jobId === card.jobId ? { ...c, coverUrl } : c,
+                    ),
+                  );
+                }
+              },
+            );
+          });
+        }
+
         return; // success — exit the retry loop
       } catch (err) {
         lastErr = err;

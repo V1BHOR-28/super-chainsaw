@@ -355,6 +355,11 @@ export function getChapterMp3Url(jobId: string, chapterIndex: number): string {
 // so they persist across sessions without re-generating.
 
 const COVER_KEY_PREFIX = "aria-cover-";
+const COVER_FAILED_KEY_PREFIX = "aria-cover-failed-";
+// How long to wait before retrying a failed cover generation (5 min).
+// Prevents infinite retries on every 5s poll while still allowing eventual
+// recovery if the failure was transient (e.g. cold start, network blip).
+const COVER_RETRY_MS = 5 * 60 * 1000;
 
 /** Load a cached cover from localStorage. Returns null if not cached. */
 export function loadCachedCover(jobId: string): string | null {
@@ -365,23 +370,51 @@ export function loadCachedCover(jobId: string): string | null {
   }
 }
 
+/** Check if a cover generation recently failed (within COVER_RETRY_MS).
+ *  Prevents retrying on every poll — gives the API time to recover. */
+function coverRecentlyFailed(jobId: string): boolean {
+  try {
+    const ts = localStorage.getItem(COVER_FAILED_KEY_PREFIX + jobId);
+    if (!ts) return false;
+    return Date.now() - parseInt(ts, 10) < COVER_RETRY_MS;
+  } catch {
+    return false;
+  }
+}
+
+/** Mark a cover generation as failed (timestamp-based, for retry backoff). */
+function markCoverFailed(jobId: string): void {
+  try {
+    localStorage.setItem(COVER_FAILED_KEY_PREFIX + jobId, String(Date.now()));
+  } catch {
+    // non-blocking
+  }
+}
+
 /**
  * Generate an AI cover for a book. Uses the cached version if available.
  * On success, caches the cover in localStorage + returns the data URL.
- * On failure, returns null (the caller falls back to the CSS monogram).
+ * On failure, marks it as failed (with a 5-min retry backoff) + returns null.
  *
  * The generation happens server-side (/api/cover-art) and can take 10-30s.
  * The caller should NOT await this on the critical path — call it fire-and-
  * forget after upload, then update the card when it resolves.
+ *
+ * NOTE: this function is called from fetchJobs retroactively for books that
+ * don't have a cover. The failed-marker prevents spamming the API on every
+ * 5s poll — a failed cover won't be retried for 5 minutes.
  */
 export async function generateCoverArt(
   jobId: string,
   title: string,
   author?: string,
 ): Promise<string | null> {
-  // Check cache first
+  // Check cache first (instant — no network call)
   const cached = loadCachedCover(jobId);
   if (cached) return cached;
+
+  // Don't retry if generation recently failed (5-min backoff)
+  if (coverRecentlyFailed(jobId)) return null;
 
   try {
     const res = await fetch("/api/cover-art", {
@@ -391,23 +424,36 @@ export async function generateCoverArt(
     });
     if (!res.ok) {
       console.error("[cover-art] generation failed:", res.status);
+      markCoverFailed(jobId);
       return null;
     }
     const data = await res.json();
     const url: string | undefined = data.url;
-    if (!url) return null;
+    if (!url) {
+      markCoverFailed(jobId);
+      return null;
+    }
 
-    // Cache in localStorage (non-blocking)
+    // Cache in localStorage. If it's full (data URLs are ~170KB each,
+    // localStorage limit is ~5MB), we still return the URL so the card
+    // shows the cover for this session — it just won't persist.
     try {
       localStorage.setItem(COVER_KEY_PREFIX + jobId, url);
     } catch {
-      // localStorage may be full (data URLs are ~500KB-1MB) — non-blocking
-      console.warn("[cover-art] could not cache cover (localStorage full?)");
+      console.warn("[cover-art] localStorage full — cover not cached (will regenerate next session)");
+    }
+
+    // Clear any previous failed marker
+    try {
+      localStorage.removeItem(COVER_FAILED_KEY_PREFIX + jobId);
+    } catch {
+      // non-blocking
     }
 
     return url;
   } catch (err) {
     console.error("[cover-art] error:", err);
+    markCoverFailed(jobId);
     return null;
   }
 }
