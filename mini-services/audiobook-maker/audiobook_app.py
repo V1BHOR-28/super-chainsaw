@@ -9014,9 +9014,18 @@ def api_cover(job_id):
     if err is not None:
         return "", sc if sc == 404 else 403
     cover_path = job.get("cover_thumb")
+    mime = job.get("cover_mime", "image/jpeg")
+    # ARIA: After restart, cover_thumb is gone from memory. Try disk.
+    if not cover_path or not os.path.exists(cover_path):
+        work_dir = UPLOAD_DIR / job_id
+        for ext in (".jpg", ".png", ".jpeg"):
+            candidate = str(work_dir / ("cover_thumb" + ext))
+            if os.path.exists(candidate):
+                cover_path = candidate
+                mime = "image/jpeg" if ext != ".png" else "image/png"
+                break
     if not cover_path or not os.path.exists(cover_path):
         return "", 404
-    mime = job.get("cover_mime", "image/jpeg")
     return send_file(cover_path, mimetype=mime)
 
 
@@ -15573,6 +15582,15 @@ def _cleanup_loop():
                     if (now - last_poll) > CLEANUP_HEARTBEAT_TIMEOUT_SEC:
                         job["cancelled"] = True
                         to_remove.append((jid, f"heartbeat lost during generation ({int(now - last_poll)}s)"))
+                        continue
+                    # ARIA: Detect stale generation (Render slept during gen).
+                    # Frontend keeps polling (heartbeat fresh) but thread is dead.
+                    _progress_updated = job.get("progress_updated_at") or job.get("start_time", 0)
+                    if (now - _progress_updated) > 600:  # 10 min no progress
+                        print(f"[cleanup] {jid} stale (no progress {int(now - _progress_updated)}s)")
+                        job["server_interrupted"] = True
+                        job["status"] = "interrupted"
+                        job["progress_message"] = "Generation interrupted (server restart). Try again."
                     continue
 
                 if status == "done":

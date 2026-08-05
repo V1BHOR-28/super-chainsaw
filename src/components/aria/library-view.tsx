@@ -188,6 +188,7 @@ export function LibraryView() {
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const [resetting, setResetting] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const isFetchingRef = useRef(false);
 
   // Persist cards to localStorage on every change
   useEffect(() => {
@@ -211,7 +212,10 @@ export function LibraryView() {
   // path below — a failed poll just skips that cycle and tries again next
   // interval, which is fine because the user already has cards on screen.
   const fetchJobsWithRetry = useCallback(async (isInitial: boolean) => {
-    const RETRY_DELAYS = [5000, 15000, 30000]; // 5s, 15s, 30s
+    if (isFetchingRef.current) return;
+    isFetchingRef.current = true;
+    try {
+    const RETRY_DELAYS = isInitial ? [5000, 15000, 30000] : [];
     const WAKEUP_THRESHOLD = 8000; // show 'waking up' after 8s
     let lastErr: unknown = null;
     for (let attempt = 0; attempt <= RETRY_DELAYS.length; attempt++) {
@@ -268,6 +272,9 @@ export function LibraryView() {
           : msg,
       );
     }
+    } finally {
+      isFetchingRef.current = false;
+    }
   }, [deletedIds, cards.length]);
 
   // Simple fetch (no retry) for polling — a failed poll just skips that cycle.
@@ -291,7 +298,7 @@ export function LibraryView() {
       fetchJobs();
       // Send a heartbeat to each generating job to prevent the 60s timeout
       generating.forEach((c) => sendHeartbeat(c.jobId));
-    }, 5000);
+    }, 10000);
     return () => clearInterval(interval);
   }, [cards, fetchJobs]);
 

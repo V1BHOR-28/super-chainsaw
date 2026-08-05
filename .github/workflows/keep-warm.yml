@@ -41,10 +41,10 @@ jobs:
         # AND the Flask app is healthy. If it returns non-200 or times out,
         # the step fails (red ❌ in the Actions tab).
         run: |
-          echo "Pinging ${{ vars.ABM_HEALTH_URL || 'https://ariav2.onrender.com/api/voices' }} ..."
+          echo "Pinging ${{ vars.ABM_HEALTH_URL || 'https://aria-audiobook-service.onrender.com/api/voices' }} ..."
           HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
             --max-time 30 \
-            "${{ vars.ABM_HEALTH_URL || 'https://ariav2.onrender.com/api/voices' }}")
+            "${{ vars.ABM_HEALTH_URL || 'https://aria-audiobook-service.onrender.com/api/voices' }}")
           echo "HTTP response: $HTTP_CODE"
           if [ "$HTTP_CODE" != "200" ]; then
             echo "::error::Render health check failed (HTTP $HTTP_CODE). The service may be down or still spinning up."

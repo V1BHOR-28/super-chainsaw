@@ -3989,6 +3989,7 @@ def run_generation(job_id, info, voice, rate, single_file, output_format='m4b', 
             job["current_chapter"] = block["chapter_title"]
             job["current_chapter_num"] = block["chapter_index"]
             job["elapsed_seconds"] = round(elapsed)
+            job["progress_updated_at"] = time.time()
 
         # Gap inter-chunk Gemini (Premium quality). Calcolato qui per essere
         # disponibile sia nel ramo single-file sia nel ramo multi-file.
