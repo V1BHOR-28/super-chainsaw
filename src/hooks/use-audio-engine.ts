@@ -114,7 +114,21 @@ export function useAudioEngine() {
           } catch { /* non-blocking */ }
         }
       } else {
+        // Single-file mode — also save progress (every 5s)
         setCurrentTime(a.currentTime);
+        const now = Date.now();
+        if (now - (lastProgressSaveRef.current || 0) > 5000) {
+          lastProgressSaveRef.current = now;
+          const job2 = usePlayerStore.getState().currentJob;
+          if (job2) {
+            try {
+              localStorage.setItem(
+                `aria-playback-${job2.jobId}`,
+                JSON.stringify({ chapterIdx: -1, currentTime: a.currentTime, savedAt: now }),
+              );
+            } catch { /* non-blocking */ }
+          }
+        }
       }
     };
 

@@ -63,6 +63,13 @@ interface PlayerState {
   volume: number;
   muted: boolean;
 
+  // ARIA: resume-where-you-left-off
+  // When openPlayer restores a saved position, this is set to the restored
+  // time (in seconds). The player view shows a "Resumed from X:XX" toast
+  // and clears this after a few seconds. Null = no resume (fresh start).
+  resumedFrom: number | null;
+  clearResumedFrom: () => void;
+
   // UI
   showSettings: boolean;
   sleepTimerMinutes: number | null;
@@ -128,6 +135,11 @@ export const usePlayerStore = create<PlayerState>()(
           : (job.chapterMp3s && job.chapterMp3s.length > 0 ? 0 : -1);
         const startTime = saved ? saved.currentTime : 0;
 
+        // ARIA: if we restored a non-trivial position (>3s in), flag it so
+        // the player view can show a "Resumed from X:XX" toast. Below 3s
+        // is effectively a fresh start — no toast needed.
+        const resumedFrom = saved && saved.currentTime > 3 ? saved.currentTime : null;
+
         set({
           view: "player",
           currentJob: job,
@@ -135,6 +147,7 @@ export const usePlayerStore = create<PlayerState>()(
           currentTime: startTime,
           duration: totalDuration,
           isPlaying: false,
+          resumedFrom,
         });
         if (typeof window !== "undefined") {
           window.scrollTo({ top: 0, behavior: "instant" as ScrollBehavior });
@@ -188,6 +201,11 @@ export const usePlayerStore = create<PlayerState>()(
       playbackRate: 0.7,
       volume: 0.85,
       muted: false,
+
+      // ARIA: resume-where-you-left-off — null until openPlayer restores a
+      // saved position. The player view shows a toast + clears it.
+      resumedFrom: null,
+      clearResumedFrom: () => set({ resumedFrom: null }),
 
       showSettings: false,
       sleepTimerMinutes: null,

@@ -17,6 +17,7 @@ import {
   Clock,
   ListChecks,
   Check,
+  PlayCircle,
 } from "lucide-react";
 import { usePlayerStore } from "@/lib/player-store";
 import { useAriaStore } from "@/lib/store";
@@ -47,6 +48,7 @@ export function PlayerView() {
   const muted = usePlayerStore((s) => s.muted);
   const showSettings = usePlayerStore((s) => s.showSettings);
   const sleepTimerMinutes = usePlayerStore((s) => s.sleepTimerMinutes);
+  const resumedFrom = usePlayerStore((s) => s.resumedFrom);
 
   const toggle = usePlayerStore((s) => s.toggle);
   const skip = usePlayerStore((s) => s.skip);
@@ -55,6 +57,7 @@ export function PlayerView() {
   const currentChapterIdx = usePlayerStore((s) => s.currentChapterIdx);
   const closePlayer = usePlayerStore((s) => s.closePlayer);
   const toggleSettings = usePlayerStore((s) => s.toggleSettings);
+  const clearResumedFrom = usePlayerStore((s) => s.clearResumedFrom);
   const setActiveWorkspace = useAriaStore((s) => s.setActiveWorkspace);
 
   // Chapter browser drawer state
@@ -132,6 +135,16 @@ export function PlayerView() {
           <SidePanelToggle kind="settings" active={showSettings} icon={Settings2} label="Settings" />
         </div>
       </header>
+
+      {/* ============ Resume toast ============ */}
+      {/* ARIA: shows "Resumed from X:XX" when the player opens with a saved
+          playback position. Auto-dismisses after 4s. */}
+      {resumedFrom !== null && (
+        <ResumeToast
+          seconds={resumedFrom}
+          onDismiss={clearResumedFrom}
+        />
+      )}
 
       {/* ============ Main ============ */}
       <main className="relative z-10 flex-1 flex flex-col lg:flex-row gap-8 lg:gap-12 px-4 sm:px-8 pb-8 max-w-7xl w-full mx-auto">
@@ -273,6 +286,44 @@ export function PlayerView() {
 }
 
 /* ============ Sub-components ============ */
+
+/** ARIA: "Resumed from X:XX" toast — shown when the player opens with a
+ *  saved playback position. Auto-dismisses after 4s. */
+function ResumeToast({ seconds, onDismiss }: { seconds: number; onDismiss: () => void }) {
+  useEffect(() => {
+    const id = setTimeout(onDismiss, 4000);
+    return () => clearTimeout(id);
+  }, [onDismiss]);
+
+  const mm = Math.floor(seconds / 60);
+  const ss = Math.floor(seconds % 60);
+  const timeStr = `${mm}:${ss.toString().padStart(2, "0")}`;
+
+  return (
+    <div className="relative z-30 flex justify-center px-4 -mt-1 mb-2">
+      <div
+        className="flex items-center gap-2 px-4 py-2 rounded-full text-xs animate-[aria-fade-in_0.3s_ease-out]"
+        style={{
+          background: "var(--aria-bg-elevated)",
+          border: "1px solid var(--aria-border)",
+          color: "var(--aria-fg-muted)",
+        }}
+      >
+        <PlayCircle size={13} style={{ color: "var(--aria-accent-glow)" }} />
+        <span>
+          Resumed from <span className="font-mono" style={{ color: "var(--aria-accent-glow)" }}>{timeStr}</span>
+        </span>
+        <button
+          onClick={onDismiss}
+          className="ml-1 text-[var(--aria-fg-dim)] hover:text-[var(--aria-fg)] transition-colors"
+          title="Dismiss"
+        >
+          ×
+        </button>
+      </div>
+    </div>
+  );
+}
 
 function SidePanelToggle({
   kind,
