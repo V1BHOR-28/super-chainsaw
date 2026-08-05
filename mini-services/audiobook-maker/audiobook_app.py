@@ -10319,26 +10319,38 @@ def api_job_chapters(job_id):
 
     chapters = []
     _total_secs = 0.0
+
+    # ARIA: build the exact text that was (or will be) spoken by the TTS
+    # engine, using the SAME _plan_chunks pipeline. This ensures the
+    # transcript matches the audio 1:1 — no front matter, no parentheticals,
+    # chapter title prepended (or not) exactly as the TTS engine sees it.
+    # Without this, the transcript shows raw ch.text which includes
+    # copyright/publisher info that was filtered out, causing massive
+    # sync issues (tap-to-seek lands on the wrong paragraph).
+    try:
+        from tts_split import _plan_chunks
+        # Respect the job's parenthetical-reading flags (same as /api/generate)
+        _strip_round = not bool(job.get("read_round_parens", False))
+        _strip_square = not bool(job.get("read_square_brackets", False))
+        _plan = _plan_chunks(info, strip_round=_strip_round, strip_square=_strip_square)
+        # Group chunks by chapter_index — each chapter's spoken text is the
+        # concatenation of its chunks (in order).
+        _spoken_by_chapter = {}
+        for _chunk in _plan:
+            _ci = _chunk["chapter_index"]
+            if _ci not in _spoken_by_chapter:
+                _spoken_by_chapter[_ci] = []
+            _spoken_by_chapter[_ci].append(_chunk["text"])
+    except Exception as _e_plan:
+        print(f"[job_chapters] _plan_chunks failed, falling back to raw text: {_e_plan}")
+        _spoken_by_chapter = {}
+
     for ch in info.chapters:
         _secs = (ch.word_count or 0) / 2.5  # 150 wpm = 2.5 words/sec
         _total_secs += _secs
-        # ARIA: sanitized text matching what the TTS engine actually spoke.
-        # The transcript feature (Spotify-style lyrics) needs the exact text
-        # that was narrated so tap-to-seek aligns with the audio. We apply
-        # the same pipeline as _plan_chunks in tts_split.py:
-        #   1. Strip parentheticals (round + square) — not read by TTS
-        #   2. Ensure heading pause (add period to bare headings)
-        #   3. Prepend chapter title (if not already in the text)
-        try:
-            from tts_split import _strip_parenthetical, _ensure_heading_pause, _title_already_in_text
-            _clean = _strip_parenthetical(ch.text)
-            _clean = _ensure_heading_pause(_clean)
-            if getattr(ch, "synthetic_title", False) or _title_already_in_text(ch.title, _clean):
-                _spoken_text = _clean
-            else:
-                _spoken_text = f"{ch.title}.\n\n{_clean}"
-        except Exception:
-            _spoken_text = ch.text  # fallback: raw text
+        # Use the plan-derived text (exact TTS input) when available;
+        # fall back to the raw chapter text if the plan failed.
+        _spoken_text = " ".join(_spoken_by_chapter.get(ch.index, [])) or ch.text
         chapters.append({
             "index": ch.index, "title": ch.title,
             "words": ch.word_count, "chars": ch.char_count,
