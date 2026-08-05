@@ -1,0 +1,62 @@
+name: Keep Render Warm
+
+# Pings the Flask audiobook-maker service on Render every 10 minutes so the
+# free-tier dyno never spins down (Render sleeps after ~15 min idle). This
+# eliminates the 30-90s cold-start delay that users would otherwise experience
+# on first library load.
+#
+# Tradeoffs (vs. paid Render Starter tier that never sleeps):
+#   + Free — uses GitHub Actions' free minutes (1000/min per month for public
+#     repos, 2000 for private; this workflow uses ~4320 runs/month × ~2s =
+#     ~2.4 hours of Actions time, well within the free tier).
+#   + Doubles as an uptime monitor — check the Actions tab for red ❌ runs
+#     (means Render is down or the health endpoint failed).
+#   - Still has a ~10-min window where the dyno COULD spin down if GitHub
+#     Actions drifts (rare but possible during Actions outages).
+#   - One more external dependency to monitor.
+#   - Consumes Render's free-tier compute budget (750h/month — 1 always-on
+#     service fits within the free tier).
+#
+# The frontend ALSO has a cold-start resilience layer (library-view.tsx:
+# "waking up" state + retry with backoff), so even if this pinger drifts,
+# users get feedback instead of a blank loading screen.
+
+on:
+  schedule:
+    # Every 10 minutes. GitHub Actions cron is in UTC.
+    # Note: GitHub doesn't guarantee exact timing — runs may be delayed by
+    # a few minutes during peak load. The 5-min buffer (10-min interval vs
+    # 15-min Render sleep) absorbs this.
+    - cron: '0/10 * * * *'
+  # Allow manual triggering from the Actions tab (for testing/debugging)
+  workflow_dispatch:
+
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping Render health endpoint
+        # Hit /api/voices — it's a lightweight GET that just returns the voice
+        # catalog (no DB/disk access). If this returns 200, the dyno is warm
+        # AND the Flask app is healthy. If it returns non-200 or times out,
+        # the step fails (red ❌ in the Actions tab).
+        run: |
+          echo "Pinging ${{ vars.ABM_HEALTH_URL || 'https://ariav2.onrender.com/api/voices' }} ..."
+          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+            --max-time 30 \
+            "${{ vars.ABM_HEALTH_URL || 'https://ariav2.onrender.com/api/voices' }}")
+          echo "HTTP response: $HTTP_CODE"
+          if [ "$HTTP_CODE" != "200" ]; then
+            echo "::error::Render health check failed (HTTP $HTTP_CODE). The service may be down or still spinning up."
+            exit 1
+          fi
+          echo "Render is warm and healthy ✅"
+
+      - name: Notify on failure
+        if: failure()
+        # This step only runs if the previous step failed. GitHub automatically
+        # shows red ❌ on the commit/Actions tab, but you can extend this to
+        # send a Slack/email/Discord notification if you want proactive alerts.
+        run: |
+          echo "::warning::Keep-warm ping failed. Check the Actions tab for details."
+          echo "If this fails repeatedly, the Render service may be down or the URL may have changed."

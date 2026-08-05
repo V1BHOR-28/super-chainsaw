@@ -4691,6 +4691,37 @@ def run_generation(job_id, info, voice, rate, single_file, output_format='m4b', 
                         new_mp3s.append(prev_ch)
                 # Sort by chapter index for consistent ordering
                 new_mp3s.sort(key=lambda c: c["index"])
+
+                # ── ARIA: recompute start_ms/end_ms as a genuine cumulative
+                # running total across the FULL merged+sorted list. ──
+                #
+                # The per-run `current_ms` (computed above) only reflects
+                # positions WITHIN this single generation's output files — it
+                # resets to 0 on every /api/generate call. When chapters are
+                # converted incrementally (ch1-2 in one run, ch3 added later
+                # in a separate run), the merged chapter_mp3s end up with
+                # start_ms/end_ms values that don't reflect the chapter's true
+                # position in the book. The player then seeks to the wrong
+                # absolute position.
+                #
+                # This pass walks the final sorted list in chapter-index order
+                # and recomputes start_ms/end_ms from duration_ms — so the
+                # timeline is always correct regardless of how many "More
+                # chapters" runs produced it. Non-contiguous selections (e.g.
+                # user converted 1, 2, 5 — skipping 3-4) produce a seamless
+                # timeline where ch5 follows ch2 with no gap. This matches the
+                # ARIA player's per-chapter playlist model (<audio onended>
+                # → next chapter): the user only hears converted chapters, in
+                # order, and the progress bar reflects cumulative position
+                # across converted chapters only.
+                #
+                # duration_ms is NOT touched — only start_ms/end_ms.
+                running_ms = 0
+                for entry in new_mp3s:
+                    entry["start_ms"] = running_ms
+                    running_ms += entry.get("duration_ms", 0)
+                    entry["end_ms"] = running_ms
+
                 job["chapter_mp3s"] = new_mp3s
 
                 # Upload to R2/S3 if configured — survives Render restarts.
