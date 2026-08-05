@@ -36,6 +36,9 @@ export interface PlayingJob {
   selectedChapters?: number[];
   /** Full chapter metadata for the chapter browser. */
   chapters?: PlayerChapterInfo[];
+  /** AI-generated cover art (data URL). When absent, the CSS monogram
+   *  fallback is used. */
+  coverUrl?: string;
 }
 
 type View = "landing" | "player";

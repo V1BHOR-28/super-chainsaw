@@ -18,6 +18,8 @@ import {
   ListChecks,
   Check,
   PlayCircle,
+  SkipBack,
+  SkipForward,
 } from "lucide-react";
 import { usePlayerStore } from "@/lib/player-store";
 import { useAriaStore } from "@/lib/store";
@@ -160,6 +162,7 @@ export function PlayerView() {
               <BookCover
                 title={job.title}
                 accent={job.accent}
+                coverUrl={job.coverUrl}
                 className="absolute inset-0"
               />
               <div className="absolute inset-0 bg-gradient-to-t from-black/60 via-transparent to-transparent" />
@@ -186,12 +189,22 @@ export function PlayerView() {
                 <span className="italic">Author unknown</span>
               )}
             </p>
-            <div className="flex items-center gap-3 mt-3 justify-center lg:justify-start text-[11px] text-[var(--aria-fg-dim)]">
+            <div className="flex items-center gap-3 mt-3 justify-center lg:justify-start text-[11px] text-[var(--aria-fg-dim)] flex-wrap">
               <span className="flex items-center gap-1">
                 <Clock className="w-3 h-3" />
                 {duration > 0 ? formatTime(duration) : "—"}
               </span>
-              <span>Single MP3 · edge-tts</span>
+              <span>
+                {job.chapterMp3s && job.chapterMp3s.length > 0
+                  ? `${job.chapterMp3s.length} chapter${job.chapterMp3s.length === 1 ? "" : "s"} · edge-tts`
+                  : "Single MP3 · edge-tts"}
+              </span>
+              {playbackRate !== 1 && (
+                <span className="flex items-center gap-1" style={{ color: "var(--aria-accent-glow)" }}>
+                  <Gauge className="w-3 h-3" />
+                  {playbackRate}× speed
+                </span>
+              )}
             </div>
           </div>
         </div>
@@ -201,13 +214,17 @@ export function PlayerView() {
           {/* Now playing info */}
           <div>
             <div className="font-mono text-[11px] tracking-[0.2em] uppercase text-[var(--aria-accent-glow)] mb-1.5">
-              Now playing
+              {currentChapterIdx >= 0 && job.chapterMp3s && currentChapterIdx < job.chapterMp3s.length
+                ? `Chapter ${currentChapterIdx + 1} of ${job.chapterMp3s.length}`
+                : "Now playing"}
             </div>
             <h2 className="font-serif text-3xl sm:text-4xl leading-tight">
-              {job.title}
+              {currentChapterIdx >= 0 && job.chapterMp3s && currentChapterIdx < job.chapterMp3s.length
+                ? job.chapterMp3s[currentChapterIdx].title
+                : job.title}
             </h2>
             <p className="text-sm text-[var(--aria-fg-muted)] mt-2 leading-relaxed max-w-xl">
-              {job.author ? `Narrated by edge-tts · ${job.author}` : "Narrated by edge-tts"}
+              {job.author ? `by ${job.author} · edge-tts` : "Narrated by edge-tts"}
             </p>
           </div>
 
@@ -216,11 +233,26 @@ export function PlayerView() {
             current={currentTime}
             duration={duration}
             progressPct={progressPct}
+            playbackRate={playbackRate}
             onSeek={seek}
           />
 
           {/* Transport controls */}
-          <div className="flex items-center justify-center gap-2 sm:gap-4">
+          <div className="flex items-center justify-center gap-2 sm:gap-3">
+            {/* Previous chapter — only in playlist mode */}
+            {job.chapterMp3s && job.chapterMp3s.length > 1 && (
+              <button
+                onClick={() => {
+                  if (currentChapterIdx > 0) seekToChapter(currentChapterIdx - 1);
+                }}
+                disabled={currentChapterIdx <= 0}
+                className="transport-btn w-10 h-10 disabled:opacity-30 disabled:cursor-not-allowed"
+                title="Previous chapter"
+                aria-label="Previous chapter"
+              >
+                <SkipBack className="w-4 h-4 fill-current" />
+              </button>
+            )}
             <button
               onClick={() => skip(-15)}
               className="transport-btn w-12 h-12 relative"
@@ -251,6 +283,22 @@ export function PlayerView() {
               <FastForward className="w-5 h-5" />
               <span className="absolute -bottom-0.5 text-[8px] font-mono font-medium">15</span>
             </button>
+            {/* Next chapter — only in playlist mode */}
+            {job.chapterMp3s && job.chapterMp3s.length > 1 && (
+              <button
+                onClick={() => {
+                  if (job.chapterMp3s && currentChapterIdx < job.chapterMp3s.length - 1) {
+                    seekToChapter(currentChapterIdx + 1);
+                  }
+                }}
+                disabled={!job.chapterMp3s || currentChapterIdx >= job.chapterMp3s.length - 1}
+                className="transport-btn w-10 h-10 disabled:opacity-30 disabled:cursor-not-allowed"
+                title="Next chapter"
+                aria-label="Next chapter"
+              >
+                <SkipForward className="w-4 h-4 fill-current" />
+              </button>
+            )}
           </div>
 
           {/* Secondary controls */}
@@ -361,11 +409,13 @@ function ProgressBar({
   current,
   duration,
   progressPct,
+  playbackRate,
   onSeek,
 }: {
   current: number;
   duration: number;
   progressPct: number;
+  playbackRate: number;
   onSeek: (t: number) => void;
 }) {
   const ref = useRef<HTMLDivElement>(null);
@@ -379,6 +429,7 @@ function ProgressBar({
     onSeek(ratio * duration);
   };
 
+  // Mouse handlers
   useEffect(() => {
     if (!dragging) return;
     const move = (e: MouseEvent) => seekFromEvent(e.clientX);
@@ -391,6 +442,16 @@ function ProgressBar({
     };
   }, [dragging, duration]);
 
+  // ARIA: Touch handlers for mobile scrubbing
+  const onTouchStart = (e: React.TouchEvent) => {
+    setDragging(true);
+    seekFromEvent(e.touches[0].clientX);
+  };
+  const onTouchMove = (e: React.TouchEvent) => {
+    if (dragging) seekFromEvent(e.touches[0].clientX);
+  };
+  const onTouchEnd = () => setDragging(false);
+
   return (
     <div className="select-none">
       <div
@@ -400,6 +461,9 @@ function ProgressBar({
           setDragging(true);
           seekFromEvent(e.clientX);
         }}
+        onTouchStart={onTouchStart}
+        onTouchMove={onTouchMove}
+        onTouchEnd={onTouchEnd}
         role="slider"
         aria-label="Seek"
         aria-valuemin={0}
@@ -416,8 +480,13 @@ function ProgressBar({
       </div>
       <div className="flex items-center justify-between mt-2 font-mono text-[11px] text-[var(--aria-fg-dim)]">
         <span>{formatTime(current)}</span>
+        {/* ARIA: show wall-clock remaining at current playback speed.
+            At 0.7×, a 10h book takes ~14h — the raw duration remaining
+            is misleading. This shows actual listening time left. */}
         <span className="text-[var(--aria-fg-muted)]">
-          -{formatTime(Math.max(0, duration - current))}
+          {playbackRate !== 1
+            ? `-${formatTime(Math.max(0, (duration - current) / playbackRate))} at ${playbackRate}×`
+            : `-${formatTime(Math.max(0, duration - current))}`}
         </span>
       </div>
     </div>

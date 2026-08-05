@@ -3,19 +3,49 @@
 import { cn } from "@/lib/utils";
 
 /**
- * Book cover — generates a gradient + monogram cover from the title's first
- * letter and the book's accent color. Real user-uploaded documents don't have
- * cover art, so we always generate one rather than relying on image files.
+ * Book cover — shows an AI-generated cover image when available, otherwise
+ * falls back to a gradient + monogram cover generated from the title's first
+ * letter and the book's accent color.
+ *
+ * The AI cover is generated on upload via /api/cover-art (z-ai-web-dev-sdk
+ * image generation). It's stored as a data URL in localStorage
+ * (aria-cover-<jobId>) and passed in as coverUrl.
  */
 export function BookCover({
   title,
   accent = "#f59e0b",
+  coverUrl,
   className,
 }: {
   title: string;
   accent?: string;
+  /** Optional AI-generated cover image (data URL or regular URL).
+   *  When provided, the image is shown instead of the CSS monogram. */
+  coverUrl?: string;
   className?: string;
 }) {
+  // If we have an AI-generated cover, show it with a subtle gradient overlay
+  // + the ARIA Audiobooks label at the top (for brand consistency).
+  if (coverUrl) {
+    return (
+      <div className={cn("relative overflow-hidden", className)}>
+        <img
+          src={coverUrl}
+          alt={`Cover art for ${title}`}
+          className="absolute inset-0 w-full h-full object-cover"
+        />
+        {/* Gradient overlay for readability + brand consistency */}
+        <div className="absolute inset-0 bg-gradient-to-t from-black/50 via-transparent to-black/20" />
+        <div className="absolute inset-0 flex flex-col justify-between p-5">
+          <div className="font-mono text-[9px] uppercase tracking-[0.2em] text-white/70">
+            ARIA Audiobooks
+          </div>
+        </div>
+      </div>
+    );
+  }
+
+  // Fallback: CSS monogram cover
   const monogram = (title.trim()[0] || "A").toUpperCase();
   const subtitle = title.length > 60 ? title.slice(0, 57) + "…" : title;
 

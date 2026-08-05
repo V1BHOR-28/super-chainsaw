@@ -347,3 +347,67 @@ export function getDownloadUrl(jobId: string): string {
 export function getChapterMp3Url(jobId: string, chapterIndex: number): string {
   return `${ABM_BASE}/chapter_mp3/${jobId}/${chapterIndex}`;
 }
+
+// ── AI cover art generation ──
+// Generates a book cover image from the title + author via the
+// /api/cover-art endpoint (z-ai-web-dev-sdk image generation).
+// Covers are cached in localStorage (aria-cover-<jobId>) as data URLs
+// so they persist across sessions without re-generating.
+
+const COVER_KEY_PREFIX = "aria-cover-";
+
+/** Load a cached cover from localStorage. Returns null if not cached. */
+export function loadCachedCover(jobId: string): string | null {
+  try {
+    return localStorage.getItem(COVER_KEY_PREFIX + jobId);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Generate an AI cover for a book. Uses the cached version if available.
+ * On success, caches the cover in localStorage + returns the data URL.
+ * On failure, returns null (the caller falls back to the CSS monogram).
+ *
+ * The generation happens server-side (/api/cover-art) and can take 10-30s.
+ * The caller should NOT await this on the critical path — call it fire-and-
+ * forget after upload, then update the card when it resolves.
+ */
+export async function generateCoverArt(
+  jobId: string,
+  title: string,
+  author?: string,
+): Promise<string | null> {
+  // Check cache first
+  const cached = loadCachedCover(jobId);
+  if (cached) return cached;
+
+  try {
+    const res = await fetch("/api/cover-art", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title, author }),
+    });
+    if (!res.ok) {
+      console.error("[cover-art] generation failed:", res.status);
+      return null;
+    }
+    const data = await res.json();
+    const url: string | undefined = data.url;
+    if (!url) return null;
+
+    // Cache in localStorage (non-blocking)
+    try {
+      localStorage.setItem(COVER_KEY_PREFIX + jobId, url);
+    } catch {
+      // localStorage may be full (data URLs are ~500KB-1MB) — non-blocking
+      console.warn("[cover-art] could not cache cover (localStorage full?)");
+    }
+
+    return url;
+  } catch (err) {
+    console.error("[cover-art] error:", err);
+    return null;
+  }
+}

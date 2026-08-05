@@ -192,9 +192,15 @@ export function useAudioEngine() {
   }, [setCurrentTime, setDuration]);
 
   // playbackRate → audio element
+  // ARIA: preservesPitch=true keeps the narrator's voice at a natural pitch
+  // even at 1.5×/2× speed (no chipmunk effect). This is the default in Chrome
+  // but not in all browsers — set it explicitly.
   useEffect(() => {
     const a = audioRef.current;
-    if (a) a.playbackRate = playbackRate;
+    if (a) {
+      a.playbackRate = playbackRate;
+      a.preservesPitch = true;
+    }
   }, [playbackRate]);
 
   // volume / muted → audio element

@@ -28,6 +28,8 @@ import {
   getJobChapters,
   deleteJob,
   isPollingStatus,
+  generateCoverArt,
+  loadCachedCover,
   type MyJob,
   type AnalyzeResponse,
   type JobStatus,
@@ -72,14 +74,18 @@ interface LibraryCard {
   selectedChapters?: number[];
   totalChapters?: number;
   chapterMp3s?: ChapterMp3Info[];
+  /** AI-generated cover art (data URL). Loaded from localStorage. */
+  coverUrl?: string;
 }
 
 function toCard(job: MyJob): LibraryCard {
+  const jobId = job.job_id;
+  const title = job.title || "Untitled";
   return {
-    jobId: job.job_id,
-    title: job.title || "Untitled",
+    jobId,
+    title,
     author: job.author ?? null,
-    accent: accentForTitle(job.title || job.job_id),
+    accent: accentForTitle(title || jobId),
     status: job.status,
     outputFormat: job.output_format,
     createdAt: job.created_at,
@@ -89,6 +95,8 @@ function toCard(job: MyJob): LibraryCard {
     selectedChapters: job.selected_chapters,
     totalChapters: job.total_chapters,
     chapterMp3s: job.chapter_mp3s,
+    // Load cached cover from localStorage (instant — no network call)
+    coverUrl: loadCachedCover(jobId) ?? undefined,
   };
 }
 
@@ -308,6 +316,24 @@ export function LibraryView() {
         title: "Book analyzed",
         description: `${resp.title} — ${resp.total_chapters} chapters detected`,
       });
+
+      // ARIA: fire-and-forget AI cover art generation. This takes 10-30s
+      // server-side — we don't block the upload flow. When it resolves,
+      // we update the card in the library so the cover appears.
+      // If it fails or localStorage is full, the CSS monogram fallback is used.
+      const jobId = resp.job_id;
+      const title = resp.title;
+      const author = resp.author || undefined;
+      generateCoverArt(jobId, title, author).then((coverUrl) => {
+        if (coverUrl) {
+          // Update the card in state so the cover renders immediately
+          setCards((prev) =>
+            prev.map((c) =>
+              c.jobId === jobId ? { ...c, coverUrl } : c,
+            ),
+          );
+        }
+      });
     } catch (err) {
       console.error("[library-view] analyze failed", err);
       toast({
@@ -339,6 +365,7 @@ export function LibraryView() {
         selectedChapters: chaptersResp?.selected_chapters ?? card.selectedChapters,
         chapters: chaptersResp?.chapters,
         chapterMp3s: chaptersResp?.chapter_mp3s ?? card.chapterMp3s,
+        coverUrl: card.coverUrl,
       });
       return;
     }
@@ -615,6 +642,7 @@ export function LibraryView() {
                       <BookCover
                         title={card.title}
                         accent={card.accent}
+                        coverUrl={card.coverUrl}
                         className="absolute inset-0"
                       />
                       {/* gradient overlay */}
