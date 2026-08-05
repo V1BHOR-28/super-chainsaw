@@ -20,6 +20,7 @@ import {
   PlayCircle,
   SkipBack,
   SkipForward,
+  AlignLeft,
 } from "lucide-react";
 import { usePlayerStore } from "@/lib/player-store";
 import { useAriaStore } from "@/lib/store";
@@ -28,6 +29,7 @@ import { cn } from "@/lib/utils";
 import { AmbientGlow, StatusPill, AriaDivider } from "./primitives";
 import { NowPlayingBars } from "./waveform";
 import { BookCover } from "./book-cover";
+import { TranscriptPanel } from "./transcript-panel";
 import { getJobChapters, type AnalyzeResponse, type ChapterMp3Info } from "@/lib/abm-api";
 
 /**
@@ -49,6 +51,7 @@ export function PlayerView() {
   const volume = usePlayerStore((s) => s.volume);
   const muted = usePlayerStore((s) => s.muted);
   const showSettings = usePlayerStore((s) => s.showSettings);
+  const showTranscript = usePlayerStore((s) => s.showTranscript);
   const sleepTimerMinutes = usePlayerStore((s) => s.sleepTimerMinutes);
   const resumedFrom = usePlayerStore((s) => s.resumedFrom);
 
@@ -59,6 +62,7 @@ export function PlayerView() {
   const currentChapterIdx = usePlayerStore((s) => s.currentChapterIdx);
   const closePlayer = usePlayerStore((s) => s.closePlayer);
   const toggleSettings = usePlayerStore((s) => s.toggleSettings);
+  const toggleTranscript = usePlayerStore((s) => s.toggleTranscript);
   const clearResumedFrom = usePlayerStore((s) => s.clearResumedFrom);
   const setActiveWorkspace = useAriaStore((s) => s.setActiveWorkspace);
 
@@ -134,6 +138,7 @@ export function PlayerView() {
 
         <div className="flex items-center gap-1">
           <SidePanelToggle kind="chapters" active={showChapters} icon={ListChecks} label="Chapters" onClick={toggleChapters} />
+          <SidePanelToggle kind="transcript" active={showTranscript} icon={AlignLeft} label="Transcript" onClick={toggleTranscript} />
           <SidePanelToggle kind="settings" active={showSettings} icon={Settings2} label="Settings" />
         </div>
       </header>
@@ -309,6 +314,21 @@ export function PlayerView() {
             <SleepTimerControl minutes={sleepTimerMinutes} />
             <VolumeControl volume={volume} muted={muted} />
           </div>
+
+          {/* ARIA: Spotify-style transcript panel. Shows the current chapter's
+              text with sentence-level highlighting + tap-to-seek. Toggle via
+              the Transcript button in the header. */}
+          {showTranscript && (
+            <div
+              className="rounded-xl p-4"
+              style={{
+                background: "var(--aria-bg-elevated)",
+                border: "1px solid var(--aria-border)",
+              }}
+            >
+              <TranscriptPanel />
+            </div>
+          )}
         </div>
       </main>
 
@@ -382,14 +402,17 @@ function SidePanelToggle({
   label,
   onClick,
 }: {
-  kind: "settings" | "chapters";
+  kind: "settings" | "chapters" | "transcript";
   active: boolean;
   icon: React.ElementType;
   label: string;
   onClick?: () => void;
 }) {
   const toggleSettings = usePlayerStore((s) => s.toggleSettings);
-  const handleClick = onClick ?? toggleSettings;
+  // For "transcript" kind, onClick is always provided (toggleTranscript).
+  // For "settings" kind, onClick may be omitted (defaults to toggleSettings).
+  // For "chapters" kind, onClick is always provided (toggleChapters).
+  const handleClick = onClick ?? (kind === "settings" ? toggleSettings : undefined);
   return (
     <button
       onClick={handleClick}

@@ -25,6 +25,10 @@ export interface AnalyzeChapter {
   words: number;
   chars: number;
   estimated_minutes: number;
+  /** Sanitized chapter text matching what the TTS engine actually spoke.
+   *  Used by the transcript feature (Spotify-style lyrics). May be missing
+   *  on older backends — the transcript panel falls back to no text. */
+  text?: string;
 }
 
 export interface AnalyzeResponse {
