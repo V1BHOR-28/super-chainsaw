@@ -107,6 +107,7 @@ export function TranscriptView() {
       }
 
       // Resume follow mode and center the clicked word
+      followRef.current = true;
       setFollowPlayback(true);
       requestAnimationFrame(() => {
         centerWord(cueIdx);
@@ -124,56 +125,56 @@ export function TranscriptView() {
   // ── User scroll detection ──
   // Detect ALL forms of manual interaction: wheel, touch, pointer, keyboard.
   // Programmatic scrollTo() is ignored via programmaticScrollRef.
+  // CRITICAL: deps include `cues` and `words` so the effect re-runs when the
+  // scroll container appears (it only renders after cues load). Without this,
+  // the effect runs on mount when scrollRef.current is null → listeners never
+  // attach → user scrolls are invisible → follow never disables.
   useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
 
     const isProgrammatic = () =>
-      performance.now() - programmaticScrollRef.current < 700;
+      performance.now() - programmaticScrollRef.current < 1000;
 
-    // Scroll event — fires for both user and programmatic scrolls.
-    // We check isProgrammatic() to filter out our own scrollTo().
     const onScroll = () => {
       if (isProgrammatic()) return;
-      // Genuine user scroll — disable follow immediately
       if (followRef.current) {
+        followRef.current = false;
         setFollowPlayback(false);
       }
     };
 
-    // Wheel — fires before scroll, so we catch it even if the scroll
-    // doesn't actually move (e.g. at the top/bottom of the container)
     const onWheel = () => {
       if (followRef.current) {
+        followRef.current = false;
         setFollowPlayback(false);
       }
     };
 
-    // Touch — track touchmove for touch scrolling
     const onTouchMove = () => {
       if (followRef.current) {
+        followRef.current = false;
         setFollowPlayback(false);
       }
     };
 
-    // Pointer — track pointerdown for scrollbar dragging
     const onPointerDown = (e: PointerEvent) => {
-      // Check if the pointer is on the scrollbar area (right edge)
       const rect = el.getBoundingClientRect();
-      if (e.clientX > rect.right - 16 && followRef.current) {
+      // Click on scrollbar (right 16px) or anywhere in the container
+      if (followRef.current) {
+        followRef.current = false;
         setFollowPlayback(false);
       }
     };
 
-    // Keyboard — Arrow keys, Page Up/Down, Home, End, Space
     const onKeyDown = (e: KeyboardEvent) => {
       const scrollKeys = [
         "ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " ",
       ];
       if (scrollKeys.includes(e.key) && followRef.current) {
-        // Only disable if the scroll container or a child has focus
         const active = document.activeElement;
         if (el === active || el.contains(active)) {
+          followRef.current = false;
           setFollowPlayback(false);
         }
       }
@@ -192,10 +193,11 @@ export function TranscriptView() {
       el.removeEventListener("pointerdown", onPointerDown);
       el.removeEventListener("keydown", onKeyDown);
     };
-  }, []);
+  }, [cues, words]);
 
   // ── Return to current word ──
   const handleReturnToWord = useCallback(() => {
+    followRef.current = true;
     setFollowPlayback(true);
     requestAnimationFrame(() => {
       centerWord(activeWordIdxRef.current);
