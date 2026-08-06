@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState, useSyncExternalStore, useCallback } from "react";
-import { Loader2, FileQuestion, Minus, Plus } from "lucide-react";
+import { Loader2, FileQuestion, Minus, Plus, Locate } from "lucide-react";
 import { usePlayerStore } from "@/lib/player-store";
 import {
   useTranscriptStore,
@@ -10,8 +10,6 @@ import {
 import { useWordSync, getSyncOffset, setSyncOffset } from "@/hooks/use-word-sync";
 import { getAudioElement } from "@/lib/audio-element-registry";
 import { cn } from "@/lib/utils";
-
-const DEFAULT_OFFSET_MS = 180;
 
 export function TranscriptView() {
   const job = usePlayerStore((s) => s.currentJob);
@@ -54,7 +52,45 @@ export function TranscriptView() {
     setSyncOffset(next);
   };
 
-  // ── Click-to-seek (Bug 2 fix) ──
+  // ── Follow playback state ──
+  const [followPlayback, setFollowPlayback] = useState(true);
+  const followRef = useRef(true);
+  const activeWordIdxRef = useRef(-1);
+
+  useEffect(() => { followRef.current = followPlayback; }, [followPlayback]);
+  useEffect(() => { activeWordIdxRef.current = activeWordIdx; }, [activeWordIdx]);
+
+  // Reset follow on chapter change
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setFollowPlayback(true);
+  }, [currentChapterIdx]);
+
+  // ── Auto-scroll ──
+  const scrollRef = useRef<HTMLDivElement>(null);
+  const programmaticScrollRef = useRef<number>(0);
+  const reducedMotion = usePrefersReducedMotion();
+
+  // Center a word in the scroll container (direct scrollTo, never scrollIntoView)
+  const centerWord = useCallback(
+    (idx: number) => {
+      const el = scrollRef.current;
+      if (!el || idx < 0) return;
+      const node = el.querySelector<HTMLElement>(`[data-cue-index="${idx}"]`);
+      if (!node) return;
+      const target =
+        node.offsetTop - el.clientHeight / 2 + node.offsetHeight / 2;
+      const clamped = Math.max(0, Math.min(target, el.scrollHeight - el.clientHeight));
+      programmaticScrollRef.current = performance.now();
+      el.scrollTo({
+        top: clamped,
+        behavior: reducedMotion ? "auto" : "smooth",
+      });
+    },
+    [reducedMotion],
+  );
+
+  // ── Click-to-seek ──
   const handleWordClick = useCallback(
     (cueIdx: number) => {
       if (!cues || cueIdx < 0 || cueIdx >= cues.length) return;
@@ -62,76 +98,109 @@ export function TranscriptView() {
       const audio = getAudioElement();
 
       if (audio) {
-        // Seek the audio element directly (chapter-relative — no offset needed).
-        // This avoids the store's absolute-time → chapter re-derivation which
-        // can swap chapters near boundaries due to metadata imprecision.
         audio.currentTime = startMs / 1000;
-
-        // Reconcile the store clock so the progress bar matches.
         const absSec = chapterStartSec + startMs / 1000;
         setCurrentTime(absSec);
-
-        // Force one immediate sync tick so the highlight lands within a frame.
-        requestAnimationFrame(() => {
-          // The rAF loop in useWordSync will pick this up automatically.
-        });
       } else {
-        // Fallback: use the store's seek (cross-chapter path).
         const absSec = chapterStartSec + startMs / 1000;
         seek(absSec);
       }
+
+      // Resume follow mode and center the clicked word
+      setFollowPlayback(true);
+      requestAnimationFrame(() => {
+        centerWord(cueIdx);
+      });
     },
-    [cues, chapterStartSec, seek, setCurrentTime],
+    [cues, chapterStartSec, seek, setCurrentTime, centerWord],
   );
 
-  // ── Auto-scroll (Bug 1 fix) ──
-  const scrollRef = useRef<HTMLDivElement>(null);
-  const programmaticScrollRef = useRef<number>(0);
-  const userScrolledRef = useRef<number>(0);
-  const reducedMotion = usePrefersReducedMotion();
-
-  // Re-enable auto-follow when the user presses play or seeks.
+  // When the active word changes and follow is enabled, center it
   useEffect(() => {
-    userScrolledRef.current = 0;
-  }, [isPlaying, currentChapterIdx]);
+    if (!followRef.current || activeWordIdx < 0) return;
+    centerWord(activeWordIdx);
+  }, [activeWordIdx, centerWord]);
 
-  // Track genuine user scrolls (ignore programmatic ones).
+  // ── User scroll detection ──
+  // Detect ALL forms of manual interaction: wheel, touch, pointer, keyboard.
+  // Programmatic scrollTo() is ignored via programmaticScrollRef.
   useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
+
+    const isProgrammatic = () =>
+      performance.now() - programmaticScrollRef.current < 700;
+
+    // Scroll event — fires for both user and programmatic scrolls.
+    // We check isProgrammatic() to filter out our own scrollTo().
     const onScroll = () => {
-      // Ignore scroll events that were caused by our own scrollTo().
-      if (performance.now() - programmaticScrollRef.current < 700) return;
-      userScrolledRef.current = Date.now();
+      if (isProgrammatic()) return;
+      // Genuine user scroll — disable follow immediately
+      if (followRef.current) {
+        setFollowPlayback(false);
+      }
     };
+
+    // Wheel — fires before scroll, so we catch it even if the scroll
+    // doesn't actually move (e.g. at the top/bottom of the container)
+    const onWheel = () => {
+      if (followRef.current) {
+        setFollowPlayback(false);
+      }
+    };
+
+    // Touch — track touchmove for touch scrolling
+    const onTouchMove = () => {
+      if (followRef.current) {
+        setFollowPlayback(false);
+      }
+    };
+
+    // Pointer — track pointerdown for scrollbar dragging
+    const onPointerDown = (e: PointerEvent) => {
+      // Check if the pointer is on the scrollbar area (right edge)
+      const rect = el.getBoundingClientRect();
+      if (e.clientX > rect.right - 16 && followRef.current) {
+        setFollowPlayback(false);
+      }
+    };
+
+    // Keyboard — Arrow keys, Page Up/Down, Home, End, Space
+    const onKeyDown = (e: KeyboardEvent) => {
+      const scrollKeys = [
+        "ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " ",
+      ];
+      if (scrollKeys.includes(e.key) && followRef.current) {
+        // Only disable if the scroll container or a child has focus
+        const active = document.activeElement;
+        if (el === active || el.contains(active)) {
+          setFollowPlayback(false);
+        }
+      }
+    };
+
     el.addEventListener("scroll", onScroll, { passive: true });
-    return () => el.removeEventListener("scroll", onScroll);
+    el.addEventListener("wheel", onWheel, { passive: true });
+    el.addEventListener("touchmove", onTouchMove, { passive: true });
+    el.addEventListener("pointerdown", onPointerDown, { passive: true });
+    el.addEventListener("keydown", onKeyDown, { passive: true });
+
+    return () => {
+      el.removeEventListener("scroll", onScroll);
+      el.removeEventListener("wheel", onWheel);
+      el.removeEventListener("touchmove", onTouchMove);
+      el.removeEventListener("pointerdown", onPointerDown);
+      el.removeEventListener("keydown", onKeyDown);
+    };
   }, []);
 
-  // When the active word changes, scroll it into view using direct container
-  // scroll (NOT scrollIntoView which scrolls every ancestor).
-  useEffect(() => {
-    if (activeWordIdx < 0) return;
-    const el = scrollRef.current;
-    if (!el) return;
-
-    // Respect the 4s manual-scroll suppression.
-    if (userScrolledRef.current && Date.now() - userScrolledRef.current < 4000) return;
-
-    const node = el.querySelector<HTMLElement>(`[data-cue-index="${activeWordIdx}"]`);
-    if (!node) return;
-
-    // Direct container scroll — never scrolls window/document.
-    const target =
-      node.offsetTop - el.clientHeight / 2 + node.offsetHeight / 2;
-    const clamped = Math.max(0, Math.min(target, el.scrollHeight - el.clientHeight));
-
-    programmaticScrollRef.current = performance.now();
-    el.scrollTo({
-      top: clamped,
-      behavior: reducedMotion ? "auto" : "smooth",
+  // ── Return to current word ──
+  const handleReturnToWord = useCallback(() => {
+    setFollowPlayback(true);
+    requestAnimationFrame(() => {
+      centerWord(activeWordIdxRef.current);
     });
-  }, [activeWordIdx, reducedMotion]);
+  }, [centerWord]);
 
   // ── Render states ──
   if (!job || currentChapterIdx < 0 || !chapterInfo) {
@@ -195,36 +264,54 @@ export function TranscriptView() {
   // Ready — render the word grid.
   return (
     <TranscriptFrame syncOffset={syncOffset} onAdjustOffset={adjustOffset}>
-      <div
-        ref={scrollRef}
-        className="transcript-scroll relative px-5 py-5 max-h-[55vh] overflow-y-auto overscroll-contain"
-      >
-        <p className="font-serif text-base sm:text-[17px] leading-[2] m-0">
-          {words.map((word, i) => {
-            const isActive = i === activeWordIdx;
-            const isPast = i < activeWordIdx;
-            return (
-              <span
-                key={i}
-                data-cue-index={i}
-                onClick={() => handleWordClick(i)}
-                className={cn(
-                  "cursor-pointer rounded px-[1px] transition-colors duration-150",
-                  isActive
-                    ? "text-[var(--aria-accent-glow)] bg-[rgba(245,158,11,0.14)]"
-                    : isPast
-                      ? "text-[var(--aria-fg)] hover:bg-[var(--aria-card)]"
-                      : "text-[var(--aria-fg-muted)] opacity-55 hover:bg-[var(--aria-card)] hover:opacity-100",
-                )}
-              >
-                {word}{" "}
-              </span>
-            );
-          })}
-        </p>
-        {/* Bottom spacer so the final lines can be centred and the list can
-            scroll all the way down. */}
-        <div style={{ height: "28vh" }} />
+      <div className="relative">
+        <div
+          ref={scrollRef}
+          tabIndex={0}
+          className="transcript-scroll relative px-5 py-5 max-h-[55vh] overflow-y-auto overscroll-contain outline-none"
+        >
+          <p className="font-serif text-base sm:text-[17px] leading-[2] m-0">
+            {words.map((word, i) => {
+              const isActive = i === activeWordIdx;
+              const isPast = i < activeWordIdx;
+              return (
+                <span
+                  key={i}
+                  data-cue-index={i}
+                  onClick={() => handleWordClick(i)}
+                  className={cn(
+                    "cursor-pointer rounded px-[1px] transition-colors duration-150",
+                    isActive
+                      ? "text-[var(--aria-accent-glow)] bg-[rgba(245,158,11,0.14)]"
+                      : isPast
+                        ? "text-[var(--aria-fg)] hover:bg-[var(--aria-card)]"
+                        : "text-[var(--aria-fg-muted)] opacity-55 hover:bg-[var(--aria-card)] hover:opacity-100",
+                  )}
+                >
+                  {word}{" "}
+                </span>
+              );
+            })}
+          </p>
+          {/* Bottom spacer so the final lines can be centred */}
+          <div style={{ height: "28vh" }} />
+        </div>
+
+        {/* Floating "Return to current word" button — shown when follow is off */}
+        {!followPlayback && (
+          <button
+            onClick={handleReturnToWord}
+            className="absolute bottom-3 right-3 z-10 flex items-center gap-1.5 px-3 py-1.5 rounded-full text-[11px] font-medium shadow-lg transition-all hover:scale-105"
+            style={{
+              background: "var(--aria-accent-glow)",
+              color: "#1a1208",
+              border: "1px solid rgba(245,158,11,0.4)",
+            }}
+          >
+            <Locate className="w-3 h-3" />
+            Return to current word
+          </button>
+        )}
       </div>
     </TranscriptFrame>
   );
@@ -262,7 +349,7 @@ function TranscriptFrame({
           </span>
         </div>
         <div className="flex items-center gap-2">
-          {/* Sync offset control (Bug 3 fix) */}
+          {/* Sync offset control */}
           <div className="flex items-center gap-1">
             <button
               onClick={() => onAdjustOffset(-20)}
