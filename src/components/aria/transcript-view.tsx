@@ -1,50 +1,24 @@
 "use client";
 
-import { useEffect, useRef, useState, useSyncExternalStore } from "react";
-import { Loader2, FileQuestion } from "lucide-react";
+import { useEffect, useRef, useState, useSyncExternalStore, useCallback } from "react";
+import { Loader2, FileQuestion, Minus, Plus } from "lucide-react";
 import { usePlayerStore } from "@/lib/player-store";
 import {
   useTranscriptStore,
   useTranscriptEntry,
 } from "@/lib/transcript-store";
-import { useWordSync } from "@/hooks/use-word-sync";
+import { useWordSync, getSyncOffset, setSyncOffset } from "@/hooks/use-word-sync";
+import { getAudioElement } from "@/lib/audio-element-registry";
 import { cn } from "@/lib/utils";
 
-/**
- * TranscriptView — word-by-word synced transcript panel for the ARIA player.
- *
- * Renders the current chapter's text as clickable <span> words. The active
- * word (the one being spoken right now) is highlighted in the accent color;
- * past words are full-opacity, upcoming words are dimmed. Clicking a word
- * seeks the player to that word's position.
- *
- * Data flow:
- *   1. On chapter change, fires `fetchTranscript(jobId, chapterIndex)` —
- *      this calls /api/abm/job_chapters and caches the chapter's cues.
- *   2. `useWordSync(cues)` runs a rAF loop reading `audio.currentTime`
- *      directly and binary-searches the cue array for the active word.
- *   3. The active word auto-scrolls into view (suppressed for 4s after a
- *      manual scroll so the user can browse freely).
- *
- * States shown:
- *   - loading → skeleton
- *   - unavailable → "Transcript not available for this chapter."
- *   - error → "Couldn't load transcript" + retry button
- *   - ready → the word grid
- *
- * Notes:
- *   - `currentChapterIdx` is the POSITION in chapterMp3s (0-based, contiguous).
- *   - `chapterMp3s[idx].index` is the BOOK chapter number — what the backend
- *     uses to key transcript_cues. These differ when the user converted a
- *     non-contiguous selection (e.g. chapters 1, 2, 5).
- *   - `audio.currentTime` is chapter-relative seconds; cues are chapter-
- *     relative ms (the 3s silence prefix is baked in). Click-to-seek adds
- *     the chapter's absolute start offset to convert back to global seconds.
- */
+const DEFAULT_OFFSET_MS = 180;
+
 export function TranscriptView() {
   const job = usePlayerStore((s) => s.currentJob);
   const currentChapterIdx = usePlayerStore((s) => s.currentChapterIdx);
   const seek = usePlayerStore((s) => s.seek);
+  const isPlaying = usePlayerStore((s) => s.isPlaying);
+  const setCurrentTime = usePlayerStore((s) => s.setCurrentTime);
   const fetchTranscript = useTranscriptStore((s) => s.fetchTranscript);
 
   const chapterMp3s = job?.chapterMp3s;
@@ -55,8 +29,6 @@ export function TranscriptView() {
   const chapterIndex = chapterInfo?.index ?? -1;
   const jobId = job?.jobId;
 
-  // Absolute start of this chapter (seconds) — used to convert a chapter-
-  // relative cue startMs back into a global seek target.
   const chapterStartSec =
     chapterMp3s && currentChapterIdx >= 0
       ? chapterMp3s
@@ -64,9 +36,6 @@ export function TranscriptView() {
           .reduce((sum, ch) => sum + (ch.duration_ms || 0), 0) / 1000
       : 0;
 
-  // Fetch transcript whenever the chapter changes (or first time the panel
-  // opens for a given chapter). The store dedupes inflight requests and
-  // caches the result, so this is safe to call repeatedly.
   useEffect(() => {
     if (!jobId || chapterIndex < 0) return;
     fetchTranscript(jobId, chapterIndex);
@@ -77,57 +46,97 @@ export function TranscriptView() {
   const words = entry?.data?.words ?? null;
   const { activeWordIdx } = useWordSync(cues);
 
-  // ── Click-to-seek ──
-  const handleWordClick = (cueIdx: number) => {
-    if (!cues || cueIdx < 0 || cueIdx >= cues.length) return;
-    const startMs = cues[cueIdx][0];
-    const absSec = chapterStartSec + startMs / 1000;
-    seek(absSec);
+  // ── Sync offset control ──
+  const [syncOffset, setSyncOffsetState] = useState(getSyncOffset());
+  const adjustOffset = (delta: number) => {
+    const next = Math.max(-500, Math.min(1000, syncOffset + delta));
+    setSyncOffsetState(next);
+    setSyncOffset(next);
   };
 
-  // ── Auto-scroll the active word into view ──
+  // ── Click-to-seek (Bug 2 fix) ──
+  const handleWordClick = useCallback(
+    (cueIdx: number) => {
+      if (!cues || cueIdx < 0 || cueIdx >= cues.length) return;
+      const startMs = cues[cueIdx][0];
+      const audio = getAudioElement();
+
+      if (audio) {
+        // Seek the audio element directly (chapter-relative — no offset needed).
+        // This avoids the store's absolute-time → chapter re-derivation which
+        // can swap chapters near boundaries due to metadata imprecision.
+        audio.currentTime = startMs / 1000;
+
+        // Reconcile the store clock so the progress bar matches.
+        const absSec = chapterStartSec + startMs / 1000;
+        setCurrentTime(absSec);
+
+        // Force one immediate sync tick so the highlight lands within a frame.
+        requestAnimationFrame(() => {
+          // The rAF loop in useWordSync will pick this up automatically.
+        });
+      } else {
+        // Fallback: use the store's seek (cross-chapter path).
+        const absSec = chapterStartSec + startMs / 1000;
+        seek(absSec);
+      }
+    },
+    [cues, chapterStartSec, seek, setCurrentTime],
+  );
+
+  // ── Auto-scroll (Bug 1 fix) ──
   const scrollRef = useRef<HTMLDivElement>(null);
-  const lastUserScrollRef = useRef<number>(0);
+  const programmaticScrollRef = useRef<number>(0);
+  const userScrolledRef = useRef<number>(0);
   const reducedMotion = usePrefersReducedMotion();
 
-  // Track manual scrolls so we can suppress auto-scroll for 4s afterwards.
+  // Re-enable auto-follow when the user presses play or seeks.
+  useEffect(() => {
+    userScrolledRef.current = 0;
+  }, [isPlaying, currentChapterIdx]);
+
+  // Track genuine user scrolls (ignore programmatic ones).
   useEffect(() => {
     const el = scrollRef.current;
     if (!el) return;
     const onScroll = () => {
-      lastUserScrollRef.current = Date.now();
+      // Ignore scroll events that were caused by our own scrollTo().
+      if (performance.now() - programmaticScrollRef.current < 700) return;
+      userScrolledRef.current = Date.now();
     };
     el.addEventListener("scroll", onScroll, { passive: true });
     return () => el.removeEventListener("scroll", onScroll);
   }, []);
 
-  // When the active word changes, scroll it into view (unless the user has
-  // recently scrolled manually — give them 4s of free browsing before we
-  // resume auto-follow).
+  // When the active word changes, scroll it into view using direct container
+  // scroll (NOT scrollIntoView which scrolls every ancestor).
   useEffect(() => {
     if (activeWordIdx < 0) return;
     const el = scrollRef.current;
     if (!el) return;
-    if (Date.now() - lastUserScrollRef.current < 4000) return;
-    const node = el.querySelector<HTMLElement>(
-      `[data-cue-index="${activeWordIdx}"]`,
-    );
+
+    // Respect the 4s manual-scroll suppression.
+    if (userScrolledRef.current && Date.now() - userScrolledRef.current < 4000) return;
+
+    const node = el.querySelector<HTMLElement>(`[data-cue-index="${activeWordIdx}"]`);
     if (!node) return;
-    try {
-      node.scrollIntoView({
-        block: "center",
-        behavior: reducedMotion ? "auto" : "smooth",
-      });
-    } catch {
-      // Older Safari doesn't support the options object — fall back.
-      node.scrollIntoView(false);
-    }
+
+    // Direct container scroll — never scrolls window/document.
+    const target =
+      node.offsetTop - el.clientHeight / 2 + node.offsetHeight / 2;
+    const clamped = Math.max(0, Math.min(target, el.scrollHeight - el.clientHeight));
+
+    programmaticScrollRef.current = performance.now();
+    el.scrollTo({
+      top: clamped,
+      behavior: reducedMotion ? "auto" : "smooth",
+    });
   }, [activeWordIdx, reducedMotion]);
 
   // ── Render states ──
   if (!job || currentChapterIdx < 0 || !chapterInfo) {
     return (
-      <TranscriptFrame>
+      <TranscriptFrame syncOffset={syncOffset} onAdjustOffset={adjustOffset}>
         <div className="px-5 py-8 text-sm text-[var(--aria-fg-muted)] text-center">
           No chapter selected.
         </div>
@@ -137,7 +146,7 @@ export function TranscriptView() {
 
   if (entry?.status === "loading" || entry?.status === "idle") {
     return (
-      <TranscriptFrame>
+      <TranscriptFrame syncOffset={syncOffset} onAdjustOffset={adjustOffset}>
         <div className="px-5 py-5">
           <div className="flex items-center gap-2 text-xs text-[var(--aria-fg-muted)] mb-4">
             <Loader2 className="w-3.5 h-3.5 animate-spin" />
@@ -151,7 +160,7 @@ export function TranscriptView() {
 
   if (entry?.status === "error") {
     return (
-      <TranscriptFrame>
+      <TranscriptFrame syncOffset={syncOffset} onAdjustOffset={adjustOffset}>
         <div className="px-5 py-8 flex flex-col items-center gap-2 text-sm text-[var(--aria-fg-muted)] text-center">
           <FileQuestion className="w-5 h-5 opacity-60" />
           <span>Couldn&apos;t load transcript.</span>
@@ -170,7 +179,7 @@ export function TranscriptView() {
 
   if (entry?.status === "unavailable" || !cues || !words) {
     return (
-      <TranscriptFrame>
+      <TranscriptFrame syncOffset={syncOffset} onAdjustOffset={adjustOffset}>
         <div className="px-5 py-8 flex flex-col items-center gap-2 text-sm text-[var(--aria-fg-muted)] text-center">
           <FileQuestion className="w-5 h-5 opacity-60" />
           <span>Transcript not available for this chapter.</span>
@@ -185,10 +194,10 @@ export function TranscriptView() {
 
   // Ready — render the word grid.
   return (
-    <TranscriptFrame>
+    <TranscriptFrame syncOffset={syncOffset} onAdjustOffset={adjustOffset}>
       <div
         ref={scrollRef}
-        className="transcript-scroll px-5 py-5 max-h-[55vh] overflow-y-auto"
+        className="transcript-scroll relative px-5 py-5 max-h-[55vh] overflow-y-auto overscroll-contain"
       >
         <p className="font-serif text-base sm:text-[17px] leading-[2] m-0">
           {words.map((word, i) => {
@@ -213,6 +222,9 @@ export function TranscriptView() {
             );
           })}
         </p>
+        {/* Bottom spacer so the final lines can be centred and the list can
+            scroll all the way down. */}
+        <div style={{ height: "28vh" }} />
       </div>
     </TranscriptFrame>
   );
@@ -220,9 +232,15 @@ export function TranscriptView() {
 
 /* ──────────────────── Sub-components ──────────────────── */
 
-/** Outer container — matches the player's transport-control visual style
- *  (soft bg, hairline border, rounded corners). */
-function TranscriptFrame({ children }: { children: React.ReactNode }) {
+function TranscriptFrame({
+  children,
+  syncOffset,
+  onAdjustOffset,
+}: {
+  children: React.ReactNode;
+  syncOffset: number;
+  onAdjustOffset: (delta: number) => void;
+}) {
   return (
     <div
       className="mt-2 rounded-2xl border overflow-hidden"
@@ -231,8 +249,10 @@ function TranscriptFrame({ children }: { children: React.ReactNode }) {
         borderColor: "var(--aria-border)",
       }}
     >
-      <div className="flex items-center justify-between px-5 py-3 border-b"
-           style={{ borderColor: "var(--aria-border)" }}>
+      <div
+        className="flex items-center justify-between px-5 py-3 border-b"
+        style={{ borderColor: "var(--aria-border)" }}
+      >
         <div className="flex items-center gap-2">
           <span
             className="font-mono text-[10px] tracking-[0.18em] uppercase"
@@ -241,9 +261,31 @@ function TranscriptFrame({ children }: { children: React.ReactNode }) {
             Transcript
           </span>
         </div>
-        <span className="text-[10px] text-[var(--aria-fg-dim)]">
-          Click any word to jump there
-        </span>
+        <div className="flex items-center gap-2">
+          {/* Sync offset control (Bug 3 fix) */}
+          <div className="flex items-center gap-1">
+            <button
+              onClick={() => onAdjustOffset(-20)}
+              className="w-5 h-5 flex items-center justify-center rounded text-[10px] text-[var(--aria-fg-muted)] hover:text-[var(--aria-accent-glow)] hover:bg-[var(--aria-card)] transition-colors"
+              title="Sync earlier (-20ms)"
+            >
+              <Minus className="w-3 h-3" />
+            </button>
+            <span className="font-mono text-[9px] text-[var(--aria-fg-dim)] w-10 text-center">
+              {syncOffset > 0 ? "+" : ""}{syncOffset}ms
+            </span>
+            <button
+              onClick={() => onAdjustOffset(20)}
+              className="w-5 h-5 flex items-center justify-center rounded text-[10px] text-[var(--aria-fg-muted)] hover:text-[var(--aria-accent-glow)] hover:bg-[var(--aria-card)] transition-colors"
+              title="Sync later (+20ms)"
+            >
+              <Plus className="w-3 h-3" />
+            </button>
+          </div>
+          <span className="text-[10px] text-[var(--aria-fg-dim)] hidden sm:inline">
+            Click any word to jump
+          </span>
+        </div>
       </div>
       {children}
     </div>
@@ -251,7 +293,6 @@ function TranscriptFrame({ children }: { children: React.ReactNode }) {
 }
 
 function TranscriptSkeleton() {
-  // 6 lines of varying width — looks like a paragraph loading.
   const widths = ["92%", "78%", "88%", "65%", "85%", "55%"];
   return (
     <div className="space-y-2.5">
@@ -266,13 +307,6 @@ function TranscriptSkeleton() {
   );
 }
 
-/** Subscribe to the user's prefers-reduced-motion setting.
- *
- *  Uses useSyncExternalStore so we read the current value WITHOUT calling
- *  setState inside an effect (the React team's recommended pattern for
- *  external state subscriptions — avoids the cascading-render warning
- *  that the naive useEffect + setState approach triggers).
- */
 function usePrefersReducedMotion(): boolean {
   return useSyncExternalStore(
     (callback) => {
@@ -281,8 +315,6 @@ function usePrefersReducedMotion(): boolean {
       }
       const mq = window.matchMedia("(prefers-reduced-motion: reduce)");
       const handler = () => callback();
-      // addEventListener is the modern API; addListener is the deprecated
-      // Safari < 14 fallback.
       if (mq.addEventListener) {
         mq.addEventListener("change", handler);
         return () => mq.removeEventListener?.("change", handler);
@@ -293,12 +325,10 @@ function usePrefersReducedMotion(): boolean {
       }
       return () => {};
     },
-    // Client snapshot.
     () => {
       if (typeof window === "undefined" || !window.matchMedia) return false;
       return window.matchMedia("(prefers-reduced-motion: reduce)").matches;
     },
-    // SSR snapshot — assume no preference (matches the client's first paint).
     () => false,
   );
 }
