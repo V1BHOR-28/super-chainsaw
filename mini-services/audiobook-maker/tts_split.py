@@ -478,9 +478,19 @@ async def _edge_tts_call(text, voice, rate, output_path, max_retries=3):
         # otherwise a retry duplicates words from the previous attempt.
         boundaries = []
         try:
-            effective_rate = rate if rate and rate.strip() and rate.strip() != "+0%" else "-5%"
+            # ARIA: preprocess text (abbreviations, years, whitespace) before TTS.
+            # Do NOT use SSML wrapping — edge-tts's WordBoundary events return
+            # SSML tag words instead of actual text words, breaking the transcript
+            # cue system. Instead, use native rate/pitch parameters for the
+            # audiobook preset (rate -10%, pitch -2%).
+            from text_preprocess import preprocess_for_tts
+            processed_text = preprocess_for_tts(text)
+
+            # Audiobook preset: slower rate (-10%) + lower pitch (-2%) for
+            # warmer narration. The existing 3s silence prefix + the
+            # audio post-processing (normalize + compress) handle the rest.
             communicate = edge_tts.Communicate(
-                text=text, voice=voice, rate=effective_rate, pitch="+2Hz",
+                text=processed_text, voice=voice, rate="-10%", pitch="-2Hz",
                 boundary="WordBoundary")
 
             # Try stream() first — captures audio + WordBoundary events.
@@ -506,7 +516,7 @@ async def _edge_tts_call(text, voice, rate, output_path, max_retries=3):
                       f"falling back to save() (attempt {attempt+1}/{max_retries})")
                 boundaries = []
                 _fb = edge_tts.Communicate(
-                    text=text, voice=voice, rate=effective_rate, pitch="+2Hz")
+                    text=processed_text, voice=voice, rate="-10%", pitch="-2Hz")
                 await asyncio.wait_for(
                     _fb.save(output_path), timeout=EDGE_TTS_CHUNK_TIMEOUT)
 
@@ -523,6 +533,15 @@ async def _edge_tts_call(text, voice, rate, output_path, max_retries=3):
                 if attempt < max_retries - 1:
                     await asyncio.sleep(2 ** attempt)
                 continue
+
+            # ARIA: post-process the audio (normalize + compress) — best-effort,
+            # non-fatal. If it fails, the unprocessed MP3 is still valid.
+            try:
+                from audio_postprocess import post_process_audio
+                post_process_audio(output_path)
+            except Exception as _e_post:
+                print(f"[tts] Audio post-processing failed (non-fatal): {_e_post}")
+
             return True, boundaries
         except Exception as e:
             last_error = e

@@ -55,71 +55,29 @@ export function ChapterSelector({
   const [voices, setVoices] = useState<VoicesResponse | null>(null);
   const [voicesLoading, setVoicesLoading] = useState(true);
   const [selected, setSelected] = useState<Set<number>>(new Set());
-  const [voice, setVoice] = useState<string>("gcloud:en-US-Chirp3-HD-Achernar");
+  const [voice, setVoice] = useState<string>("en-US-AriaNeural");
   const [converting, setConverting] = useState(false);
 
-  // Curated list of the 10 best narration voices (8 female, 2 male).
-  // No Gemini voices (region-blocked). Only edge-tts + Google Cloud TTS (Chirp3-HD).
-  // The edge-tts voices use the fine-tuned prosody (pitch +2Hz, rate -5%) from tts_split.py.
+  // Edge-TTS only — exactly 10 voices, no Google/Gemini.
   const CURATED_VOICES: AbmVoice[] = [
-    // ── 8 Best Female voices ──
-    { id: "gcloud:en-US-Chirp3-HD-Achernar", name: "Achernar — BEST Female", engine: "google", gender: "Female", gender_icon: "♀", locale: "en-US" },
-    { id: "gcloud:en-US-Chirp3-HD-Aoede", name: "Aoede — BEST Female", engine: "google", gender: "Female", gender_icon: "♀", locale: "en-US" },
-    { id: "gcloud:en-US-Chirp3-HD-Leda", name: "Leda — Warm Female", engine: "google", gender: "Female", gender_icon: "♀", locale: "en-US" },
-    { id: "gcloud:en-US-Chirp3-HD-Laomedeia", name: "Laomedeia — Expressive Female", engine: "google", gender: "Female", gender_icon: "♀", locale: "en-US" },
-    { id: "en-US-AriaNeural", name: "Aria — BEST Edge (fine-tuned)", engine: "edge", gender: "Female", gender_icon: "♀", locale: "en-US" },
-    { id: "en-US-JennyNeural", name: "Jenny — Conversational Female (fine-tuned)", engine: "edge", gender: "Female", gender_icon: "♀", locale: "en-US" },
-    { id: "en-US-AnaNeural", name: "Ana — Young Female (fine-tuned)", engine: "edge", gender: "Female", gender_icon: "♀", locale: "en-US" },
-    { id: "en-US-MichelleNeural", name: "Michelle — Mature Female (fine-tuned)", engine: "edge", gender: "Female", gender_icon: "♀", locale: "en-US" },
-    // ── 2 Best Male voices ──
-    { id: "gcloud:en-US-Chirp3-HD-Charon", name: "Charon — BEST Male", engine: "google", gender: "Male", gender_icon: "♂", locale: "en-US" },
-    { id: "en-US-GuyNeural", name: "Guy — BEST Edge Male (fine-tuned)", engine: "edge", gender: "Male", gender_icon: "♂", locale: "en-US" },
+    { id: "en-US-AriaNeural", name: "Aria — BEST Female", engine: "edge", gender: "Female", gender_icon: "♀", locale: "en-US" },
+    { id: "en-US-JennyNeural", name: "Jenny — Clear Female", engine: "edge", gender: "Female", gender_icon: "♀", locale: "en-US" },
+    { id: "en-US-MichelleNeural", name: "Michelle — Mature Female", engine: "edge", gender: "Female", gender_icon: "♀", locale: "en-US" },
+    { id: "en-US-EmmaNeural", name: "Emma — Soft Female", engine: "edge", gender: "Female", gender_icon: "♀", locale: "en-US" },
+    { id: "en-GB-SoniaNeural", name: "Sonia — British Female", engine: "edge", gender: "Female", gender_icon: "♀", locale: "en-GB" },
+    { id: "en-AU-NatashaNeural", name: "Natasha — Australian Female", engine: "edge", gender: "Female", gender_icon: "♀", locale: "en-AU" },
+    { id: "en-US-GuyNeural", name: "Guy — BEST Male", engine: "edge", gender: "Male", gender_icon: "♂", locale: "en-US" },
+    { id: "en-US-DavisNeural", name: "Davis — Deep Male", engine: "edge", gender: "Male", gender_icon: "♂", locale: "en-US" },
+    { id: "en-US-JasonNeural", name: "Jason — Young Male", engine: "edge", gender: "Male", gender_icon: "♂", locale: "en-US" },
+    { id: "en-GB-RyanNeural", name: "Ryan — British Male", engine: "edge", gender: "Male", gender_icon: "♂", locale: "en-GB" },
   ];
 
-  // No need to fetch voices from the API — we have a curated list.
-  // Still fetch to check which engines are available (google vs edge).
+  // No need to fetch voices from the API — all voices are edge-tts.
   useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const data = await getVoices();
-        if (cancelled) return;
-        setVoices(data);
-        // Check if Google Cloud TTS is available; if not, default to edge-tts
-        const hasGoogle = Object.values(data).some(
-          (g) => typeof g === "object" && g !== null && "voices" in g &&
-            Array.isArray((g as any).voices) &&
-            (g as any).voices.some((v: any) => v.engine === "google")
-        );
-        if (!hasGoogle) {
-          setVoice("en-US-AriaNeural");
-        }
-      } catch {
-        // Non-fatal — curated voices work without the API
-        setVoice("en-US-AriaNeural");
-      } finally {
-        if (!cancelled) setVoicesLoading(false);
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
+    setVoicesLoading(false);
   }, [analyzeResponse]);
 
-  // Check if Google Cloud TTS is available (from the API response).
-  // If not, filter out gcloud voices from the curated list.
-  const hasGoogleTTS = useMemo(() => {
-    if (!voices) return true; // assume available if API hasn't loaded yet
-    return Object.values(voices).some(
-      (g) => typeof g === "object" && g !== null && "voices" in g &&
-        Array.isArray((g as any).voices) &&
-        (g as any).voices.some((v: any) => v.engine === "google")
-    );
-  }, [voices]);
-
-  const availableVoices = useMemo(() => {
-    return hasGoogleTTS ? CURATED_VOICES : CURATED_VOICES.filter((v) => v.engine === "edge");
-  }, [CURATED_VOICES, hasGoogleTTS]);
+  const availableVoices = CURATED_VOICES;
 
   const chapters = analyzeResponse?.chapters ?? [];
 
