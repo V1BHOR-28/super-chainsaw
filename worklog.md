@@ -509,3 +509,154 @@ Files changed (previous commit 266a0da):
 - mini-services/audiobook-maker/generation_engine.py: _create_download_token refreshes existing token fields
 
 Commit: d07955e (pushed to origin/main)
+
+---
+Task ID: TRANSCRIPT-2-5
+Agent: main (Spotify-style word-by-word synced transcript — Parts 2-5)
+Task: Build Parts 2-5 of the synced-transcript feature. Part 1 (edge-tts WordBoundary capture → job["transcript_cues"]) is already done; this task exposes the cues through the Flask API, persists them across restarts, and builds the frontend store + rAF-driven highlight hook + karaoke-style transcript panel.
+
+Work Log:
+
+- READ context first:
+  - worklog.md prior entries (Tasks 1-10) for the ARIA audiobook architecture.
+  - player-view.tsx, player-store.ts, use-audio-engine.ts, abm-api.ts, library-view.tsx — frontend integration points.
+  - audiobook_app.py /api/job_chapters (lines 10258-10394), /api/my_jobs (lines 10660-10903), _save_tokens (lines 1655-1738), _reconstruct_job_from_storj (lines 1916-2007).
+  - generation_engine.py _create_download_token (lines 1395-1466) and the cue-finalization block (lines 4763-4788) that Part 1 added.
+
+PART 2 — Backend (audiobook_app.py + generation_engine.py):
+
+- _save_tokens() (audiobook_app.py ~line 1714): added `"transcript_cues": info.get("transcript_cues", {}) or {}` to the per-token snapshot dict so cues survive Flask restarts via the on-disk tokens file (+ R2/S3 sync).
+
+- _create_download_token() (generation_engine.py ~line 1446): added `"transcript_cues": job.get("transcript_cues", {}) or {}` to _refresh_fields so the token snapshot is refreshed with the latest in-memory cues every time the token is created/updated (mirrors the existing chapter_mp3s refresh).
+
+- _reconstruct_job_from_storj() (audiobook_app.py ~line 1959 + ~line 2000): added "transcript_cues" to the fallback_record field-copy list AND to the reconstructed in-memory job dict, so a job that's been evicted from memory (after a cold start) gets its cues restored from the token snapshot.
+
+- Added two module-level helpers in audiobook_app.py (~lines 10672-10715) just before /api/my_jobs:
+  - `_chapter_has_transcript(transcript_cues, chapter_index)`: handles BOTH int keys (in-memory job dict) AND string keys (JSON-serialized token snapshot on disk). JSON object keys are always strings on the wire, so the helper normalizes back to int for lookup.
+  - `_annotate_chapter_mp3s_with_transcript(chapter_mp3s, transcript_cues)`: returns shallow copies of each chapter_mp3s entry annotated with a `has_transcript` boolean. Does NOT mutate the originals (which may be shared with the in-memory job dict or the persisted token snapshot).
+
+- /api/job_chapters (audiobook_app.py): added `"transcript_cues": job.get("transcript_cues", {}) or {}` to BOTH response branches — the primary path (info.chapters available, line ~10388) AND the weak-fallback path (chapter_mp3s-only, line ~10345). The frontend transcript-store fetches this endpoint and extracts the cues for the current chapter.
+
+- /api/my_jobs (audiobook_app.py): annotated chapter_mp3s with `has_transcript` in BOTH loops:
+  - In-memory loop (~line 10764): uses `_tc_live = job.get("transcript_cues")` (int keys) + `_annotate_chapter_mp3s_with_transcript()`. Replaces the raw `_chapter_mp3s` list in the entry with the annotated copy.
+  - Token loop (~line 10897): uses `_tc_tok = tinfo.get("transcript_cues")` (string keys) + `_annotate_chapter_mp3s_with_transcript()`. The live-active branch (line 10779-10800) is skipped via `continue`, so live in-memory jobs keep their fresher in-memory annotation. Jobs NOT in memory (or done in memory) get the token-based annotation.
+  - This means /api/my_jobs NEVER ships the (large) transcript_cues payload — only the small `has_transcript` boolean per chapter. The frontend uses the flag to show a synced-transcript affordance in the library; the actual cues are fetched on-demand via /api/job_chapters.
+
+PART 3 — Frontend types (abm-api.ts):
+
+- Added `transcript_cues?: number[][]` to `AnalyzeChapter` (each cue is `[startMs, endMs, word]`).
+- Added `transcript_cues?: Record<string, number[][]>` to `AnalyzeResponse` (keyed by stringified chapter index — JSON object keys are always strings on the wire).
+- Added `has_transcript?: boolean` to `ChapterMp3Info` (returned by /api/my_jobs; the actual cues are NOT in /api/my_jobs — fetched on-demand via /api/job_chapters).
+
+PART 4 — transcript-store.ts + use-word-sync.ts:
+
+- Created src/lib/transcript-store.ts (zustand):
+  - Per-chapter cache: `Map<string, TranscriptEntry>` keyed by `${jobId}:${chapterIdx}` (chapterIdx is the BOOK chapter number from `chapterMp3s[idx].index`, NOT the playlist position).
+  - `fetchTranscript(jobId, chapterIdx)` calls `getJobChapters(jobId)` (existing abm-api helper) and extracts `transcript_cues[String(chapterIdx)]` from the response. Caches as `{ cues: number[][], words: string[] }` — words pre-extracted once so the render loop doesn't allocate per-frame.
+  - Inflight request dedup: a second call for the same chapter while the first is in flight awaits the same promise.
+  - States: idle / loading / ready / error / unavailable (no cues for this chapter).
+  - NO localStorage persistence (cues are too large — re-fetching from /api/job_chapters is cheap).
+
+- Created src/hooks/use-word-sync.ts:
+  - Takes `cues: number[][] | null`, returns `{ activeWordIdx }`.
+  - Uses `requestAnimationFrame` loop (NOT the timeupdate event — only ~4×/sec, visibly laggy). At 60fps the highlight tracks the narrator's voice tightly.
+  - Reads `audio.currentTime` directly from the audio element via the module-level singleton (src/lib/audio-element-registry.ts) — bypasses the player store entirely during the rAF loop (the store only updates ~4×/sec from timeupdate).
+  - `audio.currentTime` is already CHAPTER-RELATIVE (each chapter is its own MP3); cues are chapter-relative ms (3s silence prefix baked in per Part 1). Comparison is direct: `audio.currentTime * 1000` against `cue[0]` (startMs).
+  - Binary search (`binarySearchActiveCue`) for the rightmost cue with `startMs <= targetMs`. Returns -1 when before the first cue (e.g. the 3s silence prefix at chapter start). Keeps the previous word highlighted during inter-word silences (no flicker).
+  - setState only when the index actually changes (functional update with `(prev) => prev === idx ? prev : idx`) — the React tree isn't re-rendered 60×/sec, only when the active word changes.
+  - rAF loop runs while `isPlaying` is true; cancelled on pause + unmount (per the task spec).
+  - On pause, schedules a single rAF update so the highlight matches the paused position.
+  - While paused, subscribes to the player store's `currentTime` as a SEEK TRIGGER — when the user scrubs the progress bar while paused, the rAF loop is cancelled, so a single rAF update is scheduled to catch the jump.
+  - "No cues" reset is handled via a derived value during render (`!cues || cues.length === 0 ? -1 : internalIdx`) — no setState-in-effect needed for the reset path (lint rule compliance).
+
+PART 5 — UI:
+
+- Created src/lib/audio-element-registry.ts: module-level singleton (`setAudioElement` / `getAudioElement`). Module-level (not React context, not zustand) because the audio element is a true singleton per browser tab, and reading `audio.currentTime` from a 60fps rAF loop requires zero React re-renders.
+
+- Modified src/hooks/use-audio-engine.ts: in the audio-element-creation effect, calls `setAudioElement(a)` after creating the Audio() and `setAudioElement(null)` on cleanup. The audio element is now accessible to use-word-sync.ts without going through the player store (which only updates ~4×/sec).
+
+- Created src/components/aria/transcript-view.tsx:
+  - Renders chapter text as clickable `<span>` words with `data-cue-index={i}` attribute (used by the auto-scroll querySelector).
+  - Active word: `text-[var(--aria-accent-glow)]` + `bg-[rgba(245,158,11,0.14)]` (accent gold tint, matching the existing ARIA player UI).
+  - Past words: `text-[var(--aria-fg)]` (full opacity).
+  - Upcoming words: `text-[var(--aria-fg-muted)] opacity-55` (dimmed).
+  - Active word auto-scrolls into view with `scrollIntoView({ block: "center", behavior: "smooth" })` (or `"auto"` if prefers-reduced-motion).
+  - Manual scroll detection: a `scroll` listener on the container records `Date.now()` in a ref; auto-scroll is suppressed for 4s afterwards so the user can browse freely.
+  - Click/tap a word → `seek(chapterStartSec + cue.startMs / 1000)` — converts chapter-relative cue ms to global seek seconds (chapterStartSec = sum of previous chapters' duration_ms / 1000).
+  - Loading state → 6-line skeleton with `animate-pulse`.
+  - Unavailable state → "Transcript not available for this chapter." + a hint about edge-tts voices.
+  - Error state → "Couldn't load transcript." + a "Try again" button that re-invokes fetchTranscript.
+  - Wrapped in a `TranscriptFrame` that matches the existing player UI style (var(--aria-bg-soft) bg, var(--aria-border) hairline, rounded-2xl, header bar with "Transcript" label + "Click any word to jump there" hint).
+  - `prefers-reduced-motion` is read via `useSyncExternalStore` (React 18+ idiomatic pattern for external state subscriptions — avoids the cascading-render lint warning that useEffect+setState would trigger).
+
+- Modified src/lib/player-store.ts:
+  - Added `showTranscript: boolean` to the PlayerState interface.
+  - Added `toggleTranscript: () => void` action.
+  - Initialized `showTranscript: false`.
+  - NOT persisted to localStorage (the panel should be closed by default on each fresh page load — keeps the player UI clean until the user explicitly asks for the transcript). The existing `partialize` only persists `playbackRate` + `volume`, so this is already correct.
+
+- Modified src/components/aria/player-view.tsx:
+  - Imported `AlignLeft` from lucide-react + `TranscriptView` from "./transcript-view".
+  - Added `showTranscript` + `toggleTranscript` selectors.
+  - Added `handleToggleTranscript()` that closes the chapters drawer + settings panel (mutually exclusive UI surfaces) before toggling the transcript panel.
+  - Added a third `SidePanelToggle` in the header with `kind="transcript"`, `icon={AlignLeft}`, `label="Transcript"`, `active={showTranscript}`, `onClick={handleToggleTranscript}`.
+  - Extended the `SidePanelToggle` `kind` prop type to include `"transcript"`.
+  - Renders `<TranscriptView />` as a panel below the secondary controls (inside the player controls column, after `<SpeedControl />` / `<SleepTimerControl />` / `<VolumeControl />`) when `showTranscript` is true.
+
+CONSTRAINTS honored:
+- Did NOT modify tts_split.py or the cue-finalization code in generation_engine.py (Part 1 is working — only added `transcript_cues` to `_refresh_fields`).
+- Did NOT change any existing job/token JSON shape — only ADDED fields (`transcript_cues` on /api/job_chapters + token snapshot, `has_transcript` on /api/my_jobs chapter_mp3s entries).
+- Did NOT use `communicate.stream()` anywhere else.
+- Transcript generation failing never fails a job — the cue-finalization in generation_engine.py is already wrapped in try/except, and the API helpers (`_chapter_has_transcript`, `_annotate_chapter_mp3s_with_transcript`) all default to false/empty when transcript_cues is missing.
+- Frontend handles missing transcript_cues gracefully: "Transcript not available for this chapter." message + skeleton while loading + error retry.
+- Used existing shadcn/ui components and the ARIA design system (CSS variables: --aria-fg / --aria-fg-muted / --aria-fg-dim / --aria-accent-glow / --aria-bg-soft / --aria-border / --aria-card; fonts: font-serif for the transcript body, font-mono for the header label).
+- Transcript panel matches the existing player UI style (TranscriptFrame wrapper with same bg + border + rounded corners as the rest of the player).
+
+VERIFICATION:
+- `npx tsc --noEmit`: zero errors in any of the modified/created files (transcript-store.ts, use-word-sync.ts, audio-element-registry.ts, transcript-view.tsx, abm-api.ts, player-store.ts, player-view.tsx, use-audio-engine.ts). Pre-existing errors in unrelated files (skills/, scripts/, settings-modal.tsx, side-panels.tsx, auth.ts) are unchanged.
+- `bun run lint`: PASSES (0 errors, 0 warnings).
+- `python3 -m py_compile audiobook_app.py generation_engine.py tts_split.py`: PASSES.
+
+Stage Summary:
+Files changed:
+- mini-services/audiobook-maker/audiobook_app.py (+60 / -5 lines):
+  - NEW: `_chapter_has_transcript()` + `_annotate_chapter_mp3s_with_transcript()` helpers (lines 10672-10715)
+  - UPDATED: `_save_tokens()` — persists transcript_cues in token snapshot (line 1714)
+  - UPDATED: `_reconstruct_job_from_storj()` — restores transcript_cues from token snapshot (lines 1959, 2000-2004)
+  - UPDATED: `/api/job_chapters` — returns transcript_cues in BOTH response branches (lines 10345, 10388-10393)
+  - UPDATED: `/api/my_jobs` — annotates chapter_mp3s with has_transcript in BOTH loops (lines 10758-10765, 10888-10899)
+
+- mini-services/audiobook-maker/generation_engine.py (+9 lines):
+  - UPDATED: `_create_download_token()` — adds transcript_cues to _refresh_fields (lines 1446-1453)
+
+- src/lib/abm-api.ts (+22 / -1 lines):
+  - UPDATED: `AnalyzeChapter` — added `transcript_cues?: number[][]`
+  - UPDATED: `AnalyzeResponse` — added `transcript_cues?: Record<string, number[][]>`
+  - UPDATED: `ChapterMp3Info` — added `has_transcript?: boolean`
+
+- src/lib/audio-element-registry.ts (NEW, 24 lines):
+  - Module-level singleton for the live <audio> element
+
+- src/lib/transcript-store.ts (NEW, 200 lines):
+  - Zustand store with per-chapter cache + inflight dedup + status tracking
+
+- src/lib/player-store.ts (+9 lines):
+  - Added `showTranscript: boolean` + `toggleTranscript()` action
+
+- src/hooks/use-audio-engine.ts (+5 lines):
+  - Calls `setAudioElement(a)` on audio creation + `setAudioElement(null)` on cleanup
+
+- src/hooks/use-word-sync.ts (NEW, 134 lines):
+  - rAF loop reading audio.currentTime directly + binary-search cue lookup + setState only on index change
+
+- src/components/aria/transcript-view.tsx (NEW, 304 lines):
+  - Karaoke-style word grid with active/past/upcoming states, click-to-seek, auto-scroll with 4s manual-scroll suppression, skeleton/error/unavailable states, prefers-reduced-motion via useSyncExternalStore
+
+- src/components/aria/player-view.tsx (+30 / -4 lines):
+  - Added AlignLeft import + TranscriptView import
+  - Added showTranscript + toggleTranscript selectors + handleToggleTranscript
+  - Added third SidePanelToggle (transcript) in the header
+  - Renders <TranscriptView /> below secondary controls when toggled
+  - Extended SidePanelToggle kind prop to include "transcript"
+
+No git push — implementation + verification only, per the task spec.

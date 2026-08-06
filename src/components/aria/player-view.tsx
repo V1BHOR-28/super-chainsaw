@@ -20,6 +20,7 @@ import {
   PlayCircle,
   SkipBack,
   SkipForward,
+  AlignLeft,
 } from "lucide-react";
 import { usePlayerStore } from "@/lib/player-store";
 import { useAriaStore } from "@/lib/store";
@@ -28,6 +29,7 @@ import { cn } from "@/lib/utils";
 import { AmbientGlow, StatusPill, AriaDivider } from "./primitives";
 import { NowPlayingBars } from "./waveform";
 import { BookCover } from "./book-cover";
+import { TranscriptView } from "./transcript-view";
 import { getJobChapters, type AnalyzeResponse, type ChapterMp3Info } from "@/lib/abm-api";
 
 /**
@@ -49,6 +51,8 @@ export function PlayerView() {
   const volume = usePlayerStore((s) => s.volume);
   const muted = usePlayerStore((s) => s.muted);
   const showSettings = usePlayerStore((s) => s.showSettings);
+  const showTranscript = usePlayerStore((s) => s.showTranscript);
+  const toggleTranscript = usePlayerStore((s) => s.toggleTranscript);
   const sleepTimerMinutes = usePlayerStore((s) => s.sleepTimerMinutes);
   const resumedFrom = usePlayerStore((s) => s.resumedFrom);
 
@@ -92,6 +96,17 @@ export function PlayerView() {
     }
   };
 
+  // ARIA: transcript toggle. Closes the chapters drawer + settings panel
+  // (mutually exclusive UI surfaces) so the transcript panel has the user's
+  // full attention when opened.
+  const handleToggleTranscript = () => {
+    if (!usePlayerStore.getState().showTranscript) {
+      if (showChapters) setShowChapters(false);
+      if (usePlayerStore.getState().showSettings) toggleSettings();
+    }
+    toggleTranscript();
+  };
+
   if (!job) return null;
 
   const progressPct = duration > 0 ? (currentTime / duration) * 100 : 0;
@@ -133,8 +148,26 @@ export function PlayerView() {
         </div>
 
         <div className="flex items-center gap-1">
-          <SidePanelToggle kind="chapters" active={showChapters} icon={ListChecks} label="Chapters" onClick={toggleChapters} />
-          <SidePanelToggle kind="settings" active={showSettings} icon={Settings2} label="Settings" />
+          <SidePanelToggle
+            kind="chapters"
+            active={showChapters}
+            icon={ListChecks}
+            label="Chapters"
+            onClick={toggleChapters}
+          />
+          <SidePanelToggle
+            kind="transcript"
+            active={showTranscript}
+            icon={AlignLeft}
+            label="Transcript"
+            onClick={handleToggleTranscript}
+          />
+          <SidePanelToggle
+            kind="settings"
+            active={showSettings}
+            icon={Settings2}
+            label="Settings"
+          />
         </div>
       </header>
 
@@ -309,6 +342,11 @@ export function PlayerView() {
             <SleepTimerControl minutes={sleepTimerMinutes} />
             <VolumeControl volume={volume} muted={muted} />
           </div>
+
+          {/* ARIA: synced-transcript panel. Word-by-word highlighting
+              driven by useWordSync's rAF loop reading audio.currentTime
+              directly. Toggle is the AlignLeft icon in the header. */}
+          {showTranscript && <TranscriptView />}
         </div>
       </main>
 
@@ -382,7 +420,7 @@ function SidePanelToggle({
   label,
   onClick,
 }: {
-  kind: "settings" | "chapters";
+  kind: "settings" | "chapters" | "transcript";
   active: boolean;
   icon: React.ElementType;
   label: string;

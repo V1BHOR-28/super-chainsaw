@@ -25,6 +25,10 @@ export interface AnalyzeChapter {
   words: number;
   chars: number;
   estimated_minutes: number;
+  /** Word-level sync cues for this chapter: [[startMs, endMs, word], ...].
+   *  Only present when edge-tts WordBoundary events were captured during
+   *  synthesis. Missing for older jobs, non-edge voices, or fallback paths. */
+  transcript_cues?: number[][];
 }
 
 export interface AnalyzeResponse {
@@ -51,6 +55,15 @@ export interface AnalyzeResponse {
    *  output_format='mp3' + single_file=false (ARIA per-chapter mode).
    *  Each entry has exact duration + file path info for playlist playback. */
   chapter_mp3s?: ChapterMp3Info[];
+  /** Word-level transcript cues keyed by chapter index (string keys — JSON
+   *  object keys are always strings on the wire). Each value is a list of
+   *  [startMs, endMs, word] cues. Present when edge-tts WordBoundary events
+   *  were captured. The frontend's transcript-store looks up by both the
+   *  numeric and stringified chapter index to be safe.
+   *
+   *  Note: only returned by /api/job_chapters — NOT by /api/my_jobs (which
+   *  returns the smaller `has_transcript` boolean per chapter instead). */
+  transcript_cues?: Record<string, number[][]>;
 }
 
 /** Metadata for a single chapter MP3 file in per-chapter mode. */
@@ -61,6 +74,11 @@ export interface ChapterMp3Info {
   duration_ms: number;
   start_ms: number;
   end_ms: number;
+  /** True if word-level sync cues exist for this chapter (returned by
+   *  /api/my_jobs so the library can show a synced-transcript affordance
+   *  without shipping the full cues payload on every poll). The actual
+   *  cues are fetched on-demand via /api/job_chapters. */
+  has_transcript?: boolean;
 }
 
 export type JobStatus =

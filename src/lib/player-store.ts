@@ -75,6 +75,7 @@ interface PlayerState {
 
   // UI
   showSettings: boolean;
+  showTranscript: boolean;
   sleepTimerMinutes: number | null;
   sleepTimerEndsAt: number | null;
 
@@ -92,6 +93,7 @@ interface PlayerState {
   skip: (seconds: number) => void;
 
   toggleSettings: () => void;
+  toggleTranscript: () => void;
   setSleepTimer: (minutes: number | null) => void;
   clearSleepTimer: () => void;
 }
@@ -211,6 +213,7 @@ export const usePlayerStore = create<PlayerState>()(
       clearResumedFrom: () => set({ resumedFrom: null }),
 
       showSettings: false,
+      showTranscript: false,
       sleepTimerMinutes: null,
       sleepTimerEndsAt: null,
 
@@ -232,6 +235,12 @@ export const usePlayerStore = create<PlayerState>()(
 
       toggleSettings: () =>
         set((s) => ({ showSettings: !s.showSettings })),
+
+      // ARIA: transcript panel toggle. Not persisted (we want it closed by
+      // default on each fresh page load — keeps the player UI clean until
+      // the user explicitly asks for the transcript).
+      toggleTranscript: () =>
+        set((s) => ({ showTranscript: !s.showTranscript })),
 
       setSleepTimer: (minutes) => {
         if (minutes === null) {

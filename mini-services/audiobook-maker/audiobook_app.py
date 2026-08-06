@@ -1703,6 +1703,15 @@ def _save_tokens():
                     "chapter_mp3s": info.get("chapter_mp3s", []),
                     "selected_chapters": info.get("selected_chapters", []),
                     "total_chapters": info.get("total_chapters", 0),
+                    # ARIA: word-level transcript cues per chapter
+                    # ({chapter_index: [[startMs, endMs, word], ...]}).
+                    # Survives Flask restarts so the synced-transcript UI can
+                    # rebuild karaoke-style highlighting after a cold start.
+                    # Note: JSON object keys serialize as strings on disk; the
+                    # /api/my_jobs + /api/job_chapters helpers normalize back
+                    # to int via _chapter_has_transcript(). Best-effort — if a
+                    # job has no cues (older job, non-edge voice), this is {}.
+                    "transcript_cues": info.get("transcript_cues", {}) or {},
                 }
             # Atomic write (tmp + fsync + rename) per evitare corruzione su crash
             community_store.atomic_write_json(_TOKENS_FILE, data, indent=2)
@@ -1949,7 +1958,7 @@ def _reconstruct_job_from_storj(job_id, fallback_record=None):
     if fallback_record and isinstance(fallback_record, dict):
         for k in ("epub_s3_key", "client_id", "original_filename", "file_hash",
                   "language_detected", "selected_chapters", "chapter_mp3s",
-                  "total_chapters"):
+                  "total_chapters", "transcript_cues"):
             if not rec.get(k) and fallback_record.get(k):
                 rec[k] = fallback_record[k]
         if not rec.get("title") and fallback_record.get("book_title"):
@@ -1989,6 +1998,10 @@ def _reconstruct_job_from_storj(job_id, fallback_record=None):
             "language_detected": rec.get("language_detected", False),
             "selected_chapters": rec.get("selected_chapters", []),
             "chapter_mp3s": rec.get("chapter_mp3s", []),
+            # ARIA: word-level transcript cues restored from the download-token
+            # snapshot (JSON object keys are strings here — that's expected;
+            # the API helpers normalize via _chapter_has_transcript()).
+            "transcript_cues": rec.get("transcript_cues", {}) or {},
         }
     print(f"[{job_id}] Job reconstructed from Storj EPUB: {len(info.chapters)} chapters")
     return jobs[job_id]
@@ -10323,6 +10336,13 @@ def api_job_chapters(job_id):
                     if isinstance(ch, dict) and "index" in ch
                 }),
                 "chapter_mp3s": chapter_mp3s,
+                # ARIA: word-level transcript cues. The job dict here came
+                # from a download-token snapshot (transcript_cues restored
+                # by _reconstruct_job_from_storj OR carried on the token
+                # snapshot directly). Keys may be int (in-memory) or string
+                # (JSON-serialized token) — both are valid for the frontend
+                # to consume. May be {} for older jobs or non-edge voices.
+                "transcript_cues": job.get("transcript_cues", {}) or {},
             })
         return jsonify({"error": "Book data no longer available. Please re-upload the file."}), 400
 
@@ -10365,6 +10385,12 @@ def api_job_chapters(job_id):
         # The frontend uses this to build a playlist player with exact
         # chapter boundaries + stream each chapter individually.
         "chapter_mp3s": job.get("chapter_mp3s") or [],
+        # ARIA: word-level transcript cues for karaoke-style highlighting.
+        # Shape: {chapter_index: [[startMs, endMs, word], ...]} — flat arrays
+        # for compact JSON. May be {} (older jobs, non-edge voices, or if
+        # the boundary stream fell back to communicate.save()). The frontend
+        # checks per-chapter emptiness and shows "Transcript not available".
+        "transcript_cues": job.get("transcript_cues", {}) or {},
     })
 
 
@@ -10656,6 +10682,52 @@ _MY_JOBS_LIVE_ACTIVE_STATUSES = frozenset({
 })
 
 
+def _chapter_has_transcript(transcript_cues, chapter_index):
+    """True if transcript_cues has a non-empty cue list for chapter_index.
+
+    Handles BOTH int and string keys: in-memory job dicts use int keys
+    (Python), but JSON-serialized token snapshots on disk have string keys
+    (JSON object keys are always strings). This helper accepts either, so
+    the same code path works for live in-memory jobs AND for jobs restored
+    from a token after a Flask restart.
+    """
+    if not transcript_cues or not isinstance(transcript_cues, dict):
+        return False
+    if chapter_index is None:
+        return False
+    # Try int key first (in-memory case), then string key (token case).
+    try:
+        v = transcript_cues.get(chapter_index)
+        if v is None and str(chapter_index) in transcript_cues:
+            v = transcript_cues[str(chapter_index)]
+    except (TypeError, ValueError):
+        return False
+    return bool(v)
+
+
+def _annotate_chapter_mp3s_with_transcript(chapter_mp3s, transcript_cues):
+    """Return shallow copies of each chapter_mp3s entry annotated with a
+    `has_transcript` boolean. Does NOT mutate the originals (which may be
+    shared with the in-memory job dict or the persisted token snapshot).
+
+    Used by /api/my_jobs so the frontend library can show which chapters
+    have word-level sync data without shipping the (potentially large)
+    transcript_cues payload down with every my_jobs poll.
+    """
+    if not chapter_mp3s or not isinstance(chapter_mp3s, list):
+        return chapter_mp3s
+    out = []
+    for ch in chapter_mp3s:
+        if not isinstance(ch, dict):
+            out.append(ch)
+            continue
+        ch2 = dict(ch)
+        ch2["has_transcript"] = _chapter_has_transcript(
+            transcript_cues, ch.get("index"))
+        out.append(ch2)
+    return out
+
+
 @app.route("/api/my_jobs")
 def api_my_jobs():
     """Job del client chiamante: attivi (in-memory) + completati (token su disco).
@@ -10696,6 +10768,14 @@ def api_my_jobs():
             ch["index"] for ch in _chapter_mp3s
             if isinstance(ch, dict) and "index" in ch
         }) or (job.get("selected_chapters") or [])
+        # ARIA: annotate each chapter_mp3s entry with a `has_transcript`
+        # boolean so the frontend library can render a synced-transcript
+        # affordance without shipping the (large) transcript_cues payload
+        # down with every my_jobs poll. We pass a SHALLOW COPY so the
+        # in-memory job dict is NOT mutated.
+        _tc_live = job.get("transcript_cues") or {}
+        _chapter_mp3s_annotated = _annotate_chapter_mp3s_with_transcript(
+            _chapter_mp3s, _tc_live)
         entry = {
             "job_id": jid,
             "status": status,
@@ -10705,7 +10785,7 @@ def api_my_jobs():
             "created_at": job.get("start_time") or job.get("last_poll") or 0,
             "selected_chapters": _derived_selected,
             "total_chapters": len(info.chapters) if info else 0,
-            "chapter_mp3s": _chapter_mp3s,
+            "chapter_mp3s": _chapter_mp3s_annotated,
             # ARIA: has_cover so the frontend can show the EPUB's embedded
             # cover (served from /api/cover/<job_id>) instead of the CSS
             # monogram fallback.
@@ -10818,6 +10898,18 @@ def api_my_jobs():
             ch["index"] for ch in _tok_chapter_mp3s
             if isinstance(ch, dict) and "index" in ch
         }) or tinfo.get("selected_chapters", [])
+        # ARIA: annotate chapter_mp3s with `has_transcript` so the frontend
+        # knows which chapters have word-level sync data. The token's
+        # transcript_cues keys are strings (JSON-serialized) — the helper
+        # normalizes back to int. We use the token's transcript_cues here
+        # because the in-memory job is gone for this branch (job is not in
+        # memory OR is not in a live-active status). For live jobs, the
+        # in-memory annotation (set above with int keys) survives untouched
+        # because this whole `entry.update({...})` block is skipped via
+        # `continue` when status is in _MY_JOBS_LIVE_ACTIVE_STATUSES.
+        _tc_tok = tinfo.get("transcript_cues") or {}
+        entry["chapter_mp3s"] = _annotate_chapter_mp3s_with_transcript(
+            _tok_chapter_mp3s, _tc_tok)
 
     ordered = sorted(out.values(),
                      key=lambda e: -(e.get("created_at") or 0))

@@ -1443,6 +1443,14 @@ def _create_download_token(job_id):
         # can't tell the frontend whether a cover exists for done jobs after
         # a Flask restart (when the in-memory job is gone).
         "has_cover": bool(job.get("cover_thumb")),
+        # ARIA: word-level transcript cues per chapter
+        # ({chapter_index: [[startMs, endMs, word], ...]}).
+        # Persisted so the synced-transcript UI can rebuild karaoke-style
+        # highlighting after a Flask restart. Best-effort: {} for jobs
+        # without word boundaries (non-edge voice, or stream() fell back to
+        # communicate.save()). NEVER fails a job — generation_engine wraps
+        # the cue-finalization in try/except.
+        "transcript_cues": job.get("transcript_cues", {}) or {},
     }
     # Riusa un token gia' esistente per lo stesso job (idempotenza), MA aggiorna
     # i campi snapshot con i valori correnti del job in memoria. Senza questo
