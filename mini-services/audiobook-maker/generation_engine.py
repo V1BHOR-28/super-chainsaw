@@ -4151,15 +4151,34 @@ def run_generation(job_id, info, voice, rate, single_file, output_format='m4b', 
                 part_path = str(work_dir / f"chunk_{i:06d}.mp3")
                 if use_google:
                     result = generate_chunk_mp3_google(block["text"], voice, rate, part_path)
+                    _chunk_boundaries = []
                 else:
                     try:
-                        result = loop.run_until_complete(generate_chunk_mp3(block["text"], voice, rate, part_path))
+                        result, _chunk_boundaries = loop.run_until_complete(
+                            generate_chunk_mp3(block["text"], voice, rate, part_path))
                     except Exception as _edge_err:
                         print(f"[{job_id}] edge-tts chunk {i} crashed: {_edge_err}")
                         import traceback
                         traceback.print_exc()
                         _generate_silence_mp3(part_path, duration_sec=1)
                         result = False
+                        _chunk_boundaries = []
+
+                # ARIA: store word boundaries for the transcript feature.
+                # Each boundary has {"t": ms, "d": ms, "w": text} relative to
+                # the chunk's audio start. Chapter-relative offsets are computed
+                # later during chapter assembly (when chunks are concatenated).
+                if _chunk_boundaries:
+                    if "word_boundaries" not in job:
+                        job["word_boundaries"] = {}
+                    _ch_idx = block.get("chapter_index", -1)
+                    if _ch_idx not in job["word_boundaries"]:
+                        job["word_boundaries"][_ch_idx] = []
+                    job["word_boundaries"][_ch_idx].append({
+                        "chunk_index": i,
+                        "words": _chunk_boundaries,
+                    })
+
                 return result, part_path
 
         # Early-abort Gemini: soglia/campione minimo letti una volta per entrambi
@@ -4554,6 +4573,9 @@ def run_generation(job_id, info, voice, rate, single_file, output_format='m4b', 
             failed_chunks = 0
             chapter_by_idx = {ch.index: ch for ch in info.chapters}
             output_num_by_idx = {ch.index: pos + 1 for pos, ch in enumerate(info.chapters)}
+            # ARIA: track chunk offsets within each chapter for word boundary finalization
+            _chunk_offset_in_chapter = {}
+            _current_chapter_chunk_offset = 0
             for i, block in enumerate(plan):
                 if _check_cancelled():
                     raise _CancelledError("Job cancelled")
@@ -4565,6 +4587,7 @@ def run_generation(job_id, info, voice, rate, single_file, output_format='m4b', 
                           f"({pct:.0f}%), failed_chunks={failed_chunks}, "
                           f"elapsed={time.time()-start_time:.0f}s")
                 if block["chapter_index"] != current_chapter_idx:
+                    _current_chapter_chunk_offset = 0
                     if current_chapter_parts and current_chapter_idx >= 0:
                         ch = chapter_by_idx[current_chapter_idx]
                         safe_title = _safe_filename(ch.title)[:50] or f"ch_{current_chapter_idx}"
@@ -4614,6 +4637,12 @@ def run_generation(job_id, info, voice, rate, single_file, output_format='m4b', 
                                   f">= {_ea_min} -> stop generazione e refund.")
                             raise _GeminiQualityAbort(failed_chunks, _proc)
                 current_chapter_parts.append(part_path)
+
+                # ARIA: track chunk offset for word boundary finalization
+                _chunk_offset_in_chapter[i] = _current_chapter_chunk_offset
+                if os.path.exists(part_path):
+                    _chunk_dur = _get_audio_duration_ms(part_path) or 0
+                    _current_chapter_chunk_offset += _chunk_dur
 
                 # Log sul primo chunk per confermare che il TTS sta procedendo
                 if i == 0:
@@ -4730,6 +4759,33 @@ def run_generation(job_id, info, voice, rate, single_file, output_format='m4b', 
                     entry["end_ms"] = running_ms
 
                 job["chapter_mp3s"] = new_mp3s
+
+                # ARIA: finalize word boundaries — shift each chunk's boundaries
+                # by the chunk's offset within the chapter + the 3s silence prefix.
+                # Store as job["transcript_cues"] = {chapter_index: [[startMs, endMs, word], ...]}
+                try:
+                    _wb = job.get("word_boundaries") or {}
+                    _cues = {}
+                    for _ch_idx, _chunk_list in _wb.items():
+                        _chapter_cues = []
+                        for _ce in _chunk_list:
+                            _ci = _ce["chunk_index"]
+                            _chunk_start = _chunk_offset_in_chapter.get(_ci, 0) + 3000
+                            for _w in _ce.get("words", []):
+                                _chapter_cues.append([
+                                    _w["t"] + _chunk_start,
+                                    _w["t"] + _w["d"] + _chunk_start,
+                                    _w["w"],
+                                ])
+                        _chapter_cues.sort(key=lambda c: c[0])
+                        _cues[_ch_idx] = _chapter_cues
+                    if _cues:
+                        if "transcript_cues" not in job:
+                            job["transcript_cues"] = {}
+                        job["transcript_cues"].update(_cues)
+                        print(f"[{job_id}] Word cues captured for {len(_cues)} chapter(s)")
+                except Exception as _e_wb:
+                    print(f"[{job_id}] word cue finalization failed (non-fatal): {_e_wb}")
 
                 # Upload to R2/S3 if configured — survives Render restarts.
                 # The chapter_mp3 endpoint redirects to presigned URLs when

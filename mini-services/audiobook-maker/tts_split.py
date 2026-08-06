@@ -463,28 +463,53 @@ def _plan_chunks(info, max_chars=CHUNK_MAX_CHARS, max_bytes=None,
 async def _edge_tts_call(text, voice, rate, output_path, max_retries=3):
     """Singola chiamata edge-tts con retry/backoff esponenziale.
 
-    Oltre alle eccezioni, tratta come fallimento anche un output MP3 TRONCATO:
-    save() puo' ritornare senza errore mentre lo stream Azure si e' chiuso a
-    meta', lasciando un file valido ma incompleto (coda del testo persa, nessun
-    log). In quel caso ritenta con una connessione nuova. Il controllo e' a costo
-    zero (dimensione file vs lunghezza testo, vedi `_edge_output_looks_truncated`)
-    quindi si applica anche alle micro-chiamate per frase del path Multilingual.
+    ARIA: Uses communicate.stream() with boundary="WordBoundary" to capture
+    per-word timestamps during synthesis. If stream() fails or times out,
+    falls back to communicate.save() (reliable, no boundaries) so generation
+    NEVER hangs.
 
-    In caso di fallimento totale scrive un breve silenzio e ritorna False: cosi'
-    un troncamento persistente diventa un failed_chunk contato + silenzio
-    esplicito, non testo mancante nascosto (che passava inosservato con
-    failed_chunks=0 e job COMPLETE).
+    Returns (ok, boundaries) where boundaries is a list of
+    {"t": ms, "d": ms, "w": text} — flat keys for compact JSON.
+    On failure (silence fallback), returns (False, []).
     """
     last_error = None
     for attempt in range(max_retries):
+        # CRITICAL: reset boundaries at the start of every retry attempt,
+        # otherwise a retry duplicates words from the previous attempt.
+        boundaries = []
         try:
-            # Pitch +2Hz adds warmth; default rate -5% slows narration slightly
-            # for a more natural audiobook pace. User's explicit rate overrides.
             effective_rate = rate if rate and rate.strip() and rate.strip() != "+0%" else "-5%"
-            communicate = edge_tts.Communicate(text=text, voice=voice, rate=effective_rate, pitch="+2Hz")
-            await asyncio.wait_for(
-                communicate.save(output_path), timeout=EDGE_TTS_CHUNK_TIMEOUT
-            )
+            communicate = edge_tts.Communicate(
+                text=text, voice=voice, rate=effective_rate, pitch="+2Hz",
+                boundary="WordBoundary")
+
+            # Try stream() first — captures audio + WordBoundary events.
+            # If it times out or fails, fall back to save() for this attempt.
+            try:
+                with open(output_path, "wb") as _f:
+                    async def _stream_capture():
+                        async for _chunk in communicate.stream():
+                            if _chunk["type"] == "audio":
+                                _f.write(_chunk["data"])
+                            elif _chunk["type"] == "WordBoundary":
+                                boundaries.append({
+                                    "t": _chunk["offset"] // 10_000,
+                                    "d": _chunk["duration"] // 10_000,
+                                    "w": _chunk["text"],
+                                })
+                    await asyncio.wait_for(
+                        _stream_capture(), timeout=EDGE_TTS_CHUNK_TIMEOUT)
+            except (asyncio.TimeoutError, Exception) as _e_stream:
+                # stream() failed — fall back to save() for this attempt.
+                # Boundaries are lost for this chunk (empty list).
+                print(f"[tts] stream() failed ({type(_e_stream).__name__}), "
+                      f"falling back to save() (attempt {attempt+1}/{max_retries})")
+                boundaries = []
+                _fb = edge_tts.Communicate(
+                    text=text, voice=voice, rate=effective_rate, pitch="+2Hz")
+                await asyncio.wait_for(
+                    _fb.save(output_path), timeout=EDGE_TTS_CHUNK_TIMEOUT)
+
             if _edge_output_looks_truncated(output_path, text, effective_rate):
                 try:
                     size = os.path.getsize(output_path)
@@ -498,7 +523,7 @@ async def _edge_tts_call(text, voice, rate, output_path, max_retries=3):
                 if attempt < max_retries - 1:
                     await asyncio.sleep(2 ** attempt)
                 continue
-            return True
+            return True, boundaries
         except Exception as e:
             last_error = e
             wait = 2 ** attempt
@@ -510,21 +535,24 @@ async def _edge_tts_call(text, voice, rate, output_path, max_retries=3):
     print(f"[tts] WARNING: all {max_retries} attempts failed "
           f"({len(text)} chars). Last: {last_error}")
     _generate_silence_mp3(output_path, duration_sec=1)
-    return False
+    return False, []
 
 
 async def generate_chunk_mp3(text, voice, rate, output_path, max_retries=3):
     """Genera MP3 da testo via edge-tts con retry e fallback.
 
-    Per le voci *Multilingual* (es. it-IT-GiuseppeMultilingualNeural) il motore
-    Azure fa auto-detection della lingua per clausola e può "sbandare" su testi
-    monolingua. Mitigazione: spezza in frasi e sintetizza una per volta.
-    I singoli MP3 vengono poi concatenati nel file finale.
+    ARIA: Returns (result, boundaries) where boundaries is a merged list of
+    {"t": ms, "d": ms, "w": text} per word. For the Multilingual per-sentence
+    split path, each sentence's boundaries are offset by the cumulative
+    duration of prior sentence MP3s.
+
+    Returns (None, boundaries) on success, (False, boundaries) on partial
+    failure, (None, []) if text is empty.
     """
     clean = _sanitize_tts_text(text)
     if clean is None:
         _generate_silence_mp3(output_path, duration_sec=1)
-        return
+        return None, []
 
     # Percorso "split-per-frase" solo per voci Multilingual
     if _is_multilingual_voice(voice):
@@ -534,16 +562,30 @@ async def generate_chunk_mp3(text, voice, rate, output_path, max_retries=3):
             try:
                 parts = []
                 any_failed = False
+                all_boundaries = []
+                cumulative_offset_ms = 0
                 for i, sent in enumerate(sentences):
                     part_path = os.path.join(tmpdir, f"s{i:04d}.mp3")
-                    ok = await _edge_tts_call(sent, voice, rate, part_path, max_retries=max_retries)
+                    ok, bounds = await _edge_tts_call(
+                        sent, voice, rate, part_path, max_retries=max_retries)
                     if not ok:
                         any_failed = True
+                    else:
+                        # Offset boundaries by cumulative duration of prior parts
+                        for b in bounds:
+                            all_boundaries.append({
+                                "t": b["t"] + cumulative_offset_ms,
+                                "d": b["d"],
+                                "w": b["w"],
+                            })
+                        # Get this part's duration to add to cumulative offset
+                        part_dur = _get_audio_duration_ms(part_path) or 0
+                        cumulative_offset_ms += part_dur
                     parts.append(part_path)
                 _concatenate_mp3(parts, output_path)
                 if any_failed:
-                    return False
-                return True
+                    return False, all_boundaries
+                return None, all_boundaries
             finally:
                 try:
                     for f in os.listdir(tmpdir):
@@ -557,8 +599,11 @@ async def generate_chunk_mp3(text, voice, rate, output_path, max_retries=3):
         # fallthrough: singola frase → chiamata unica
 
     # Percorso standard: chiamata singola con retry
-    ok = await _edge_tts_call(clean, voice, rate, output_path, max_retries=max_retries)
-    return ok if ok is False else None
+    ok, boundaries = await _edge_tts_call(
+        clean, voice, rate, output_path, max_retries=max_retries)
+    if ok is False:
+        return False, boundaries
+    return None, boundaries
 
 
 # ---------------------------------------------------------------------------
