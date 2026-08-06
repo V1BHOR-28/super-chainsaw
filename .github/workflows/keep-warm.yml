@@ -36,21 +36,27 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - name: Ping Render health endpoint
-        # Hit /api/voices — it's a lightweight GET that just returns the voice
-        # catalog (no DB/disk access). If this returns 200, the dyno is warm
-        # AND the Flask app is healthy. If it returns non-200 or times out,
-        # the step fails (red ❌ in the Actions tab).
+        # Hit /api/voices — lightweight GET. Render free tier cold start can
+        # take 30-60s, so we use 90s timeout + 3 retries with 10s delay.
         run: |
-          echo "Pinging ${{ vars.ABM_HEALTH_URL || 'https://aria-audiobook-service.onrender.com/api/voices' }} ..."
-          HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
-            --max-time 30 \
-            "${{ vars.ABM_HEALTH_URL || 'https://aria-audiobook-service.onrender.com/api/voices' }}")
-          echo "HTTP response: $HTTP_CODE"
-          if [ "$HTTP_CODE" != "200" ]; then
-            echo "::error::Render health check failed (HTTP $HTTP_CODE). The service may be down or still spinning up."
-            exit 1
-          fi
-          echo "Render is warm and healthy ✅"
+          URL="${{ vars.ABM_HEALTH_URL || 'https://aria-audiobook-service.onrender.com/api/voices' }}"
+          echo "Pinging $URL ..."
+          for attempt in 1 2 3; do
+            HTTP_CODE=$(curl -s -o /dev/null -w "%{http_code}" \
+              --max-time 90 \
+              "$URL")
+            echo "Attempt $attempt: HTTP $HTTP_CODE"
+            if [ "$HTTP_CODE" = "200" ]; then
+              echo "Render is warm and healthy ✅"
+              exit 0
+            fi
+            if [ "$attempt" -lt 3 ]; then
+              echo "Retrying in 10s..."
+              sleep 10
+            fi
+          done
+          echo "::error::Render health check failed after 3 attempts (last HTTP: $HTTP_CODE)."
+          exit 1
 
       - name: Notify on failure
         if: failure()
