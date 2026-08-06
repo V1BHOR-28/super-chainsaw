@@ -4795,6 +4795,59 @@ def run_generation(job_id, info, voice, rate, single_file, output_format='m4b', 
                 except Exception as _e_wb:
                     print(f"[{job_id}] word cue finalization failed (non-fatal): {_e_wb}")
 
+                # ARIA: BGM (background music) cue generation + optional prerender mixing.
+                # bgm_mode: "off" (skip), "runtime" (generate+cache cues only, mix in
+                # the browser), "prerender" (mix BGM onto the chapter MP3 server-side).
+                # Fail-soft: any error → clean narration is served.
+                _bgm_mode = (job.get("bgm_mode") or "off").strip().lower()
+                if _bgm_mode in ("runtime", "prerender"):
+                    try:
+                        import bgm_cues as _bgm_cues
+                        _tc = job.get("transcript_cues") or {}
+                        _chapter_by_idx = {ch.index: ch for ch in info.chapters} if info and info.chapters else {}
+                        _bgm_cues_map = {}
+                        for _ch_entry in new_mp3s:
+                            _ci = _ch_entry["index"]
+                            _tc_list = _tc.get(_ci) or _tc.get(str(_ci)) or []
+                            if not _tc_list:
+                                continue
+                            _ch_text = ""
+                            if _ci in _chapter_by_idx:
+                                _ch_text = getattr(_chapter_by_idx[_ci], "text", "") or ""
+                            _ch_dur_sec = (_ch_entry.get("duration_ms") or 0) / 1000.0
+                            _cues = _bgm_cues.get_or_create_bgm_cues(
+                                job_id, _ci, _ch_text, _tc_list, _ch_dur_sec
+                            )
+                            if _cues:
+                                _bgm_cues_map[_ci] = _cues
+                                if _bgm_mode == "prerender":
+                                    import bgm_mix as _bgm_mix
+                                    _ch_path = _ch_entry.get("path", "")
+                                    if _ch_path and os.path.isfile(_ch_path):
+                                        _mixed_path = _ch_path + ".bgm.mp3"
+                                        if _bgm_mix.mix_chapter(_ch_path, _cues, _mixed_path):
+                                            # Replace the original with the mixed version.
+                                            try:
+                                                os.replace(_mixed_path, _ch_path)
+                                            except OSError:
+                                                shutil.move(_mixed_path, _ch_path)
+                                            # Re-measure duration (mix may differ slightly).
+                                            try:
+                                                from audio_utils import _get_audio_duration_ms as _gd
+                                                _new_dur = _gd(_ch_path)
+                                                if _new_dur:
+                                                    _ch_entry["duration_ms"] = _new_dur
+                                            except Exception:
+                                                pass
+                                            print(f"[{job_id}] BGM prerender mixed: ch{_ci}")
+                                        else:
+                                            print(f"[{job_id}] BGM mix failed ch{_ci} — keeping clean voice")
+                        job["bgm_cues"] = _bgm_cues_map
+                        job["bgm_mode"] = _bgm_mode
+                        print(f"[{job_id}] BGM cues generated for {len(_bgm_cues_map)} chapter(s) (mode={_bgm_mode})")
+                    except Exception as _e_bgm:
+                        print(f"[{job_id}] BGM generation failed (non-fatal): {_e_bgm}")
+
                 # Upload to R2/S3 if configured — survives Render restarts.
                 # The chapter_mp3 endpoint redirects to presigned URLs when
                 # local files are missing (after a restart).

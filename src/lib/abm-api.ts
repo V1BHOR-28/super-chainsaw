@@ -64,6 +64,22 @@ export interface AnalyzeResponse {
    *  Note: only returned by /api/job_chapters — NOT by /api/my_jobs (which
    *  returns the smaller `has_transcript` boolean per chapter instead). */
   transcript_cues?: Record<string, number[][]>;
+  /** BGM delivery mode for this job: "off" | "runtime" | "prerender".
+   *  "runtime" → the frontend fetches /api/bgm_cues and mixes in the browser.
+   *  "prerender" → BGM is already baked into the chapter audio (no mixing needed).
+   *  "off" → no BGM at all. */
+  bgm_mode?: "off" | "runtime" | "prerender";
+}
+
+/** A single BGM time cue — when to start/stop a mood loop and at what gain.
+ *  Times are in seconds (float). gain_db is decibels (negative, typically
+ *  -24 to -16). The frontend converts gain_db → linear and multiplies by
+ *  the user's BGM volume slider (0-100%). */
+export interface BgmCue {
+  start: number;
+  end: number;
+  mood: string;
+  gain_db: number;
 }
 
 /** Metadata for a single chapter MP3 file in per-chapter mode. */
@@ -212,6 +228,7 @@ export async function generate(
   selectedChapters: number[],
   outputFormat: "mp3" | "m4b" | "zip" = "mp3",
   rate: string = "+0%",
+  bgmMode: "off" | "runtime" | "prerender" = "off",
 ): Promise<void> {
   const res = await fetch(`${ABM_BASE}/generate`, {
     method: "POST",
@@ -223,6 +240,7 @@ export async function generate(
       selected_chapters: selectedChapters,
       output_format: outputFormat,
       single_file: false,
+      bgm_mode: bgmMode,
     }),
     credentials: "include",
   });
@@ -328,6 +346,33 @@ export async function deleteJob(jobId: string): Promise<void> {
       (body && (body.error || body.message)) || `Delete failed (${res.status})`,
     );
   }
+}
+
+/** Fetch BGM (background music) time cues for a single chapter (runtime mode).
+ *  Returns an array of {start, end, mood, gain_db} cues. Empty array if the
+ *  chapter has no BGM (bgm_mode=off or prerender, or generation failed).
+ *  Cached aggressively on the server (7-day immutable). */
+export async function getBgmCues(
+  jobId: string,
+  chapterIdx: number,
+): Promise<BgmCue[]> {
+  const res = await fetch(`${ABM_BASE}/bgm_cues/${jobId}/${chapterIdx}`, {
+    credentials: "include",
+  });
+  if (!res.ok) {
+    // 404 = bgm_mode is off/prerender → no cues (expected, not an error)
+    if (res.status === 404) return [];
+    return [];
+  }
+  const body = await res.json();
+  return (body?.cues ?? []) as BgmCue[];
+}
+
+/** Returns the relative URL for a BGM loop asset MP3 by mood name.
+ *  Served by Flask /api/bgm_asset/<mood> with 30-day immutable cache headers.
+ *  Used as the `src` of hidden <audio loop> elements in the runtime mixer. */
+export function getBgmAssetUrl(mood: string): string {
+  return `${ABM_BASE}/bgm_asset/${mood}`;
 }
 
 /** Fetch the voice catalog grouped by language code. */

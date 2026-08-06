@@ -79,6 +79,14 @@ interface PlayerState {
   sleepTimerMinutes: number | null;
   sleepTimerEndsAt: number | null;
 
+  // BGM (background music) — runtime mixing controls.
+  // bgmEnabled: master on/off toggle. When false, all BGM <audio> elements
+  //   are silenced regardless of the cue data.
+  // bgmVolume: 0-100 slider. Multiplied with the per-cue gain_db to produce
+  //   the final linear volume of each mood loop.
+  bgmEnabled: boolean;
+  bgmVolume: number;
+
   // Actions
   play: () => void;
   pause: () => void;
@@ -96,6 +104,10 @@ interface PlayerState {
   toggleTranscript: () => void;
   setSleepTimer: (minutes: number | null) => void;
   clearSleepTimer: () => void;
+
+  // BGM actions
+  toggleBgm: () => void;
+  setBgmVolume: (v: number) => void;
 }
 
 // ── Playback progress persistence (localStorage) ──
@@ -217,6 +229,11 @@ export const usePlayerStore = create<PlayerState>()(
       sleepTimerMinutes: null,
       sleepTimerEndsAt: null,
 
+      // BGM: enabled by default at 60% volume. Both are persisted so the
+      // user's preference survives page reloads.
+      bgmEnabled: true,
+      bgmVolume: 60,
+
       play: () => set({ isPlaying: true }),
       pause: () => set({ isPlaying: false }),
       toggle: () => set((s) => ({ isPlaying: !s.isPlaying })),
@@ -254,6 +271,9 @@ export const usePlayerStore = create<PlayerState>()(
       },
       clearSleepTimer: () =>
         set({ sleepTimerMinutes: null, sleepTimerEndsAt: null }),
+
+      toggleBgm: () => set((s) => ({ bgmEnabled: !s.bgmEnabled })),
+      setBgmVolume: (v) => set({ bgmVolume: Math.max(0, Math.min(100, Math.round(v))) }),
     }),
     {
       name: "aria-audiobooks",
@@ -261,6 +281,8 @@ export const usePlayerStore = create<PlayerState>()(
       partialize: (s) => ({
         playbackRate: s.playbackRate,
         volume: s.volume,
+        bgmEnabled: s.bgmEnabled,
+        bgmVolume: s.bgmVolume,
       }),
     }
   )

@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useEffect, useCallback, useMemo } from "react";
-import { X, Check, Loader2, Clock, Sparkles, RotateCcw } from "lucide-react";
+import { X, Check, Loader2, Clock, Sparkles, RotateCcw, Music } from "lucide-react";
 import { AmbientGlow } from "./primitives";
 import {
   generate,
@@ -57,6 +57,10 @@ export function ChapterSelector({
   const [selected, setSelected] = useState<Set<number>>(new Set());
   const [voice, setVoice] = useState<string>("en-US-AriaNeural");
   const [converting, setConverting] = useState(false);
+  // BGM delivery mode: "off" (no music), "runtime" (mix in browser),
+  // "prerender" (mix server-side). Default "runtime" — the user gets BGM
+  // automatically but can toggle it off in the player settings.
+  const [bgmMode, setBgmMode] = useState<"off" | "runtime" | "prerender">("runtime");
 
   // Edge-TTS only — exactly 10 voices, no Google/Gemini.
   const CURATED_VOICES: AbmVoice[] = [
@@ -162,7 +166,7 @@ export function ChapterSelector({
       const selectedArr = analyzeResponse ? Array.from(selected).sort((a, b) => a - b) : [];
       // resetToChapters is already called by handleConvertMore in library-view
       // BEFORE the selector opens. No need to call it again here.
-      await generate(jobId, voice, selectedArr, "mp3");
+      await generate(jobId, voice, selectedArr, "mp3", "+0%", bgmMode);
       toast({
         title: "Conversion started",
         description: analyzeResponse
@@ -273,6 +277,27 @@ export function ChapterSelector({
                     {v.gender_icon} {v.name}
                   </option>
                 ))}
+            </select>
+          </div>
+          {/* BGM mode selector */}
+          <div className="flex items-center gap-2">
+            <label className="text-[10px] font-mono tracking-wider uppercase flex items-center gap-1" style={{ color: "var(--aria-fg-dim)" }}>
+              <Music className="w-3 h-3" />
+              BGM
+            </label>
+            <select
+              value={bgmMode}
+              onChange={(e) => setBgmMode(e.target.value as "off" | "runtime" | "prerender")}
+              className="text-xs px-2 py-1.5 rounded-md bg-transparent cursor-pointer"
+              style={{
+                color: "var(--aria-fg)",
+                border: "1px solid var(--aria-border)",
+                background: "var(--aria-bg)",
+              }}
+            >
+              <option value="runtime" style={{ background: "var(--aria-bg)" }}>Runtime mix</option>
+              <option value="prerender" style={{ background: "var(--aria-bg)" }}>Prerender</option>
+              <option value="off" style={{ background: "var(--aria-bg)" }}>Off</option>
             </select>
           </div>
         </div>

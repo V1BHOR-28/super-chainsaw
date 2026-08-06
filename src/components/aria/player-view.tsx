@@ -21,6 +21,7 @@ import {
   SkipBack,
   SkipForward,
   AlignLeft,
+  Music,
 } from "lucide-react";
 import { usePlayerStore } from "@/lib/player-store";
 import { useAriaStore } from "@/lib/store";
@@ -767,6 +768,10 @@ function SettingsPanel() {
   const setVolume = usePlayerStore((s) => s.setVolume);
   const muted = usePlayerStore((s) => s.muted);
   const toggleMute = usePlayerStore((s) => s.toggleMute);
+  const bgmEnabled = usePlayerStore((s) => s.bgmEnabled);
+  const bgmVolume = usePlayerStore((s) => s.bgmVolume);
+  const toggleBgm = usePlayerStore((s) => s.toggleBgm);
+  const setBgmVolume = usePlayerStore((s) => s.setBgmVolume);
 
   return (
     <>
@@ -820,6 +825,37 @@ function SettingsPanel() {
             onChange={(e) => setVolume(parseFloat(e.target.value))}
             className="w-full accent-[var(--aria-accent)]"
           />
+        </div>
+
+        {/* Background music */}
+        <div>
+          <div className="flex items-center justify-between mb-3">
+            <label className="text-sm text-[var(--aria-fg)] flex items-center gap-2">
+              <Music className="w-4 h-4 text-[var(--aria-accent)]" />
+              Background music
+            </label>
+            <button
+              onClick={toggleBgm}
+              className="font-mono text-xs text-[var(--aria-fg-muted)] hover:text-[var(--aria-accent-glow)]"
+            >
+              {bgmEnabled ? "on" : "off"}
+            </button>
+          </div>
+          <input
+            type="range"
+            min={0}
+            max={100}
+            step={1}
+            value={bgmVolume}
+            disabled={!bgmEnabled}
+            onChange={(e) => setBgmVolume(parseFloat(e.target.value))}
+            className="w-full accent-[var(--aria-accent)] disabled:opacity-40"
+          />
+          <div className="flex justify-between mt-1 font-mono text-[10px] text-[var(--aria-fg-dim)]">
+            <span>0%</span>
+            <span>{bgmVolume}%</span>
+            <span>100%</span>
+          </div>
         </div>
 
         <AriaDivider />

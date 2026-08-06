@@ -660,3 +660,78 @@ Files changed:
   - Extended SidePanelToggle kind prop to include "transcript"
 
 No git push — implementation + verification only, per the task spec.
+
+---
+Task ID: BGM-1
+Agent: main (AI-driven BGM cue system)
+Task: Add an AI-driven BGM (background music) cue system on top of the existing Edge-TTS + word-timing pipeline. 8-mood asset library, LLM cue generation, ffmpeg mixing, 3 delivery modes (off/runtime/prerender), runtime browser mixer with crossfade + lockstep sync.
+
+Work Log:
+- Read prior worklog entries (Tasks 1-10, TRANSCRIPT-2-5) for ARIA audiobook architecture context.
+- Launched two parallel Explore agents to map the backend (tts_split.py, generation_engine.py, audiobook_app.py, storage_backend.py, audio_postprocess.py, audio_utils.py, requirements.txt) and frontend (use-audio-engine.ts, use-word-sync.ts, audio-element-registry.ts, player-store.ts, transcript-store.ts, abm-api.ts, player-view.tsx, chapter-selector.tsx, audiobook-workspace.tsx, abm/[...path]/route.ts).
+- KEY DISCOVERY: word timings on the wire are {chapter_index: [[startMs, endMs, word], ...]} (integer ms, flat arrays) — NOT the {w, t, d} float-seconds format the spec assumed. Adapted bgm_cues.py to normalize both formats internally.
+
+BACKEND — new modules:
+- bgm_registry.py: MOODS tuple (calm_amb, wonder, tension_low, tension_high, dread, action, sorrow, resolve, silence). asset_path_for() / asset_exists() / is_valid_mood() helpers. ASSET_DIR resolved relative to the module file.
+- assets/bgm/: 8 royalty-free seamless loop MP3s (30s each, 44.1kHz stereo, 128k libmp3lame), generated via ffmpeg sine-wave synthesis with tremolo + fades. Each mood has a distinct emotional character (calm_amb = A2+E3 fifth, dread = D2+G2 tritone, action = D3+D4 rhythmic pulse at 6Hz, etc.).
+- bgm_cues.py: generate_bgm_cues(chapter_text, word_timings) — normalizes input (accepts both [[startMs,endMs,word]] and [{w,t,d}] formats), builds indexed transcript "[0]The [1]corridor..." capped at 3000 words/call (splits long chapters with index offset), calls the shared OpenAI-compatible LLM (generation_engine._llm_client) with response_format=json_object + THINKING_OFF_BODY (mirrors community_translator.py pattern), validates output (drop unknown moods, clamp indices, sort, merge adjacent same-mood, force-fill gaps with previous mood), converts index→time cues with gain_db = -26 + intensity*2 (-24..-16 dB), 1.5s fade-in lead-in on first cue, 2.0s crossfade tail on every cue. R2 caching layer: get_or_create_bgm_cues() checks R2 first (bgm/{job_id}/{chapter}.bgm.json.gz), generates + caches on miss. Fail-soft everywhere.
+- bgm_mix.py: mix_chapter(voice_mp3, cues, out_path) — single ffmpeg invocation. For each non-silence cue: -stream_loop (finite count computed from asset duration) + atrim + volume(gain_linear) + afade in/out 1.5s + adelay. amix all beds (normalize=0), then [voice]asplit → sidechaincompress(threshold=0.03:ratio=8:attack=20:release=500) for ducking, then [v2][ducked]amix(duration=first) + loudnorm(I=-16:TP=-1.5:LRA=11) + libmp3lame 128k. Never loads audio into Python memory. 300s timeout. Fail-soft: returns False on any error → caller keeps clean voice.
+
+BACKEND — integration:
+- generation_engine.py (+50 lines after transcript_cues finalization, before R2 upload): reads job["bgm_mode"], for each chapter with transcript_cues calls get_or_create_bgm_cues(). "prerender" mode: calls mix_chapter() and replaces the chapter MP3 in-place (os.replace), re-measures duration. "runtime" mode: just caches cues in R2 + job["bgm_cues"]. Stashes job["bgm_mode"] + job["bgm_cues"].
+- audiobook_app.py:
+  - /api/generate: parses bgm_mode ("off"|"runtime"|"prerender"), validates, stashes on job.
+  - /api/bgm_asset/<mood>: serves loop MP3s with 30-day immutable cache headers. 404 for unknown mood/silence.
+  - /api/bgm_cues/<job_id>/<int:chapter_index>: runtime-mode cue endpoint. Resolution: in-memory job["bgm_cues"] → R2 cache → self-heal regenerate from transcript_cues. 7-day immutable cache headers. 404 for off/prerender mode. Fail-soft: returns {cues:[]} on any error.
+  - _build_job_descriptor: persists bgm_mode across restarts.
+  - _reenqueue_orphan: restores bgm_mode.
+  - _save_tokens: persists bgm_mode + bgm_cues in token snapshot.
+  - _reconstruct_job_from_storj: restores bgm_mode + bgm_cues from token snapshot (field-copy list + job dict).
+  - /api/job_chapters: returns bgm_mode in BOTH response branches so the frontend knows whether to fetch cues.
+
+FRONTEND — new modules:
+- src/lib/bgm-cues-store.ts: zustand store mirroring transcript-store.ts. Per-chapter cache (Map<key, BgmCuesEntry>), inflight dedup, status tracking (idle/loading/ready/error/unavailable). fetchCues() calls getBgmCues(). NOT persisted to localStorage.
+- src/hooks/use-bgm-engine.ts: the runtime mixer. Lazily creates one <audio loop> per mood (preload="auto"). rAF loop reads audio.currentTime from the audio-element-registry singleton, binary-searches the current cue, triggers crossfade on mood change (linear volume ramp over 1.5s, gain_db→linear conversion, multiplied by bgmVolume slider). Pause/resume lockstep with main audio. Seek detection (delta > 1.5s): jumps active loop to (t - cue.start) % loopDuration. BGM disabled → stops all elements. Chapter change → stops all + fetches new cues. All state in refs (no React re-renders at 60fps).
+
+FRONTEND — integration:
+- src/lib/abm-api.ts: added BgmCue interface, bgm_mode field on AnalyzeResponse, getBgmCues(jobId, chapterIdx), getBgmAssetUrl(mood), bgmMode param on generate().
+- src/lib/player-store.ts: added bgmEnabled (default true), bgmVolume (default 60), toggleBgm(), setBgmVolume(). Persisted via partialize (alongside playbackRate + volume).
+- src/components/aria/player-view.tsx: SettingsPanel now has a "Background music" section with on/off toggle + 0-100% volume slider (disabled when BGM is off), matching the existing Volume slider style. Added Music icon import.
+- src/components/aria/chapter-selector.tsx: added BGM mode dropdown (Runtime mix / Prerender / Off, default Runtime) next to the voice selector. Passes bgmMode to generate(). Added Music icon import.
+- src/components/aria/audiobook-workspace.tsx: mounts useBgmEngine() alongside useAudioEngine().
+
+VERIFICATION:
+- python3 -m py_compile: all 5 backend modules compile clean.
+- npx tsc --noEmit: zero errors in any BGM-related file (bgm-cues-store, use-bgm-engine, abm-api, player-store, player-view, chapter-selector, audiobook-workspace). Pre-existing errors in unrelated files unchanged.
+- bun run lint: 0 errors, 0 warnings.
+- Flask backend running on port 5601: /api/bgm_asset/calm_amb → 200 OK (481KB, immutable cache). /api/bgm_asset/foobar → 404. /api/bgm_cues/nonexistent/0 → 404.
+- Next.js proxy: /api/abm/bgm_asset/calm_amb → 200 OK (immutable cache headers forwarded). /api/abm/bgm_cues/nonexistent/0 → {error: "Job not found"}.
+- End-to-end cue pipeline test: 50 mock words → generate_bgm_cues (LLM unavailable → fail-soft single silence segment) → _segments_to_time_cues (start=1.5 lead-in, end=29.9 crossfade tail, gain_db=-24) → get_or_create_bgm_cues (R2 unavailable → returns generated cues without caching). All cues validated.
+- ffmpeg mixing test: 5s voice MP3 + 3 cues (calm_amb 0-3s, silence 3-4s skipped, action 4-8s) → 5.04s output MP3, valid audio, sidechaincompress + loudnorm applied.
+- agent-browser: page loads cleanly, no console errors, no runtime errors. BGM settings (bgmEnabled:true, bgmVolume:60) verified in localStorage["aria-audiobooks"].
+- Both servers running clean: Next.js dev.log shows 200 responses, Flask log shows 200/404 for BGM endpoints.
+
+Stage Summary:
+Files created:
+- mini-services/audiobook-maker/bgm_registry.py (80 lines)
+- mini-services/audiobook-maker/bgm_cues.py (340 lines)
+- mini-services/audiobook-maker/bgm_mix.py (170 lines)
+- mini-services/audiobook-maker/assets/bgm/*.mp3 (8 × 30s loops, ~470KB each)
+- src/lib/bgm-cues-store.ts (120 lines)
+- src/hooks/use-bgm-engine.ts (210 lines)
+
+Files modified:
+- mini-services/audiobook-maker/generation_engine.py (+50 lines: BGM cue generation + prerender mixing block)
+- mini-services/audiobook-maker/audiobook_app.py (+85 lines: bgm_mode parsing, /api/bgm_asset, /api/bgm_cues, persistence in 5 locations, bgm_mode in /api/job_chapters)
+- src/lib/abm-api.ts (+40 lines: BgmCue type, bgm_mode field, getBgmCues(), getBgmAssetUrl(), bgmMode param on generate())
+- src/lib/player-store.ts (+15 lines: bgmEnabled, bgmVolume, toggleBgm, setBgmVolume + persist)
+- src/components/aria/player-view.tsx (+30 lines: BGM section in SettingsPanel + Music icon)
+- src/components/aria/chapter-selector.tsx (+25 lines: BGM mode dropdown + bgmMode passed to generate())
+- src/components/aria/audiobook-workspace.tsx (+2 lines: mount useBgmEngine)
+
+CONSTRAINTS honored:
+- Did NOT modify use-word-sync.ts, transcript-view.tsx, the cue/timing storage format, or the audio engine logic.
+- No heavy audio deps (no pydub, no librosa) — ffmpeg CLI only for mixing.
+- Fail-soft everywhere: missing LLM → silence cues; missing R2 → uncached cues; missing asset → clean narration; missing cues → no mixing.
+- Single ffmpeg invocation for mixing (no intermediate WAVs) — stays in Render RAM budget.
+- BGM elements managed in refs (no React re-renders at 60fps).

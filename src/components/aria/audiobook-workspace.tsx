@@ -2,6 +2,7 @@
 
 import { usePlayerStore } from "@/lib/player-store";
 import { useAudioEngine } from "@/hooks/use-audio-engine";
+import { useBgmEngine } from "@/hooks/use-bgm-engine";
 import { useKeyboardShortcuts } from "@/hooks/use-keyboard-shortcuts";
 import { LibraryView } from "./library-view";
 import { PlayerView } from "./player-view";
@@ -19,6 +20,9 @@ export function AudiobookWorkspace() {
   // useAudioEngine plays the current job's downloadUrl (set by openPlayer).
   // It's a no-op when there's no currentJob.
   useAudioEngine();
+  // useBgmEngine mixes background music in lockstep with the main audio
+  // (runtime BGM mode only — no-op for off/prerender jobs or when BGM is disabled).
+  useBgmEngine();
   useKeyboardShortcuts();
 
   const view = usePlayerStore((s) => s.view);

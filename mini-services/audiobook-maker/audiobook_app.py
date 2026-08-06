@@ -861,6 +861,9 @@ def _build_job_descriptor(job, phase):
         # un restart (altrimenti il recovery batch rigenererebbe col default rimozione).
         "read_round_parens": bool(job.get("read_round_parens", False)),
         "read_square_brackets": bool(job.get("read_square_brackets", False)),
+        # ARIA: BGM delivery mode — preserved across restarts so the recovery
+        # batch re-runs generation with the same BGM setting.
+        "bgm_mode": job.get("bgm_mode", "off"),
         # Copie amministrative (indagine) agganciate a un job ancora in corso:
         # sopravvivono a un restart così il COMPLETE post-recovery le materializza.
         "admin_copy_cids": list(job.get("admin_copy_cids", []) or []),
@@ -972,6 +975,8 @@ def _reenqueue_orphan(job_id, rec):
         # Ripristina la scelta lettura parentesi: run_generation la legge da job.
         "read_round_parens": bool(rec.get("read_round_parens", False)),
         "read_square_brackets": bool(rec.get("read_square_brackets", False)),
+        # ARIA: restore BGM mode so re-generation uses the same setting.
+        "bgm_mode": rec.get("bgm_mode", "off"),
         # Copie admin agganciate prima del restart: da materializzare al COMPLETE.
         "admin_copy_cids": list(rec.get("admin_copy_cids", []) or []),
     }
@@ -1712,6 +1717,13 @@ def _save_tokens():
                     # to int via _chapter_has_transcript(). Best-effort — if a
                     # job has no cues (older job, non-edge voice), this is {}.
                     "transcript_cues": info.get("transcript_cues", {}) or {},
+                    # ARIA: BGM delivery mode + generated time cues per chapter.
+                    # bgm_mode drives whether the frontend fetches cues (runtime)
+                    # or plays pre-mixed audio (prerender). The cues themselves
+                    # are also cached in R2 (bgm/{job_id}/{ch}.bgm.json.gz) —
+                    # the token copy is a secondary cache for fast restart recovery.
+                    "bgm_mode": info.get("bgm_mode", "off"),
+                    "bgm_cues": info.get("bgm_cues", {}) or {},
                 }
             # Atomic write (tmp + fsync + rename) per evitare corruzione su crash
             community_store.atomic_write_json(_TOKENS_FILE, data, indent=2)
@@ -1958,7 +1970,7 @@ def _reconstruct_job_from_storj(job_id, fallback_record=None):
     if fallback_record and isinstance(fallback_record, dict):
         for k in ("epub_s3_key", "client_id", "original_filename", "file_hash",
                   "language_detected", "selected_chapters", "chapter_mp3s",
-                  "total_chapters", "transcript_cues"):
+                  "total_chapters", "transcript_cues", "bgm_mode", "bgm_cues"):
             if not rec.get(k) and fallback_record.get(k):
                 rec[k] = fallback_record[k]
         if not rec.get("title") and fallback_record.get("book_title"):
@@ -2002,6 +2014,9 @@ def _reconstruct_job_from_storj(job_id, fallback_record=None):
             # snapshot (JSON object keys are strings here — that's expected;
             # the API helpers normalize via _chapter_has_transcript()).
             "transcript_cues": rec.get("transcript_cues", {}) or {},
+            # ARIA: BGM mode + cached cues restored from the token snapshot.
+            "bgm_mode": rec.get("bgm_mode", "off"),
+            "bgm_cues": rec.get("bgm_cues", {}) or {},
         }
     print(f"[{job_id}] Job reconstructed from Storj EPUB: {len(info.chapters)} chapters")
     return jobs[job_id]
@@ -9152,6 +9167,13 @@ def api_generate():
     # Lettura opzionale del testo tra parentesi (default: rimosso).
     read_round_parens = bool(data.get("read_round_parens", False))
     read_square_brackets = bool(data.get("read_square_brackets", False))
+    # ARIA: BGM (background music) delivery mode.
+    #   "off"       — no BGM (default, backward-compatible).
+    #   "runtime"   — generate cues, mix in the browser during playback.
+    #   "prerender" — mix BGM server-side, store the mixed MP3.
+    bgm_mode = (data.get("bgm_mode") or "off").strip().lower()
+    if bgm_mode not in ("off", "runtime", "prerender"):
+        bgm_mode = "off"
 
     # Refuse Gemini voices when the module is missing or the API key is not configured.
     if _is_gemini_voice(voice):
@@ -9190,6 +9212,7 @@ def api_generate():
     job["single_file"] = single_file
     job["read_round_parens"] = read_round_parens
     job["read_square_brackets"] = read_square_brackets
+    job["bgm_mode"] = bgm_mode
     if podcast_base_url:
         job["podcast_base_url"] = podcast_base_url
     if output_format == "zip_rss":
@@ -10343,6 +10366,9 @@ def api_job_chapters(job_id):
                 # (JSON-serialized token) — both are valid for the frontend
                 # to consume. May be {} for older jobs or non-edge voices.
                 "transcript_cues": job.get("transcript_cues", {}) or {},
+                # ARIA: BGM delivery mode — tells the frontend whether to
+                # fetch /api/bgm_cues for runtime mixing.
+                "bgm_mode": job.get("bgm_mode", "off"),
             })
         return jsonify({"error": "Book data no longer available. Please re-upload the file."}), 400
 
@@ -10391,6 +10417,8 @@ def api_job_chapters(job_id):
         # the boundary stream fell back to communicate.save()). The frontend
         # checks per-chapter emptiness and shows "Transcript not available".
         "transcript_cues": job.get("transcript_cues", {}) or {},
+        # ARIA: BGM delivery mode — "off" | "runtime" | "prerender".
+        "bgm_mode": job.get("bgm_mode", "off"),
     })
 
 
@@ -10468,6 +10496,127 @@ def api_chapter_durations(job_id):
         "chapters": chapter_mp3s,
         "total_ms": total_ms,
     })
+
+
+@app.route("/api/bgm_asset/<mood>")
+def api_bgm_asset(mood):
+    """Serve a BGM loop asset MP3 by mood name (e.g. ``calm_amb``).
+
+    Assets are immutable (shipped with the app), so we serve them with
+    aggressive long-cache headers. Used by the runtime-mode BGM mixer in
+    the browser: one hidden ``<audio loop>`` per mood, crossfaded by the
+    rAF sync loop. Fail-soft: unknown mood or missing file → 404 (the
+    frontend skips that mood and plays clean narration).
+    """
+    try:
+        from bgm_registry import asset_path_for, is_valid_mood
+    except ImportError:
+        return jsonify({"error": "BGM registry not available"}), 503
+    if not is_valid_mood(mood) or mood == "silence":
+        return jsonify({"error": "Unknown mood"}), 404
+    path = asset_path_for(mood)
+    if not path or not os.path.isfile(path):
+        return jsonify({"error": "Asset not found"}), 404
+    resp = _send_file_throttled(
+        path, as_attachment=False, download_name=f"{mood}.mp3",
+        mimetype="audio/mpeg", conditional=True,
+    )
+    # Immutable assets — cache for 30 days.
+    resp.headers["Cache-Control"] = "public, max-age=2592000, immutable"
+    return resp
+
+
+@app.route("/api/bgm_cues/<job_id>/<int:chapter_index>")
+def api_bgm_cues(job_id, chapter_index):
+    """Return BGM (background music) time cues for a single chapter.
+
+    Only meaningful when the job was generated with ``bgm_mode="runtime"``.
+    For ``"prerender"`` the BGM is already baked into the audio (no cues
+    needed); for ``"off"`` this returns 404. The frontend uses these cues
+    to crossfade mood loops during playback.
+
+    Resolution order:
+      1. In-memory ``job["bgm_cues"][chapter_index]`` (fast path).
+      2. R2 cache ``bgm/{job_id}/{chapter_index}.bgm.json.gz`` (post-restart).
+      3. Regenerate from ``transcript_cues`` (self-healing if R2 missed).
+
+    Returns ``{ "cues": [...], "bgm_mode": "runtime" }`` with long-cache
+    headers (cues are immutable once generated). Fail-soft: on any error
+    returns ``{ "cues": [] }`` so the frontend plays clean narration.
+    """
+    job, err, sc = _check_job_owner(job_id)
+    if err is not None:
+        if sc == 404:
+            return jsonify({"error": "Job not found"}), 404
+        return err, sc
+
+    # Reconstruct from Storj if the job was evicted from memory.
+    if job_id not in jobs:
+        try:
+            job = _reconstruct_job_from_storj(job_id, fallback_record=job)
+        except Exception as e:
+            print(f"[{job_id}] BGM cues: job reconstruction failed: {e}")
+            return jsonify({"cues": [], "bgm_mode": "off"}), 200
+
+    bgm_mode = (job.get("bgm_mode") or "off").strip().lower()
+
+    # For "off" or "prerender", cues are not served — 404 tells the frontend
+    # to skip BGM (prerender audio already has music baked in).
+    if bgm_mode not in ("runtime",):
+        return jsonify({"error": "BGM cues not available for this mode",
+                        "bgm_mode": bgm_mode}), 404
+
+    # 1. In-memory cache.
+    bgm_cues_map = job.get("bgm_cues") or {}
+    cues = bgm_cues_map.get(chapter_index) or bgm_cues_map.get(str(chapter_index))
+
+    # 2. R2 cache (post-restart, cues evicted from memory).
+    if not cues:
+        try:
+            import bgm_cues as _bgm_cues_mod
+            cues = _bgm_cues_mod._download_cues_from_r2(job_id, chapter_index)
+        except Exception as e:
+            print(f"[{job_id}] BGM cues R2 fetch failed ch{chapter_index}: {e}")
+            cues = None
+
+    # 3. Self-heal: regenerate from transcript_cues if available.
+    if not cues:
+        try:
+            import bgm_cues as _bgm_cues_mod
+            _tc = job.get("transcript_cues") or {}
+            _tc_list = _tc.get(chapter_index) or _tc.get(str(chapter_index)) or []
+            if _tc_list:
+                _ch_mp3s = job.get("chapter_mp3s") or []
+                _ch_entry = None
+                for _ce in _ch_mp3s:
+                    if _ce.get("index") == chapter_index:
+                        _ch_entry = _ce
+                        break
+                _ch_dur = (_ch_entry.get("duration_ms") or 0) / 1000.0 if _ch_entry else None
+                _ch_text = ""
+                _info = job.get("info")
+                if _info and hasattr(_info, "chapters"):
+                    for _ch in _info.chapters:
+                        if _ch.index == chapter_index:
+                            _ch_text = getattr(_ch, "text", "") or ""
+                            break
+                cues = _bgm_cues_mod.get_or_create_bgm_cues(
+                    job_id, chapter_index, _ch_text, _tc_list, _ch_dur
+                )
+                if cues:
+                    # Stash in memory so subsequent requests skip the R2 round-trip.
+                    if "bgm_cues" not in job:
+                        job["bgm_cues"] = {}
+                    job["bgm_cues"][chapter_index] = cues
+        except Exception as e:
+            print(f"[{job_id}] BGM cues self-heal failed ch{chapter_index}: {e}")
+            cues = None
+
+    resp = jsonify({"cues": cues or [], "bgm_mode": bgm_mode})
+    # Cues are immutable once generated — cache aggressively (7 days).
+    resp.headers["Cache-Control"] = "public, max-age=604800, immutable"
+    resp.headers["Content-Type"] = "application/json"
+    return resp
 
 
 @app.route("/api/reset_to_chapters/<job_id>", methods=["POST"])
