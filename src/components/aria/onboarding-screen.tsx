@@ -17,6 +17,7 @@ import { useAriaStore } from '@/lib/store'
 export function OnboardingScreen({ email }: { email: string }) {
   const setAuthState = useAriaStore((s) => s.setAuthState)
   const setUser = useAriaStore((s) => s.setUser)
+  const setJustOnboarded = useAriaStore((s) => s.setJustOnboarded)
   // useSession().update refreshes the NextAuth session client-side after
   // onboarding succeeds. The jwt callback (src/lib/auth.ts) always re-reads
   // `onboarded` from the DB, so this both refreshes the JWT cookie and syncs
@@ -61,22 +62,27 @@ export function OnboardingScreen({ email }: { email: string }) {
       toast.success(`Welcome, ${name.trim().split(' ')[0]}. ARIA is here.`)
 
       // Refresh the NextAuth session so the JWT cookie picks up the new
-      // onboarded=true flag from the DB (the jwt callback always re-reads
-      // from DB, so this also syncs session.user.onboarded on the client).
-      // Fire-and-await — if it throws, we still transition below; the
-      // cookie will refresh on the next server-side getServerSession call.
+      // onboarded=true flag from the DB. If this fails (serverless timeout,
+      // cold start, network blip), fall back to a full page reload so the
+      // session is re-fetched from scratch — without this, the page.tsx
+      // session effect can race and flip authState back to 'needs-onboarding'.
       if (typeof updateSession === 'function') {
         try {
           await updateSession()
         } catch {
-          /* non-fatal — fall through to client-side transition */
+          // updateSession failed — force a full reload to get a fresh session.
+          // This is more reliable than a client-side flip which can be
+          // overridden by the stale session in the page.tsx effect.
+          window.location.reload()
+          return
         }
       }
 
       // Clean client-side transition: flip the store's authState so
-      // page.tsx swaps <OnboardingScreen> for the app with no full reload,
-      // no white-flash, and no artificial delay. The bootstrap effect in
-      // page.tsx will fetch settings/conversations/usage next.
+      // page.tsx swaps <OnboardingScreen> for the app with no full reload.
+      // The justOnboarded flag tells page.tsx's session effect to NOT
+      // override this with a stale 'needs-onboarding' from the old session.
+      setJustOnboarded(true)
       setAuthState('authenticated')
     } catch (err) {
       toast.error((err as Error).message)

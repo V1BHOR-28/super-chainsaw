@@ -140,8 +140,11 @@ function progressPct(card: LibraryCard): number {
 export function LibraryView() {
   const openPlayer = usePlayerStore((s) => s.openPlayer);
   const setActiveWorkspace = useAriaStore((s) => s.setActiveWorkspace);
-  const STORAGE_KEY = "aria-audiobook-library";
-  const DELETED_KEY = "aria-audiobook-deleted";
+  // Scope localStorage by userId so admin's library doesn't leak to new users
+  // on the same browser. Falls back to "anon" if user isn't loaded yet.
+  const userId = useAriaStore((s) => s.user?.id) || "anon";
+  const STORAGE_KEY = `aria-audiobook-library:${userId}`;
+  const DELETED_KEY = `aria-audiobook-deleted:${userId}`;
 
   // Load from localStorage on mount — instant display before the API responds.
   const [cards, setCards] = useState<LibraryCard[]>(() => {
@@ -186,6 +189,29 @@ export function LibraryView() {
       // non-blocking
     }
   }, [deletedIds]);
+
+  // Clear cards when the user changes (login/logout/switch) so stale
+  // localStorage from a previous user doesn't flash before the API responds.
+  useEffect(() => {
+    setCards([]);
+    setDeletedIds(new Set());
+  }, [userId]);
+
+  // One-time migration: remove old unscoped localStorage keys so admin's
+  // library doesn't leak to new users on browsers that had the old format.
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    try {
+      // Only run once per browser.
+      if (localStorage.getItem("aria-audiobook-migrated") === "v2") return;
+      localStorage.removeItem("aria-audiobook-library");
+      localStorage.removeItem("aria-audiobook-deleted");
+      localStorage.setItem("aria-audiobook-migrated", "v2");
+    } catch {
+      // non-blocking
+    }
+  }, []);
+
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   // ARIA cold-start state: the Flask service on Render's free tier spins down

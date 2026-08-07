@@ -110,6 +110,11 @@ type AriaState = {
   // Auth (real multi-user authentication)
   authState: 'loading' | 'unauthenticated' | 'needs-onboarding' | 'authenticated'
   setAuthState: (s: 'loading' | 'unauthenticated' | 'needs-onboarding' | 'authenticated') => void
+  /** Set to true when onboarding-screen.tsx completes. The page.tsx session
+   *  effect reads this to avoid flipping authState back to 'needs-onboarding'
+   *  when the session is stale (updateSession() race condition). */
+  justOnboarded: boolean
+  setJustOnboarded: (v: boolean) => void
   authModalOpen: boolean
   setAuthModalOpen: (v: boolean) => void
 
@@ -263,6 +268,8 @@ export const useAriaStore = create<AriaState>((set) => ({
 
   authState: 'loading',
   setAuthState: (s) => set({ authState: s }),
+  justOnboarded: false,
+  setJustOnboarded: (v) => set({ justOnboarded: v }),
   authModalOpen: false,
   setAuthModalOpen: (v) => set({ authModalOpen: v }),
 
