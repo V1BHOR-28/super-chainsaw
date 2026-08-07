@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useEffect, useCallback, useRef } from "react";
+import { useState, useEffect, useCallback, useRef, useMemo } from "react";
 import {
   Play,
   BookOpen,
@@ -146,49 +146,52 @@ export function LibraryView() {
   const STORAGE_KEY = `aria-audiobook-library:${userId}`;
   const DELETED_KEY = `aria-audiobook-deleted:${userId}`;
 
+  // ── Tombstone helpers (module-level, pure) ──
+  function loadTombstones(key: string): Set<string> {
+    try {
+      const raw = localStorage.getItem(key);
+      const arr = raw ? JSON.parse(raw) : [];
+      return new Set(Array.isArray(arr) ? arr.filter((x) => typeof x === "string") : []);
+    } catch {
+      return new Set();
+    }
+  }
+  function persistTombstones(key: string, set: Set<string>) {
+    try {
+      // cap so it can't grow unbounded; keep most recent 500
+      const arr = [...set].slice(-500);
+      localStorage.setItem(key, JSON.stringify(arr));
+    } catch {
+      // non-blocking
+    }
+  }
+
+  // ── Ref-backed tombstone store (single source of truth) ──
+  // NEVER cleared on mount, user change, or logout. Only written to by
+  // handleDelete (add) and handleFileSelected (remove on re-upload).
+  const deletedRef = useRef<Set<string>>(
+    typeof window !== "undefined" ? loadTombstones(DELETED_KEY) : new Set(),
+  );
+  const [deletedVersion, setDeletedVersion] = useState(0); // re-render trigger
+
+  // ── Cards state ──
   // Load from localStorage on mount — instant display before the API responds.
+  // Filter tombstones AND write the filtered array back so stale entries are
+  // physically dropped from localStorage.
   const [cards, setCards] = useState<LibraryCard[]>(() => {
     if (typeof window === "undefined") return [];
     try {
       const stored = localStorage.getItem(STORAGE_KEY);
       const parsed: LibraryCard[] = stored ? JSON.parse(stored) : [];
-      // Filter out any job_ids the user has explicitly deleted in the past.
-      // Without this, old localStorage entries for deleted books would
-      // reappear on every page load (the merge logic in fetchJobs keeps
-      // cards that aren't in the API response, which is correct for
-      // expired-but-still-on-disk books, but WRONG for user-deleted books).
-      const deletedRaw = localStorage.getItem(DELETED_KEY);
-      const deletedSet: Set<string> = deletedRaw
-        ? new Set(JSON.parse(deletedRaw))
-        : new Set();
-      return parsed.filter((c) => !deletedSet.has(c.jobId));
+      const tomb = loadTombstones(DELETED_KEY);
+      const filtered = parsed.filter((c) => !tomb.has(c.jobId));
+      // Write the filtered array back so stale entries are physically dropped.
+      localStorage.setItem(STORAGE_KEY, JSON.stringify(filtered));
+      return filtered;
     } catch {
       return [];
     }
   });
-
-  // Track job_ids the user has explicitly deleted. Persisted to localStorage
-  // so deleted books stay deleted across page refreshes + new tabs. Without
-  // this, the fetchJobs merge logic resurrects deleted cards from localStorage
-  // on every poll (every 5s while any job is generating).
-  const [deletedIds, setDeletedIds] = useState<Set<string>>(() => {
-    if (typeof window === "undefined") return new Set();
-    try {
-      const raw = localStorage.getItem(DELETED_KEY);
-      return raw ? new Set(JSON.parse(raw)) : new Set();
-    } catch {
-      return new Set();
-    }
-  });
-
-  // Persist the deleted-ids set to localStorage whenever it changes.
-  useEffect(() => {
-    try {
-      localStorage.setItem(DELETED_KEY, JSON.stringify([...deletedIds]));
-    } catch {
-      // non-blocking
-    }
-  }, [deletedIds]);
 
   // Clear cards and re-trigger fetch when the user changes (login/logout/switch)
   // so stale localStorage from a previous user doesn't flash before the API responds.
@@ -201,8 +204,9 @@ export function LibraryView() {
   // sets loading=false prematurely — the user sees "No audiobooks yet" instead
   // of the loading/waking-up UI.
   useEffect(() => {
+    deletedRef.current = loadTombstones(`aria-audiobook-deleted:${userId}`);
+    setDeletedVersion((v) => v + 1);
     setCards([]);
-    setDeletedIds(new Set());
     setLoading(true);
     setError(null);
     setWakingUp(false);
@@ -253,6 +257,13 @@ export function LibraryView() {
     }
   }, [cards]);
 
+  // ── Single chokepoint for setCards ──
+  // Every setCards call MUST go through applyCards so tombstones are always
+  // filtered. The ONLY exception is the setCards([]) reset in the [userId] effect.
+  const applyCards = useCallback((updater: (prev: LibraryCard[]) => LibraryCard[]) => {
+    setCards((prev) => updater(prev).filter((c) => !deletedRef.current.has(c.jobId)));
+  }, []);
+
   // ARIA: fetch with cold-start awareness. The Flask service on Render's
   // free tier spins down after ~15 min idle, so the first request after idle
   // can take 30-90+ seconds (or hit Vercel's 60s function timeout). Instead
@@ -290,17 +301,13 @@ export function LibraryView() {
         const data = await fetchPromise;
         setWakingUp(false);
         // Filter out job_ids the user has explicitly deleted.
-        const apiCards = data.jobs.map(toCard).filter((c) => !deletedIds.has(c.jobId));
-        setCards((prev) => {
+        const tomb = deletedRef.current;
+        const apiCards = data.jobs.map(toCard).filter((c) => !tomb.has(c.jobId));
+        applyCards((prev) => {
           const apiIds = new Set(apiCards.map((c) => c.jobId));
-          // ARIA: only keep stale cards with TERMINAL statuses. A stale
-          // generating/optimizing/translating card means the server lost the
-          // job (restart/expiry) — keeping it would leave a frozen progress
-          // bar forever and the polling effect would keep firing heartbeats
-          // to a dead job. Drop it so the UI reflects reality.
           const _ACTIVE = new Set(["generating", "optimizing", "translating"]);
           const staleCards = prev.filter(
-            (c) => !apiIds.has(c.jobId) && !deletedIds.has(c.jobId) && !_ACTIVE.has(c.status),
+            (c) => !apiIds.has(c.jobId) && !tomb.has(c.jobId) && !_ACTIVE.has(c.status),
           );
           return [...apiCards, ...staleCards];
         });
@@ -335,7 +342,7 @@ export function LibraryView() {
     } finally {
       isFetchingRef.current = false;
     }
-  }, [deletedIds, cards.length]);
+  }, [applyCards, cards.length]);
 
   // Simple fetch (no retry) for polling — a failed poll just skips that cycle.
   const fetchJobs = useCallback(async () => {
@@ -394,12 +401,10 @@ export function LibraryView() {
       // resurrected it via file_hash dedup), un-delete it so it shows in
       // the library again. The user explicitly re-uploaded the EPUB, so
       // they want it back.
-      if (deletedIds.has(resp.job_id)) {
-        setDeletedIds((prev) => {
-          const next = new Set(prev);
-          next.delete(resp.job_id);
-          return next;
-        });
+      if (deletedRef.current.has(resp.job_id)) {
+        deletedRef.current.delete(resp.job_id);
+        persistTombstones(`aria-audiobook-deleted:${userId}`, deletedRef.current);
+        setDeletedVersion((v) => v + 1);
       }
       setAnalyzeResponse(resp);
       toast({
@@ -509,17 +514,19 @@ export function LibraryView() {
   };
 
   const handleDelete = async (jobId: string) => {
+    // 1. tombstone FIRST (before the network call) so any in-flight poll
+    //    that resolves later is already filtered.
+    deletedRef.current.add(jobId);
+    persistTombstones(`aria-audiobook-deleted:${userId}`, deletedRef.current);
+    setDeletedVersion((v) => v + 1);
+    applyCards((prev) => prev.filter((c) => c.jobId !== jobId));
+    setConfirmDelete(null);
     try {
       await deleteJob(jobId);
-    } catch {
-      // Non-blocking — remove from UI even if the Flask job is already gone
+    } catch (e) {
+      console.warn("[library-view] backend delete failed, tombstone kept", e);
     }
-    // Add to the deleted-ids set so fetchJobs never resurrects it from
-    // localStorage or from a stale backend response.
-    setDeletedIds((prev) => new Set(prev).add(jobId));
-    setCards((prev) => prev.filter((c) => c.jobId !== jobId));
     toast({ title: "Audiobook removed" });
-    setConfirmDelete(null);
   };
 
   const handleCloseSelector = () => {
@@ -534,13 +541,21 @@ export function LibraryView() {
     // and refreshes the job list.
     const jobId = analyzeResponse?.job_id ?? wholeBookJob?.jobId;
     if (jobId) {
-      setCards((prev) =>
+      applyCards((prev) =>
         prev.map((c) => (c.jobId === jobId ? { ...c, status: "generating" } : c)),
       );
     }
     handleCloseSelector();
     fetchJobs();
   };
+
+  // ── Final render-time guard ──
+  // visibleCards is the tombstone-filtered list used for rendering.
+  // `cards` is still used for the polling effect (which doesn't need filtering).
+  const visibleCards = useMemo(
+    () => cards.filter((c) => !deletedRef.current.has(c.jobId)),
+    [cards, deletedVersion],
+  );
 
   // Determine which (if any) selector modal to render.
   const selectorProps = analyzeResponse
@@ -628,7 +643,7 @@ export function LibraryView() {
           </div>
         </ScrollReveal>
 
-        {loading && wakingUp && cards.length === 0 ? (
+        {loading && wakingUp && visibleCards.length === 0 ? (
           // ARIA cold-start state: the Flask service on Render's free tier is
           // spinning up (takes 30-90s). Show a dedicated, visually distinct UI
           // so the user knows this is expected, not a hang or a blank screen.
@@ -663,7 +678,7 @@ export function LibraryView() {
             <Loader2 size={32} strokeWidth={1.5} className="mx-auto mb-4 animate-spin" style={{ color: "var(--aria-accent-glow)" }} />
             <p className="text-sm">Loading your library…</p>
           </div>
-        ) : error && cards.length === 0 ? (
+        ) : error && visibleCards.length === 0 ? (
           <div className="text-center py-20">
             <p className="text-sm" style={{ color: "var(--aria-fg-muted)" }}>
               Couldn&apos;t load your library — {error}
@@ -676,7 +691,7 @@ export function LibraryView() {
               Try again
             </button>
           </div>
-        ) : cards.length === 0 ? (
+        ) : visibleCards.length === 0 ? (
           <div className="text-center py-20">
             <BookOpen size={40} strokeWidth={1} className="mx-auto mb-4 opacity-30" style={{ color: "var(--aria-fg-dim)" }} />
             <p className="text-sm" style={{ color: "var(--aria-fg-muted)" }}>
@@ -712,7 +727,7 @@ export function LibraryView() {
               </div>
             )}
             <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-3 gap-5 sm:gap-7">
-            {cards.map((card, i) => {
+            {visibleCards.map((card, i) => {
               const pct = progressPct(card);
               const isDone = card.status === "done";
               const isGenerating = isPollingStatus(card.status) && card.status !== "analyzed" && card.status !== "optimized";

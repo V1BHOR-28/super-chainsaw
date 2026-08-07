@@ -1118,6 +1118,14 @@ _job_registry = {}
 _job_registry_lock = threading.Lock()
 _JOB_REGISTRY_FILE = UPLOAD_DIR / "_job_registry.json"
 
+# ARIA: persisted set of job_ids that the user has explicitly deleted via
+# /api/delete/<job_id>. /api/my_jobs skips any job in this set so deleted
+# books never reappear (even if the browser's localStorage tombstones are
+# cleared). Best-effort — never let a failure here break my_jobs.
+_deleted_job_ids = set()
+_deleted_job_ids_lock = threading.Lock()
+_DELETED_JOB_IDS_FILE = UPLOAD_DIR / "_deleted_job_ids.json"
+
 _transfer_tokens = {}  # transfer_token -> {"job_id":..., "created_at":...}
 _TRANSFER_TOKENS_FILE = UPLOAD_DIR / "_transfer_tokens.json"
 _transfer_lock = threading.Lock()
@@ -1900,6 +1908,31 @@ def _load_job_registry():
             print(f"[registry] Loaded {len(_job_registry)} job record(s) from disk")
     except Exception as e:
         print(f"[registry] Failed to load: {e}")
+
+
+def _load_deleted_job_ids():
+    """Load the persisted set of deleted job_ids from disk on startup."""
+    global _deleted_job_ids
+    try:
+        if _DELETED_JOB_IDS_FILE.exists():
+            with open(_DELETED_JOB_IDS_FILE, "r", encoding="utf-8") as f:
+                data = json.load(f)
+            if isinstance(data, list):
+                _deleted_job_ids = set(data)
+                print(f"[deleted-ids] Loaded {len(_deleted_job_ids)} deleted job id(s) from disk")
+    except Exception as e:
+        print(f"[deleted-ids] Failed to load (non-fatal): {e}")
+
+
+def _save_deleted_job_ids():
+    """Persist the deleted job_ids set to disk. Best-effort, non-fatal."""
+    try:
+        with _deleted_job_ids_lock:
+            data = list(_deleted_job_ids)
+        with open(_DELETED_JOB_IDS_FILE, "w", encoding="utf-8") as f:
+            json.dump(data, f)
+    except Exception as e:
+        print(f"[deleted-ids] Failed to save (non-fatal): {e}")
 
 
 def _register_job(job_id, **fields):
@@ -10309,6 +10342,16 @@ def _purge_job_completely(job_id):
 
     print(f"[purge] {job_id} hard-delete complete")
 
+    # ARIA: record the job_id in the persisted _deleted_job_ids set so
+    # /api/my_jobs never returns it again (even if a stale token survives
+    # or the browser's localStorage tombstones are cleared). Best-effort.
+    try:
+        with _deleted_job_ids_lock:
+            _deleted_job_ids.add(job_id)
+        _save_deleted_job_ids()
+    except Exception as e:
+        print(f"[purge] {job_id} deleted-ids record failed (non-fatal): {e}")
+
 
 @app.route("/api/delete/<job_id>", methods=["POST", "DELETE"])
 def api_delete_job(job_id):
@@ -11120,9 +11163,21 @@ def api_my_jobs():
     now = time.time()
     out = {}
 
+    # ARIA: snapshot the deleted job_ids set once (best-effort, non-fatal).
+    # Any job in this set is skipped in BOTH the in-memory loop and the
+    # download-token loop below, so deleted books never reappear.
+    try:
+        with _deleted_job_ids_lock:
+            _deleted_snapshot = set(_deleted_job_ids)
+    except Exception:
+        _deleted_snapshot = set()
+
     with _jobs_lock:
         snapshot = list(jobs.items())
     for jid, job in snapshot:
+        # Skip jobs the user has explicitly deleted.
+        if jid in _deleted_snapshot:
+            continue
         # Copia amministrativa PENDING: il cid (app admin) e' agganciato via QR
         # a un job di un altro utente ancora in corso (api_transfer_claim ramo
         # admin_copy). Senza questo ramo l'app confermava "job aggiunto" ma la
@@ -11222,6 +11277,9 @@ def api_my_jobs():
 
     for token, tinfo in list(_download_tokens.items()):
         if not isinstance(tinfo, dict):
+            continue
+        # ARIA: skip jobs the user has explicitly deleted (backend safety net).
+        if tinfo.get("job_id", "") in _deleted_snapshot:
             continue
         # ARIA: only include tokens that MATCH the current cid.
         # Tokens with an EMPTY client_id are NEVER included in /api/my_jobs —
@@ -16311,6 +16369,7 @@ payment._recover_orphaned_voucher_charges(jobs)
 # is consistent with the token snapshots (the two are kept in sync on every
 # _save_tokens() call).
 _load_job_registry()
+_load_deleted_job_ids()
 
 # ARIA: startup recovery — any token whose last_status was "generating" when
 # the worker died is stuck. The in-memory job is gone (process restart) and
