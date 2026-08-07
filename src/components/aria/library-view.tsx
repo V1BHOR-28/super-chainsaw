@@ -343,10 +343,24 @@ export function LibraryView() {
   }, [fetchJobsWithRetry]);
 
   useEffect(() => {
+    // Don't fetch until the real userId is available (not "anon").
+    // Without this, the component fetches with "anon" first (returns 0 jobs
+    // immediately), sets loading=false, then when the session loads and
+    // userId changes to the real ID, loading is set to true again but the
+    // fetch may return quickly with 0 jobs for a new user — the user sees
+    // "No audiobooks yet" instead of the loading/waking-up UI.
+    if (userId === "anon") return;
     // Initial fetch with cold-start retry logic.
     // Re-runs when userId changes (login/logout/switch) so the new user's
     // library is fetched fresh.
-    fetchJobsWithRetry(true).finally(() => setLoading(false));
+    // Enforce a minimum 1.5s loading time so the user always sees the loading
+    // UI (not a jarring flash of "No audiobooks yet" when the backend is
+    // responsive but the user has 0 jobs).
+    const minLoadTimer = new Promise<void>((r) => setTimeout(r, 1500));
+    Promise.all([
+      fetchJobsWithRetry(true),
+      minLoadTimer,
+    ]).finally(() => setLoading(false));
   }, [fetchJobsWithRetry, userId]);
 
   // Poll while any job is still generating / optimizing / translating.
