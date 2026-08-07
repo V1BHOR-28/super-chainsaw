@@ -48,6 +48,7 @@
     "@radix-ui/react-toggle-group": "^1.1.10",
     "@radix-ui/react-tooltip": "^1.2.7",
     "@reactuses/core": "^6.0.5",
+    "@vercel/analytics": "^2.0.1",
     "@vercel/blob": "^2.6.1",
     "bcryptjs": "^3.0.3",
     "cheerio": "^1.2.0",
