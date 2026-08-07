@@ -197,6 +197,7 @@ export function PlayerView() {
                 title={job.title}
                 accent={job.accent}
                 coverImgUrl={job.coverImgUrl}
+                jobId={job.jobId}
                 className="absolute inset-0"
               />
               <div className="absolute inset-0 bg-gradient-to-t from-black/60 via-transparent to-transparent" />

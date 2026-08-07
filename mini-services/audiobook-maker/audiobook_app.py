@@ -1724,7 +1724,31 @@ def _save_tokens():
                     # the token copy is a secondary cache for fast restart recovery.
                     "bgm_mode": info.get("bgm_mode", "off"),
                     "bgm_cues": info.get("bgm_cues", {}) or {},
+                    # ARIA: cover persistence — cover_thumb (local path) +
+                    # cover_s3_key (R2 key) + cover_mime. Without these, a
+                    # Render restart loses the cover forever (the disk is wiped
+                    # and the in-memory job dict is gone). cover_s3_key lets
+                    # /api/cover redirect to R2; cover_thumb lets it find the
+                    # local file if it still exists.
+                    "cover_thumb": info.get("cover_thumb", ""),
+                    "cover_s3_key": info.get("cover_s3_key", ""),
+                    "cover_mime": info.get("cover_mime", "image/jpeg"),
+                    # ARIA: last_status — so startup recovery can detect jobs
+                    # that were "generating" when the worker died and mark them
+                    # "interrupted" instead of leaving them as eternal "generating".
+                    "last_status": info.get("last_status", ""),
                 }
+            # ARIA: cross-reference live job status so the token's last_status
+            # field is fresh on every save. Without this, a crash during
+            # generation leaves the token with a stale last_status (or none),
+            # and startup recovery can't detect the stuck job.
+            with _jobs_lock:
+                for _tok_id, _tok_data in data.items():
+                    _jid = _tok_data.get("job_id", "")
+                    if _jid and _jid in jobs:
+                        _live_status = jobs[_jid].get("status", "")
+                        if _live_status:
+                            _tok_data["last_status"] = _live_status
             # Atomic write (tmp + fsync + rename) per evitare corruzione su crash
             community_store.atomic_write_json(_TOKENS_FILE, data, indent=2)
             # Sync to R2/S3 if configured — survives Render ephemeral storage wipes.
@@ -1970,7 +1994,8 @@ def _reconstruct_job_from_storj(job_id, fallback_record=None):
     if fallback_record and isinstance(fallback_record, dict):
         for k in ("epub_s3_key", "client_id", "original_filename", "file_hash",
                   "language_detected", "selected_chapters", "chapter_mp3s",
-                  "total_chapters", "transcript_cues", "bgm_mode", "bgm_cues"):
+                  "total_chapters", "transcript_cues", "bgm_mode", "bgm_cues",
+                  "cover_s3_key", "cover_mime", "cover_thumb"):
             if not rec.get(k) and fallback_record.get(k):
                 rec[k] = fallback_record[k]
         if not rec.get("title") and fallback_record.get("book_title"):
@@ -2017,6 +2042,12 @@ def _reconstruct_job_from_storj(job_id, fallback_record=None):
             # ARIA: BGM mode + cached cues restored from the token snapshot.
             "bgm_mode": rec.get("bgm_mode", "off"),
             "bgm_cues": rec.get("bgm_cues", {}) or {},
+            # ARIA: cover restored from token snapshot. cover_thumb may point
+            # to a wiped disk path (Render ephemeral storage), but cover_s3_key
+            # lets /api/cover redirect to R2.
+            "cover_thumb": rec.get("cover_thumb", ""),
+            "cover_s3_key": rec.get("cover_s3_key", ""),
+            "cover_mime": rec.get("cover_mime", "image/jpeg"),
         }
     print(f"[{job_id}] Job reconstructed from Storj EPUB: {len(info.chapters)} chapters")
     return jobs[job_id]
@@ -8531,12 +8562,32 @@ def api_analyze():
         has_cover = True
         jobs[job_id]["cover_thumb"] = cover_out
         jobs[job_id]["cover_mime"] = mime
+        # ARIA: upload cover to R2 so it survives Render restarts (the disk
+        # is ephemeral). Fail-soft: never let a failed upload break analyze.
+        try:
+            import storage_backend
+            if storage_backend.is_enabled():
+                _cover_key = f"covers/{job_id}/cover{ext}"
+                storage_backend.upload_file(cover_out, _cover_key)
+                jobs[job_id]["cover_s3_key"] = _cover_key
+        except Exception as _e_cover:
+            print(f"[cover] R2 upload failed for {job_id}: {_e_cover}")
     elif is_epub:
         cover_path, cover_mime = _extract_cover_for_preview(str(file_path), str(work_dir))
         if cover_path and os.path.exists(cover_path):
             has_cover = True
             jobs[job_id]["cover_thumb"] = cover_path
             jobs[job_id]["cover_mime"] = cover_mime
+            # ARIA: upload cover to R2 so it survives Render restarts.
+            try:
+                import storage_backend
+                if storage_backend.is_enabled():
+                    _ext = ".png" if str(cover_path).lower().endswith(".png") else ".jpg"
+                    _cover_key = f"covers/{job_id}/cover{_ext}"
+                    storage_backend.upload_file(cover_path, _cover_key)
+                    jobs[job_id]["cover_s3_key"] = _cover_key
+            except Exception as _e_cover:
+                print(f"[cover] R2 upload failed for {job_id}: {_e_cover}")
 
     _log_activity(job_id, file.filename, "ANALYZE",
                   jobs[job_id]["client_id"], jobs[job_id]["client_ip"],
@@ -9037,24 +9088,49 @@ def api_preview_audio(job_id):
 
 @app.route("/api/cover/<job_id>")
 def api_cover(job_id):
-    """Serve the extracted cover thumbnail for preview."""
+    """Serve the extracted cover thumbnail for preview.
+
+    Resolution order (survives Render restarts):
+      a. in-memory cover_thumb path if it exists on disk
+      b. UPLOAD_DIR/<job_id>/cover_thumb.{jpg,png,jpeg} on disk
+      c. cover_s3_key → 302 redirect to presigned R2 URL
+      d. 404
+    Covers are immutable per job_id → cached for 7 days.
+    """
     job, err, sc = _check_job_owner(job_id)
     if err is not None:
         return "", sc if sc == 404 else 403
     cover_path = job.get("cover_thumb")
     mime = job.get("cover_mime", "image/jpeg")
-    # ARIA: After restart, cover_thumb is gone from memory. Try disk.
-    if not cover_path or not os.path.exists(cover_path):
-        work_dir = UPLOAD_DIR / job_id
-        for ext in (".jpg", ".png", ".jpeg"):
-            candidate = str(work_dir / ("cover_thumb" + ext))
-            if os.path.exists(candidate):
-                cover_path = candidate
-                mime = "image/jpeg" if ext != ".png" else "image/png"
-                break
-    if not cover_path or not os.path.exists(cover_path):
-        return "", 404
-    return send_file(cover_path, mimetype=mime)
+    # a. in-memory path
+    if cover_path and os.path.exists(cover_path):
+        resp = send_file(cover_path, mimetype=mime)
+        resp.headers["Cache-Control"] = "public, max-age=604800, immutable"
+        return resp
+    # b. disk fallback (cover_thumb may be gone from memory after restart)
+    work_dir = UPLOAD_DIR / job_id
+    for ext in (".jpg", ".png", ".jpeg"):
+        candidate = str(work_dir / ("cover_thumb" + ext))
+        if os.path.exists(candidate):
+            cover_path = candidate
+            mime = "image/jpeg" if ext != ".png" else "image/png"
+            resp = send_file(cover_path, mimetype=mime)
+            resp.headers["Cache-Control"] = "public, max-age=604800, immutable"
+            return resp
+    # c. R2/S3 fallback (the cover was uploaded during /api/analyze)
+    cover_s3_key = job.get("cover_s3_key")
+    if cover_s3_key:
+        try:
+            import storage_backend
+            if storage_backend.is_enabled():
+                presigned = storage_backend.presigned_get_url(cover_s3_key)
+                resp = redirect(presigned, code=302)
+                resp.headers["Cache-Control"] = "public, max-age=604800, immutable"
+                return resp
+        except Exception as _e:
+            print(f"[cover] R2 redirect failed for {job_id}: {_e}")
+    # d. no cover found
+    return "", 404
 
 
 @app.route("/api/export_abm/<job_id>")
@@ -10904,6 +10980,26 @@ def api_my_jobs():
         status = job.get("status", "")
         if job.get("server_interrupted"):
             status = "interrupted"
+        # ARIA: stale-job watchdog — if a job has been "generating" with zero
+        # progress for 15 min, the worker was likely killed by Render (OOM /
+        # instance restart). Flip it to "interrupted" so the UI shows a re-run
+        # option instead of a frozen progress bar forever. This is a belt-and-
+        # suspenders check alongside the cleanup supervisor.
+        if status == "generating":
+            _pu = job.get("progress_updated_at") or job.get("start_time", 0)
+            if _pu and (time.time() - _pu) > 900:  # 15 min no progress
+                print(f"[my_jobs] {jid} stale (no progress {int(time.time() - _pu)}s) → interrupted")
+                job["server_interrupted"] = True
+                job["status"] = "interrupted"
+                job["progress_message"] = (
+                    "Generation stalled (server restarted or ran out of memory). "
+                    "Re-run the remaining chapters."
+                )
+                try:
+                    pending_jobs.mark_failed(jid)
+                except Exception:
+                    pass
+                status = "interrupted"
         if status not in _MY_JOBS_LIVE_STATUSES:
             continue
         info = job.get("info")
@@ -10937,8 +11033,9 @@ def api_my_jobs():
             "chapter_mp3s": _chapter_mp3s_annotated,
             # ARIA: has_cover so the frontend can show the EPUB's embedded
             # cover (served from /api/cover/<job_id>) instead of the CSS
-            # monogram fallback.
-            "has_cover": bool(job.get("cover_thumb")),
+            # monogram fallback. Checks cover_s3_key too so restored jobs
+            # (after Render restart) still advertise their cover.
+            "has_cover": bool(job.get("cover_thumb") or job.get("cover_s3_key")),
         }
         if _is_admin_pending:
             entry["admin_copy"] = True
@@ -10947,6 +11044,11 @@ def api_my_jobs():
                 "progress_current": job.get("progress_current", 0),
                 "progress_total": job.get("progress_total", 0),
                 "progress_message": job.get("progress_message", ""),
+                # ARIA: finalization progress — lets the UI show "Encoding MP3..."
+                # / "Uploading..." with the bar creeping 90→100 instead of freezing.
+                "progress_phase": job.get("progress_phase", "synthesizing"),
+                "progress_finalize_pct": job.get("progress_finalize_pct", 0),
+                "progress_updated_at": job.get("progress_updated_at", 0),
             })
         elif status == "optimizing":
             entry.update({
@@ -11009,7 +11111,10 @@ def api_my_jobs():
             continue
 
         entry.update({
-            "status": "done",
+            # ARIA: if the token's last_status was "interrupted" (worker died
+            # mid-generation and startup recovery caught it), report that
+            # instead of "done" so the frontend shows a re-run option.
+            "status": "interrupted" if (tinfo.get("last_status", "") or "").lower() == "interrupted" else "done",
             "title": tinfo.get("book_title") or entry.get("title", ""),
             "output_format": tinfo.get("output_format",
                                        entry.get("output_format", "")),
@@ -11023,10 +11128,9 @@ def api_my_jobs():
                 "abm": bool(tinfo.get("optimized_abm_path")),
             },
             "total_chapters": tinfo.get("total_chapters", 0),
-            # ARIA: has_cover from the token snapshot (persisted by
-            # _create_download_token) so the frontend can show the cover
-            # even after a Flask restart when the in-memory job is gone.
-            "has_cover": bool(tinfo.get("has_cover", False)),
+            # ARIA: has_cover from the token snapshot — check cover_s3_key too
+            # so restored jobs (after Render restart) still advertise their cover.
+            "has_cover": bool(tinfo.get("has_cover", False) or tinfo.get("cover_s3_key", "")),
         })
         # ARIA: only use the token's chapter_mp3s if the in-memory job didn't
         # already provide them. The in-memory job's chapter_mp3s are always
@@ -15817,21 +15921,27 @@ def _cleanup_loop():
                     continue
 
                 if status == "generating":
-                    if has_email:
-                        continue
-                    last_poll = job.get("last_poll", job.get("start_time", now))
-                    if (now - last_poll) > CLEANUP_HEARTBEAT_TIMEOUT_SEC:
-                        job["cancelled"] = True
-                        to_remove.append((jid, f"heartbeat lost during generation ({int(now - last_poll)}s)"))
-                        continue
-                    # ARIA: Detect stale generation (Render slept during gen).
-                    # Frontend keeps polling (heartbeat fresh) but thread is dead.
-                    _progress_updated = job.get("progress_updated_at") or job.get("start_time", 0)
-                    if (now - _progress_updated) > 600:  # 10 min no progress
+                    # ARIA: stale-generation watchdog. Applies to ALL jobs
+                    # (including email-registered batch jobs) — if no progress
+                    # for 15 min the worker is dead. Bumped from 600→900s to
+                    # reduce false positives during long M4B encodes.
+                    _progress_updated = job.get("progress_updated_at") or job.get("start_time", now)
+                    if (now - _progress_updated) > 900:  # 15 min no progress
                         print(f"[cleanup] {jid} stale (no progress {int(now - _progress_updated)}s)")
                         job["server_interrupted"] = True
                         job["status"] = "interrupted"
                         job["progress_message"] = "Generation interrupted (server restart). Try again."
+                        try:
+                            pending_jobs.mark_failed(jid)
+                        except Exception:
+                            pass
+                    elif not has_email:
+                        # Heartbeat check only for non-email jobs (email jobs
+                        # aren't actively polled by the client).
+                        last_poll = job.get("last_poll", job.get("start_time", now))
+                        if (now - last_poll) > CLEANUP_HEARTBEAT_TIMEOUT_SEC:
+                            job["cancelled"] = True
+                            to_remove.append((jid, f"heartbeat lost during generation ({int(now - last_poll)}s)"))
                     continue
 
                 if status == "done":
@@ -16037,6 +16147,30 @@ payment._recover_orphaned_voucher_charges(jobs)
 # is consistent with the token snapshots (the two are kept in sync on every
 # _save_tokens() call).
 _load_job_registry()
+
+# ARIA: startup recovery — any token whose last_status was "generating" when
+# the worker died is stuck. The in-memory job is gone (process restart) and
+# the thread can't be re-enqueued without the full job state. Mark these as
+# "interrupted" so the frontend shows a re-run option instead of a frozen
+# progress bar forever. Only runs once at boot.
+try:
+    _interrupted_count = 0
+    for _tok, _tinfo in list(_download_tokens.items()):
+        if not isinstance(_tinfo, dict):
+            continue
+        _jid = _tinfo.get("job_id", "")
+        if not _jid or _jid in jobs:
+            continue  # job is alive in memory — skip
+        _last = (_tinfo.get("last_status", "") or "").strip().lower()
+        if _last == "generating":
+            _tinfo["last_status"] = "interrupted"
+            _tinfo["interrupted_at_boot"] = True
+            _interrupted_count += 1
+    if _interrupted_count:
+        print(f"[startup] {_interrupted_count} stale 'generating' job(s) marked 'interrupted'")
+        _save_tokens()
+except Exception as _e:
+    print(f"[startup] stale-generation recovery failed (non-fatal): {_e}")
 
 # Load persisted client_id → email mapping for cross-job notification fallback
 _load_client_emails()

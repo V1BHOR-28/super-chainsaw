@@ -159,6 +159,16 @@ export interface MyJob {
   progress_current?: number;
   progress_total?: number;
   progress_message?: string;
+  /** ARIA: "synthesizing" (chunk loop) or "finalizing" (concat/encode/upload).
+   *  When "finalizing", the progress bar creeps 90→100 based on
+   *  progress_finalize_pct instead of freezing at N/N. */
+  progress_phase?: "synthesizing" | "finalizing";
+  /** 0-100 — finalization sub-progress (only meaningful when
+   *  progress_phase === "finalizing"). */
+  progress_finalize_pct?: number;
+  /** Unix timestamp of the last progress update. Used by the frontend
+   *  to show a "No progress for a few minutes" stall banner. */
+  progress_updated_at?: number;
   // Present when status === "done" (from download token)
   download_token?: string;
   expires_at?: number;

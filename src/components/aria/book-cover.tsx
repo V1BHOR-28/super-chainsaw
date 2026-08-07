@@ -1,6 +1,8 @@
 "use client";
 
+import { useState, useEffect } from "react";
 import { cn } from "@/lib/utils";
+import { getCachedCover, cacheCover } from "@/lib/cover-cache";
 
 /**
  * Book cover — shows the EPUB's embedded cover image (extracted by the Flask
@@ -11,11 +13,16 @@ import { cn } from "@/lib/utils";
  * The cover image is served by the Flask endpoint /api/cover/<job_id>,
  * which extracts the cover from the EPUB on upload. No AI generation —
  * consistent, instant, always available.
+ *
+ * Fail-soft: if the network image fails to load (e.g. Flask restart wiped
+ * the cover), falls back to the IndexedDB cache (if available) or the CSS
+ * monogram. Never leaves an empty dark box.
  */
 export function BookCover({
   title,
   accent = "#f59e0b",
   coverImgUrl,
+  jobId,
   className,
 }: {
   title: string;
@@ -23,21 +30,63 @@ export function BookCover({
   /** Optional cover image URL (from /api/cover/<job_id>). When provided,
    *  the EPUB's embedded cover is shown instead of the CSS monogram. */
   coverImgUrl?: string;
+  /** Job ID — used to look up the IndexedDB cover cache when the network
+   *  image fails. Optional but recommended for cache resilience. */
+  jobId?: string;
   className?: string;
 }) {
-  // If we have a cover image from the Flask /api/cover endpoint, show it
-  // with a subtle gradient overlay + the ARIA Audiobooks label.
-  if (coverImgUrl) {
+  const [imgFailed, setImgFailed] = useState(false);
+  const [cachedCover, setCachedCover] = useState<string | null>(null);
+  const [prevUrl, setPrevUrl] = useState(coverImgUrl);
+
+  // Reset error state when the URL changes (e.g. switching books).
+  // React-recommended pattern: adjust state during render when a prop changes,
+  // avoiding setState-in-effect cascading renders.
+  // https://react.dev/reference/react/useState#storing-information-from-previous-renders
+  if (prevUrl !== coverImgUrl) {
+    setPrevUrl(coverImgUrl);
+    setImgFailed(false);
+  }
+
+  // On mount, try to load a cached cover from IndexedDB (instant display
+  // even if the backend is cold/restarted). Fail-soft: if IndexedDB is
+  // unavailable, cachedCover stays null and we fall through to the network.
+  useEffect(() => {
+    if (!jobId) return;
+    let cancelled = false;
+    getCachedCover(jobId).then((cached) => {
+      if (!cancelled && cached) setCachedCover(cached);
+    });
+    return () => { cancelled = true; };
+  }, [jobId]);
+
+  // Determine which image source to use:
+  // 1. If the network image hasn't failed, use it (and cache it on success).
+  // 2. If the network image failed but we have a cached cover, use that.
+  // 3. Otherwise fall back to the monogram.
+  const networkUrl = coverImgUrl && !imgFailed ? coverImgUrl : null;
+  const fallbackUrl = imgFailed && cachedCover ? cachedCover : null;
+  const activeUrl = networkUrl || fallbackUrl;
+
+  // If we're showing the network image, try to refresh the cache in the
+  // background so the next cold start has a fresh copy.
+  useEffect(() => {
+    if (networkUrl && jobId) {
+      cacheCover(jobId, networkUrl);
+    }
+  }, [networkUrl, jobId]);
+
+  if (activeUrl) {
     return (
       <div className={cn("relative overflow-hidden", className)}>
         <img
-          src={coverImgUrl}
+          src={activeUrl}
           alt={`Cover art for ${title}`}
           className="absolute inset-0 w-full h-full object-cover"
-          onError={(e) => {
-            // If the cover image fails to load (e.g. Flask restart wiped
-            // the extracted cover), hide the img so the fallback shows.
-            (e.currentTarget as HTMLImageElement).style.display = "none";
+          onError={() => {
+            // If the network image fails, try the cache; if no cache,
+            // fall through to the monogram on next render.
+            setImgFailed(true);
           }}
         />
         {/* Gradient overlay for readability + brand consistency */}

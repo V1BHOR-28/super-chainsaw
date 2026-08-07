@@ -1451,6 +1451,14 @@ def _create_download_token(job_id):
         # communicate.save()). NEVER fails a job — generation_engine wraps
         # the cue-finalization in try/except.
         "transcript_cues": job.get("transcript_cues", {}) or {},
+        # ARIA: cover persistence — cover_s3_key lets /api/cover redirect to R2
+        # after a Render restart (the disk path is wiped). cover_thumb is the
+        # local path (may be gone after restart, but harmless to persist).
+        "cover_s3_key": job.get("cover_s3_key", ""),
+        "cover_mime": job.get("cover_mime", "image/jpeg"),
+        # ARIA: last_status — so startup recovery can detect jobs that were
+        # "generating" when the worker died and mark them "interrupted".
+        "last_status": job.get("status", ""),
     }
     # Riusa un token gia' esistente per lo stesso job (idempotenza), MA aggiorna
     # i campi snapshot con i valori correnti del job in memoria. Senza questo
@@ -3975,6 +3983,12 @@ def run_generation(job_id, info, voice, rate, single_file, output_format='m4b', 
             if job.get("cancelled"):
                 print(f"[{job_id}] _check_cancelled: explicit cancel flag")
                 return True
+            # ARIA: finalization (concat/encode/R2 upload/token write) must NOT
+            # be cancelled by the 60s heartbeat watchdog. These steps are
+            # uncancellable ffmpeg/subprocess calls that can take minutes on
+            # Render free tier. Only honour explicit user cancellation above.
+            if job.get("progress_phase") == "finalizing":
+                return False
             if job.get("email_registered"):
                 return False
             # Heartbeat: se nessun client ha chiesto il progresso da 60+ sec
@@ -3988,7 +4002,12 @@ def run_generation(job_id, info, voice, rate, single_file, output_format='m4b', 
 
         def _update_progress(i, block):
             elapsed = time.time() - start_time
+            # ARIA: this is the PRE-synthesis update — shows "chunk i/N starting".
+            # The counter only reaches N/N when the POST-synthesis bump fires
+            # (right after _synthesize_chunk returns).
             job["progress_current"] = 2 + i
+            job["progress_phase"] = "synthesizing"
+            job["progress_finalize_pct"] = 0
             job["progress_message"] = (
                 f"Cap. {block['chapter_index']}/{len(info.chapters)}: "
                 f"{block['chapter_title'][:35]}... \u2014 "
@@ -3998,6 +4017,24 @@ def run_generation(job_id, info, voice, rate, single_file, output_format='m4b', 
             job["current_chapter_num"] = block["chapter_index"]
             job["elapsed_seconds"] = round(elapsed)
             job["progress_updated_at"] = time.time()
+
+        def _emit_finalize(msg, frac):
+            """ARIA: finalization progress emitter.
+
+            Called at each real finalization step (assembly, encode, upload,
+            token write) so the UI keeps creeping toward 100% instead of
+            # freezing at N/N. Also refreshes progress_updated_at so the
+            # stale-job watchdog knows the worker is alive.
+
+            Wrapped in try/except so a progress write can NEVER break
+            generation."""
+            try:
+                job["progress_phase"] = "finalizing"
+                job["progress_message"] = msg
+                job["progress_finalize_pct"] = int(frac * 100)
+                job["progress_updated_at"] = time.time()
+            except Exception:
+                pass
 
         # Gap inter-chunk Gemini (Premium quality). Calcolato qui per essere
         # disponibile sia nel ramo single-file sia nel ramo multi-file.
@@ -4292,6 +4329,10 @@ def run_generation(job_id, info, voice, rate, single_file, output_format='m4b', 
                     prev_chapter_idx = ch_idx
 
                 result, part_path = _synthesize_chunk(i, block)
+                # ARIA: POST-synthesis progress bump — the counter only reaches
+                # N/N when chunk N is actually done, not when it starts.
+                job["progress_current"] = 2 + i + 1
+                job["progress_updated_at"] = time.time()
                 if result is False:
                     failed_chunks += 1
                     if use_gemini and _ea_ratio <= 1.0:
@@ -4333,7 +4374,7 @@ def run_generation(job_id, info, voice, rate, single_file, output_format='m4b', 
                 m4b_chapters[-1]["end"] = current_ms
 
             print(f"[{job_id}] All chunks processed: {total_chunks} total, {failed_chunks} failed")
-            job["progress_message"] = "Merging audio..."
+            _emit_finalize("Assembling audio...", 0.05)
             safe_name = _safe_filename(info.title) or "audiolibro"
 
             if use_pcm:
@@ -4635,6 +4676,10 @@ def run_generation(job_id, info, voice, rate, single_file, output_format='m4b', 
                         current_chapter_parts.append(silence_path)
 
                 result, part_path = _synthesize_chunk(i, block)
+                # ARIA: POST-synthesis progress bump — the counter only reaches
+                # N/N when chunk N is actually done, not when it starts.
+                job["progress_current"] = 2 + i + 1
+                job["progress_updated_at"] = time.time()
                 if result is False:
                     failed_chunks += 1
                     if use_gemini and _ea_ratio <= 1.0:
@@ -4663,6 +4708,7 @@ def run_generation(job_id, info, voice, rate, single_file, output_format='m4b', 
                     job["bytes_generated"] += os.path.getsize(part_path)
 
             print(f"[{job_id}] All chunks processed (multi-file): {total_chunks} total, {failed_chunks} failed, {len(mp3_files)} chapters assembled")
+            _emit_finalize("Assembling audio...", 0.05)
 
             if current_chapter_parts and current_chapter_idx >= 0:
                 ch = chapter_by_idx[current_chapter_idx]
@@ -4851,6 +4897,7 @@ def run_generation(job_id, info, voice, rate, single_file, output_format='m4b', 
                 # Upload to R2/S3 if configured — survives Render restarts.
                 # The chapter_mp3 endpoint redirects to presigned URLs when
                 # local files are missing (after a restart).
+                _emit_finalize("Uploading to storage...", 0.70)
                 try:
                     import storage_backend
                     if storage_backend.is_enabled():
@@ -4862,6 +4909,7 @@ def run_generation(job_id, info, voice, rate, single_file, output_format='m4b', 
                         print(f"[{job_id}] Uploaded new chapter MP3s to R2/S3 (total: {len(job['chapter_mp3s'])})")
                 except Exception as _e_s3:
                     print(f"[{job_id}] R2/S3 upload failed (non-fatal): {_e_s3}")
+                _emit_finalize("Saving transcript cues...", 0.85)
                 job["output_files"] = mp3_files
                 job["output_name"] = f"{safe_name} (per-chapter)"
                 job["bytes_generated"] = sum(
@@ -5223,17 +5271,32 @@ def run_generation(job_id, info, voice, rate, single_file, output_format='m4b', 
         # optimization-phase ABM exists at work_dir root) so the snapshot
         # reflects the current optimized_chapters state and ends up inside
         # the per-epoch folder.
-        if job.get("ai_optimized"):
-            try:
-                abm_path, abm_name = _generate_optimized_abm(job_id)
-                job["optimized_abm_path"] = abm_path
-                job["optimized_abm_name"] = abm_name
-                print(f"[{job_id}] .abm snapshot in {abm_path}")
-            except Exception as e:
-                print(f"[{job_id}] Failed to write .abm: {e}")
-                job["abm_generation_error"] = str(e)
+        _emit_finalize("Finishing up...", 0.95)
+        try:
+            # ARIA: Wrap the critical finalization (status flip + token write +
+            # notifications) so a crash here (OOM on Render free tier) surfaces
+            # as status="error" with a clear message, never an eternal "generating".
+            if job.get("ai_optimized"):
+                try:
+                    abm_path, abm_name = _generate_optimized_abm(job_id)
+                    job["optimized_abm_path"] = abm_path
+                    job["optimized_abm_name"] = abm_name
+                    print(f"[{job_id}] .abm snapshot in {abm_path}")
+                except Exception as e:
+                    print(f"[{job_id}] Failed to write .abm: {e}")
+                    job["abm_generation_error"] = str(e)
 
-        _set_job_status(job, "partial" if _is_partial else "done")
+            _set_job_status(job, "partial" if _is_partial else "done")
+        except BaseException as _e_fin:
+            print(f"[{job_id}] Finalization failed: {_e_fin}", flush=True)
+            job["status"] = "error"
+            job["error"] = f"Finalization failed: {_e_fin}"
+            job["progress_updated_at"] = time.time()
+            try:
+                _mark_pending_failed(job_id, f"finalization_failed: {_e_fin}")
+            except Exception:
+                pass
+            raise
         _log_activity(job_id, job.get("original_filename", ""), "COMPLETE",
                       job.get("client_id", ""), job.get("client_ip", ""),
                       job.get("voice", ""), job.get("browser_lang", ""),

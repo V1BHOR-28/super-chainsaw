@@ -70,6 +70,12 @@ interface LibraryCard {
   progressCurrent?: number;
   progressTotal?: number;
   progressMessage?: string;
+  /** ARIA: "synthesizing" | "finalizing" — when finalizing, the bar creeps 90→100. */
+  progressPhase?: "synthesizing" | "finalizing";
+  /** 0-100 — finalization sub-progress. */
+  progressFinalizePct?: number;
+  /** Unix timestamp of the last progress update (for stall detection). */
+  progressUpdatedAt?: number;
   selectedChapters?: number[];
   totalChapters?: number;
   chapterMp3s?: ChapterMp3Info[];
@@ -94,6 +100,9 @@ function toCard(job: MyJob): LibraryCard {
     progressCurrent: job.progress_current,
     progressTotal: job.progress_total,
     progressMessage: job.progress_message,
+    progressPhase: job.progress_phase,
+    progressFinalizePct: job.progress_finalize_pct,
+    progressUpdatedAt: job.progress_updated_at,
     selectedChapters: job.selected_chapters,
     totalChapters: job.total_chapters,
     chapterMp3s: job.chapter_mp3s,
@@ -106,6 +115,12 @@ function toCard(job: MyJob): LibraryCard {
 
 function progressPct(card: LibraryCard): number {
   if (card.status === "done") return 100;
+  // ARIA: during finalization, creep 90→100 based on the sub-progress
+  // instead of freezing at N/N (the chunk counter is done).
+  if (card.progressPhase === "finalizing") {
+    const fin = card.progressFinalizePct ?? 0;
+    return Math.max(90, Math.min(99, 90 + Math.round(fin * 0.1)));
+  }
   const cur = card.progressCurrent ?? 0;
   const tot = card.progressTotal ?? 0;
   if (tot <= 0) return 0;
@@ -239,8 +254,14 @@ export function LibraryView() {
         const apiCards = data.jobs.map(toCard).filter((c) => !deletedIds.has(c.jobId));
         setCards((prev) => {
           const apiIds = new Set(apiCards.map((c) => c.jobId));
+          // ARIA: only keep stale cards with TERMINAL statuses. A stale
+          // generating/optimizing/translating card means the server lost the
+          // job (restart/expiry) — keeping it would leave a frozen progress
+          // bar forever and the polling effect would keep firing heartbeats
+          // to a dead job. Drop it so the UI reflects reality.
+          const _ACTIVE = new Set(["generating", "optimizing", "translating"]);
           const staleCards = prev.filter(
-            (c) => !apiIds.has(c.jobId) && !deletedIds.has(c.jobId),
+            (c) => !apiIds.has(c.jobId) && !deletedIds.has(c.jobId) && !_ACTIVE.has(c.status),
           );
           return [...apiCards, ...staleCards];
         });
@@ -291,12 +312,15 @@ export function LibraryView() {
   // Also send heartbeats to keep generating jobs alive (the Flask app cancels
   // jobs with no heartbeat for 60+ seconds).
   useEffect(() => {
+    const polling = cards.filter((c) => isPollingStatus(c.status));
+    if (polling.length === 0) return;
     const generating = cards.filter((c) => c.status === "generating");
-    if (generating.length === 0) return;
 
     const interval = setInterval(() => {
       fetchJobs();
-      // Send a heartbeat to each generating job to prevent the 60s timeout
+      // Send a heartbeat only to generating jobs (the heartbeat endpoint
+      // is what prevents the 60s cancel timeout — optimizing/translating
+      // don't have this constraint).
       generating.forEach((c) => sendHeartbeat(c.jobId));
     }, 10000);
     return () => clearInterval(interval);
@@ -640,6 +664,7 @@ export function LibraryView() {
                         title={card.title}
                         accent={card.accent}
                         coverImgUrl={card.coverImgUrl}
+                        jobId={card.jobId}
                         className="absolute inset-0"
                       />
                       {/* gradient overlay */}
@@ -765,10 +790,34 @@ export function LibraryView() {
                             )}
                           </>
                         ) : isGenerating ? (
-                          <p className="text-[11px] text-[var(--aria-accent-glow)] flex items-center gap-1">
-                            <span className="status-dot" />
-                            {card.progressMessage || `Converting… ${pct}%`}
-                          </p>
+                          <div className="flex flex-col gap-1">
+                            <p className="text-[11px] text-[var(--aria-accent-glow)] flex items-center gap-1">
+                              <span className="status-dot" />
+                              {card.progressMessage || `Converting… ${pct}%`}
+                            </p>
+                            {(() => {
+                              // ARIA: stall banner — if no progress for 4+ min,
+                              // the free-tier server may be waking up or restarting.
+                              const pu = card.progressUpdatedAt ?? 0;
+                              if (pu > 0 && Date.now() / 1000 - pu > 240) {
+                                return (
+                                  <div className="flex items-center gap-2">
+                                    <span className="text-[10px] text-[var(--aria-fg-dim)]">
+                                      No progress for a few minutes — the free-tier server may be waking up or restarting
+                                    </span>
+                                    <button
+                                      onClick={(e) => { e.stopPropagation(); fetchJobs(); }}
+                                      className="text-[10px] px-1.5 py-0.5 rounded-md flex items-center gap-1 transition-colors hover:bg-white/5"
+                                      style={{ color: "var(--aria-fg-muted)", border: "1px solid var(--aria-border)" }}
+                                    >
+                                      Refresh
+                                    </button>
+                                  </div>
+                                );
+                              }
+                              return null;
+                            })()}
+                          </div>
                         ) : isError ? (
                           <div className="flex items-center gap-2">
                             <p className="text-[11px] text-[#ef4444]">

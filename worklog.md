@@ -735,3 +735,80 @@ CONSTRAINTS honored:
 - Fail-soft everywhere: missing LLM → silence cues; missing R2 → uncached cues; missing asset → clean narration; missing cues → no mixing.
 - Single ffmpeg invocation for mixing (no intermediate WAVs) — stays in Render RAM budget.
 - BGM elements managed in refs (no React re-renders at 60fps).
+
+---
+Task ID: BUGFIX-1-2
+Agent: main (Fix stuck-at-last-chunk + covers disappear after restart)
+Task: Fix two bugs: (1) Generation appears stuck at the last chunk because progress is updated BEFORE synthesis and there's no progress during finalization. (2) Book covers disappear after Render restarts because the cover is only on ephemeral disk + in-memory.
+
+Work Log:
+- Launched 3 parallel Explore agents to map generation_engine.py (progress/finalization/cancel logic), audiobook_app.py (my_jobs/cover/analyze/recovery), and frontend (library-view/book-cover/abm-api).
+- KEY FINDINGS: _update_progress sets progress_current=2+i BEFORE _synthesize_chunk (line 3989-4000). No progress during finalization. _check_cancelled has no phase check. Cover only in memory + ephemeral disk. Cleanup supervisor already has a 600s stale watchdog but skips email jobs. Token doesn't persist last_status/cover_s3_key.
+
+BUG 1 BACKEND (generation_engine.py):
+- _update_progress: added progress_phase="synthesizing", progress_finalize_pct=0.
+- _check_cancelled: returns False immediately when progress_phase=="finalizing" (immune to 60s heartbeat watchdog during concat/encode/upload).
+- Added _emit_finalize(msg, frac) helper: sets progress_phase="finalizing", progress_message, progress_finalize_pct=int(frac*100), progress_updated_at. Wrapped in try/except so progress writes never break generation.
+- POST-synthesis bump in BOTH branches (single_file line 4323, per-chapter line 4670): job["progress_current"]=2+i+1 + progress_updated_at=time.time() — counter only reaches N/N when chunk N is actually done.
+- _emit_finalize calls at each finalization step:
+  - "Assembling audio..." (0.05) — after chunk loop, both branches.
+  - "Uploading to storage..." (0.70) — before R2 upload in per-chapter branch.
+  - "Saving transcript cues..." (0.85) — after R2 upload.
+  - "Finishing up..." (0.95) — before status flip to done.
+- Wrapped the critical finalization (abm snapshot + status flip) in try/except BaseException: sets status="error", error="Finalization failed: {e}", progress_updated_at, calls _mark_pending_failed, then re-raises. MemoryError on Render now surfaces as error, not eternal "generating".
+
+BUG 1 BACKEND (audiobook_app.py):
+- /api/my_jobs stale-job watchdog: if status=="generating" and time.time()-progress_updated_at > 900 (15min), flips to "interrupted" with message "Generation stalled (server restarted or ran out of memory). Re-run the remaining chapters." Calls pending_jobs.mark_failed.
+- Exposed progress_phase, progress_finalize_pct, progress_updated_at in the generating entry.
+- Cleanup supervisor: bumped threshold 600→900s, removed has_email bypass for stale check (now applies to ALL jobs including email-registered batch jobs). Heartbeat check still only for non-email jobs.
+- Startup recovery: after _load_job_registry(), scans _download_tokens for entries with last_status=="generating" not in memory → marks "interrupted" + calls _save_tokens(). 
+- _save_tokens: cross-references live jobs dict to set last_status from the job's current status on every save.
+- Token loop in /api/my_jobs: reports "interrupted" instead of "done" when last_status=="interrupted".
+
+BUG 1 FRONTEND:
+- abm-api.ts MyJob: added progress_phase ("synthesizing"|"finalizing"), progress_finalize_pct (0-100), progress_updated_at (unix timestamp).
+- library-view.tsx LibraryCard + toCard: added progressPhase, progressFinalizePct, progressUpdatedAt.
+- progressPct(): when progressPhase=="finalizing", renders 90 + round(finalize_pct * 0.1) so the bar creeps 90→100 instead of freezing.
+- Polling effect: now polls for ALL isPollingStatus (generating/optimizing/translating/analyzed/optimized), not just generating. Heartbeat still only for generating.
+- Stale-card merge: DROPS any stale card with status in {generating, optimizing, translating} when the API no longer returns it. Only keeps terminal-status stale cards. Fixes the "frozen 89% card forever" bug.
+- Stall banner: when generating and Date.now()/1000 - progressUpdatedAt > 240 (4min), shows "No progress for a few minutes — the free-tier server may be waking up or restarting" + a Refresh button that calls fetchJobs().
+- Progress label now shows card.progressMessage (which during finalizing is "Encoding MP3..." / "Uploading..." etc.) instead of just "Converting… N%".
+
+BUG 2 BACKEND (audiobook_app.py):
+- /api/analyze: after writing cover to disk (BOTH the .abm branch and EPUB branch), uploads to R2 at covers/{job_id}/cover{ext} via storage_backend.upload_file. Sets jobs[job_id]["cover_s3_key"]. Fail-soft: never breaks analyze.
+- /api/cover rewritten with 4-tier resolution: (a) in-memory cover_thumb on disk, (b) disk fallback UPLOAD_DIR/<job_id>/cover_thumb.{jpg,png,jpeg}, (c) cover_s3_key → 302 redirect to presigned_get_url, (d) 404. All successful responses get Cache-Control: public, max-age=604800, immutable.
+- _save_tokens: persists cover_thumb, cover_s3_key, cover_mime, last_status in the token snapshot.
+- _reconstruct_job_from_storj: overlay list includes cover_s3_key, cover_mime, cover_thumb. Reconstructed job dict restores all three.
+- /api/my_jobs has_cover (both in-memory + token loops): bool(cover_thumb or cover_s3_key) so restored jobs still advertise their cover.
+- _create_download_token (generation_engine.py): _refresh_fields includes cover_s3_key, cover_mime, last_status.
+
+BUG 2 FRONTEND:
+- book-cover.tsx: replaced imperative onError style.display="none" with React state (imgFailed). Uses the React-recommended "adjust state during render" pattern (prevUrl tracking) to reset on URL change — avoids the setState-in-effect lint warning. Falls back to cached cover → monogram. Never leaves an empty dark box.
+- cover-cache.ts (NEW): IndexedDB cache (DB "aria-covers", store "covers"). getCachedCover(jobId) reads data URL. cacheCover(jobId, url) fetches → blob → if <400KB → data URL → put. All operations wrapped in try/catch — fail-soft, never blocks.
+- BookCover: on mount, loads cached cover from IndexedDB (instant display on cold backend). If network image succeeds, refreshes cache in background. If network fails and cache exists, shows cached cover instead of monogram. jobId prop passed from library-view.tsx and player-view.tsx call sites.
+
+VERIFICATION:
+- python3 -m py_compile: both audiobook_app.py + generation_engine.py compile clean.
+- npx tsc --noEmit: zero errors in any modified file (book-cover, cover-cache, library-view, abm-api, player-view).
+- bun run lint: 0 errors, 0 warnings (fixed set-state-in-effect by using prevUrl pattern).
+- Flask backend running on port 5601: /api/cover/test → 404 (correct), /api/bgm_asset/calm_amb → 200, /api/my_jobs → {"jobs":[]}.
+- Next.js proxy: /api/abm/cover/test → 404, /api/abm/my_jobs → {"jobs":[]}.
+- agent-browser: page loads cleanly, no console errors, no runtime errors.
+- Both servers running healthy.
+
+Stage Summary:
+Files modified:
+- mini-services/audiobook-maker/generation_engine.py (+55 lines: _emit_finalize, post-synthesis bumps, finalization emitters, crash wrapper, _check_cancelled phase check, _create_download_token cover_s3_key/last_status)
+- mini-services/audiobook-maker/audiobook_app.py (+110 lines: my_jobs watchdog+fields, cover R2 upload in analyze, /api/cover rewrite, _save_tokens cover+last_status persistence, _reconstruct_job_from_storj restore, cleanup supervisor 900s+all-jobs, startup recovery, token-loop interrupted status, has_cover fix)
+- src/lib/abm-api.ts (+10 lines: progress_phase, progress_finalize_pct, progress_updated_at on MyJob)
+- src/components/aria/library-view.tsx (+40 lines: LibraryCard fields, progressPct finalizing, polling for all isPollingStatus, stale-merge drop active, stall banner)
+- src/components/aria/book-cover.tsx (rewritten: React state fallback + IndexedDB cache integration)
+- src/components/aria/player-view.tsx (+1 line: jobId prop on BookCover)
+
+Files created:
+- src/lib/cover-cache.ts (95 lines: IndexedDB get/put for cover data URLs, fail-soft)
+
+CONSTRAINTS honored:
+- Did NOT modify use-word-sync.ts, transcript-view.tsx, transcript-store.ts, or the cue/timing format.
+- No new Python dependencies — reused storage_backend + ffmpeg CLI.
+- Every new code path fails soft: missing R2 → disk fallback → monogram; missing IndexedDB → network URL; failed cover upload → non-fatal; failed progress write → non-fatal.
