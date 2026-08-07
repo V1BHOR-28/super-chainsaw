@@ -194,12 +194,19 @@ export function LibraryView() {
   // so stale localStorage from a previous user doesn't flash before the API responds.
   // Also reset loading=true so the user sees the loading indicator (not the
   // empty "No audiobooks yet" state) while the fresh fetch is in flight.
+  // CRITICAL: also reset isFetchingRef so the new fetch isn't blocked by the
+  // guard in fetchJobsWithRetry. Without this, when userId changes from "anon"
+  // to the real ID while the first fetch is still in flight, the guard
+  // prevents the second fetch from running, and the first fetch's .finally()
+  // sets loading=false prematurely — the user sees "No audiobooks yet" instead
+  // of the loading/waking-up UI.
   useEffect(() => {
     setCards([]);
     setDeletedIds(new Set());
     setLoading(true);
     setError(null);
     setWakingUp(false);
+    isFetchingRef.current = false;
   }, [userId]);
 
   // One-time migration: remove old unscoped localStorage keys so admin's
@@ -263,7 +270,7 @@ export function LibraryView() {
     isFetchingRef.current = true;
     try {
     const RETRY_DELAYS = isInitial ? [5000, 15000, 30000] : [];
-    const WAKEUP_THRESHOLD = 8000; // show 'waking up' after 8s
+    const WAKEUP_THRESHOLD = 3000; // show 'waking up' after 3s (was 8s — too slow)
     let lastErr: unknown = null;
     for (let attempt = 0; attempt <= RETRY_DELAYS.length; attempt++) {
       try {
@@ -609,27 +616,37 @@ export function LibraryView() {
 
         {loading && wakingUp && cards.length === 0 ? (
           // ARIA cold-start state: the Flask service on Render's free tier is
-          // spinning up (takes 30-90s). Show explicit copy so the user knows
-          // this is expected, not a hang. Only shown when there are NO cached
-          // cards from localStorage — if cards exist, we show them with a
-          // non-blocking banner instead (below).
-          <div className="text-center py-20">
-            <Coffee
-              size={40}
-              strokeWidth={1}
-              className="mx-auto mb-4 animate-pulse"
-              style={{ color: "var(--aria-accent-glow)" }}
-            />
-            <p className="text-sm" style={{ color: "var(--aria-fg-muted)" }}>
-              Waking up the audiobook service…
+          // spinning up (takes 30-90s). Show a dedicated, visually distinct UI
+          // so the user knows this is expected, not a hang or a blank screen.
+          <div className="flex flex-col items-center justify-center py-24 px-6">
+            <div className="relative w-20 h-20 mb-6">
+              {/* Pulsing rings around the coffee cup */}
+              <div className="absolute inset-0 rounded-full animate-ping opacity-20" style={{ background: "var(--aria-accent)" }} />
+              <div className="absolute inset-2 rounded-full animate-pulse opacity-30" style={{ background: "var(--aria-accent)" }} />
+              <div className="absolute inset-0 flex items-center justify-center">
+                <Coffee
+                  size={36}
+                  strokeWidth={1.5}
+                  className="relative z-10"
+                  style={{ color: "var(--aria-accent-glow)" }}
+                />
+              </div>
+            </div>
+            <h3 className="text-lg font-serif mb-2" style={{ color: "var(--aria-fg)" }}>
+              Waking up the audiobook service
+            </h3>
+            <p className="text-sm text-center max-w-sm" style={{ color: "var(--aria-fg-muted)" }}>
+              The server spins down when idle to save resources. It&apos;s starting back up now — this usually takes 30–60 seconds.
             </p>
-            <p className="text-xs mt-2" style={{ color: "var(--aria-fg-dim)" }}>
-              This can take up to a minute on first load.
-            </p>
+            <div className="flex items-center gap-1.5 mt-4">
+              <span className="w-1.5 h-1.5 rounded-full animate-bounce" style={{ background: "var(--aria-accent-glow)", animationDelay: "0ms" }} />
+              <span className="w-1.5 h-1.5 rounded-full animate-bounce" style={{ background: "var(--aria-accent-glow)", animationDelay: "150ms" }} />
+              <span className="w-1.5 h-1.5 rounded-full animate-bounce" style={{ background: "var(--aria-accent-glow)", animationDelay: "300ms" }} />
+            </div>
           </div>
         ) : loading && !wakingUp ? (
-          <div className="text-center py-20" style={{ color: "var(--aria-fg-dim)" }}>
-            <Loader2 size={28} strokeWidth={1} className="mx-auto mb-3 animate-spin" />
+          <div className="flex flex-col items-center justify-center py-24" style={{ color: "var(--aria-fg-dim)" }}>
+            <Loader2 size={32} strokeWidth={1.5} className="mx-auto mb-4 animate-spin" style={{ color: "var(--aria-accent-glow)" }} />
             <p className="text-sm">Loading your library…</p>
           </div>
         ) : error && cards.length === 0 ? (
