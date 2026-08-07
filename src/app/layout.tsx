@@ -24,14 +24,14 @@ const instrument = Instrument_Serif({
 });
 
 export const metadata: Metadata = {
-  title: "ARIA — AI Audiobooks with Word-by-Word Transcripts",
+  title: "ARIA",
   description:
     "Turn any EPUB or PDF into a narrated audiobook with Spotify-style word-by-word transcripts and adaptive background scoring. Free to try.",
   keywords: ["ARIA", "AI partner", "AI companion", "thinking partner", "LLM", "personal AI", "audiobook", "EPUB to audiobook", "text to speech", "transcript sync"],
   authors: [{ name: "ARIA" }],
   icons: { icon: "/aria-logo.png" },
   openGraph: {
-    title: "ARIA — AI Audiobooks with Word-by-Word Transcripts",
+    title: "ARIA",
     description: "Turn any EPUB or PDF into a narrated audiobook with Spotify-style word-by-word transcripts and adaptive background scoring. Free to try.",
     type: "website",
   },
