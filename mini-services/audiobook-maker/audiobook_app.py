@@ -11223,11 +11223,14 @@ def api_my_jobs():
     for token, tinfo in list(_download_tokens.items()):
         if not isinstance(tinfo, dict):
             continue
-        # ARIA: skip only if BOTH the token has a client_id AND it doesn't match.
-        # If the token has no client_id (or it's empty), include it — this
-        # ensures jobs survive Flask restarts (the cookie changes on restart).
+        # ARIA: only include tokens that MATCH the current cid.
+        # Tokens with an EMPTY client_id are NEVER included in /api/my_jobs —
+        # they belong to old jobs from before client tracking was added, and
+        # including them leaked admin's test jobs to every new user on the
+        # same browser. The tokens still work for downloads (via the token
+        # string), they just don't appear in the library list.
         token_cid = tinfo.get("client_id", "")
-        if token_cid and token_cid != cid:
+        if not token_cid or token_cid != cid:
             continue
         created = tinfo.get("created_at", 0)
         retention = _effective_retention_for_token_info(tinfo)

@@ -94,14 +94,15 @@ export default function HomePage() {
   // inherits the previous user's Flask client ID and sees their audiobook
   // library (e.g. admin's "Pride and Prejudice" test book). When the
   // authenticated user's ID changes, OR when a user logs in for the first
-  // time on this browser, delete the abm_cid cookie so the Flask backend
+  // time on this browser, clear the abm_cid cookie via a server-side API
+  // route (JavaScript can't clear HttpOnly cookies) so the Flask backend
   // issues a fresh one on the next request.
   // Strategy: store the last-seen userId in localStorage (survives page
   // reloads). If the current session's userId differs from the stored one,
-  // clear the cookie and update the stored userId.
+  // call /api/clear-abm-cid and update the stored userId.
   const prevUserIdRef = useRef<string | null>(null)
   useEffect(() => {
-    if (typeof document === 'undefined' || typeof window === 'undefined') return
+    if (typeof window === 'undefined') return
     const currentUserId = (session?.user as { id?: string } | undefined)?.id || null
     if (!currentUserId) return
 
@@ -110,9 +111,12 @@ export default function HomePage() {
 
     if (storedUserId !== currentUserId) {
       // User changed (or first login on this browser) — clear the abm_cid
-      // cookie so Flask issues a fresh one scoped to this new user.
-      document.cookie = 'abm_cid=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/;'
+      // cookie via server-side API (HttpOnly cookies can't be cleared by JS).
       localStorage.setItem('aria-last-user-id', currentUserId)
+      fetch('/api/clear-abm-cid', { method: 'POST' }).catch(() => {
+        // non-fatal — the cookie will eventually expire or be overwritten
+        // by the Flask backend on the next request.
+      })
     }
 
     prevUserIdRef.current = currentUserId
