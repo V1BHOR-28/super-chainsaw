@@ -181,6 +181,24 @@ export function useBgmEngine() {
     if (!isPlaying) {
       pauseAll();
     } else {
+      // ARIA: Prime the BGM audio elements for autoplay. Browsers block
+      // audio.play() calls that aren't initiated by a user gesture. The
+      // user clicking "play" on the main audio IS a gesture, but the rAF
+      // loop's el.play() call happens asynchronously and may be blocked.
+      // By calling play() here (inside the isPlaying effect, which fires
+      // in response to the user's click), we "unlock" the audio element.
+      // The rAF loop will fade it in when the first cue becomes active.
+      for (const [mood, el] of elementsRef.current) {
+        if (el.paused) {
+          try {
+            el.play().then(() => {
+              // Successfully unlocked — the rAF loop will fade it in.
+            }).catch((e) => {
+              console.warn(`[bgm-engine] play() blocked for mood "${mood}":`, e);
+            });
+          } catch { /* */ }
+        }
+      }
       resumeActive();
     }
   }, [isPlaying]);
@@ -269,9 +287,17 @@ export function useBgmEngine() {
             ramp.startVolume = el.volume;
             ramp.targetVolume = gainLin;
             ramp.transitionStart = now;
-            // Start playing if not already.
+            // Start playing if not already. The play() promise is handled
+            // properly: only set playing=true on success, log on failure.
             if (!ramp.playing) {
-              try { el.play().catch(() => {}); ramp.playing = true; } catch { /* */ }
+              try {
+                el.play().then(() => {
+                  ramp.playing = true;
+                }).catch((e) => {
+                  console.warn(`[bgm-engine] play() failed for mood "${targetMood}":`, e);
+                  ramp.playing = false;
+                });
+              } catch { /* */ }
             }
           }
         }
