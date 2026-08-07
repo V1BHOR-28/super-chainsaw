@@ -229,10 +229,10 @@ export const usePlayerStore = create<PlayerState>()(
       sleepTimerMinutes: null,
       sleepTimerEndsAt: null,
 
-      // BGM: enabled by default at 50% volume. Both are persisted so the
-      // user's preference survives page reloads.
+      // BGM: enabled by default at 70% volume. Assets are mastered at -20 LUFS
+      // and duck under speech, so 70% gives clearly audible background music.
       bgmEnabled: true,
-      bgmVolume: 50,
+      bgmVolume: 70,
 
       play: () => set({ isPlaying: true }),
       pause: () => set({ isPlaying: false }),

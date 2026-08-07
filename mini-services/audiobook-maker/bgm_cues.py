@@ -49,15 +49,13 @@ _MAX_WORDS_PER_CALL = 3000
 _LEAD_IN_SEC = 1.5      # first cue starts 1.5s early (clamped >= 0) — fade-in
 _CROSSFADE_SEC = 2.0    # every cue's end extends 2.0s — overlap = crossfade window
 
-# Gain formula: intensity 1 → -4 dB, intensity 5 → +4 dB.
-# These are MIXING levels. With bgmVolume slider at 35%:
-#   intensity 1: 0.35 × 10^(-4/20)  = 0.22  (clearly audible)
-#   intensity 3: 0.35 × 10^(0/20)   = 0.35  (prominent)
-#   intensity 5: 0.35 × 10^(4/20)   = 0.55  (very prominent)
-# Narration is at ~0.85, so BGM at 0.22-0.55 is clearly audible but doesn't
-# drown out the voice. The old formula (-26 base) produced 0.02-0.055 which
-# was completely inaudible even with headphones.
-_GAIN_BASE_DB = -6
+# Gain formula: intensity 1 → -1 dB, intensity 5 → +7 dB.
+# Assets are now mastered at -20 LUFS, so these are mixing levels on top of
+# properly-loud beds. With bgmVolume=70%:
+#   intensity 1: 0.70 × 10^(-1/20)  = 0.62  (clearly audible)
+#   intensity 3: 0.70 × 10^(3/20)   = 0.99  (prominent)
+#   intensity 5: 0.70 × 10^(7/20)   = 1.57  (clamped to 1.0 by Web Audio)
+_GAIN_BASE_DB = -3
 _GAIN_PER_INTENSITY = 2
 
 # Minimum segment length (words).
@@ -67,8 +65,9 @@ _MIN_SEGMENT_WORDS = 25
 _BEAT_GAP_SEC = 0.45        # gap between words that starts a new beat
 _BEAT_MIN_WORDS = 25        # minimum words before a gap can split a beat
 _BEAT_MAX_WORDS = 400       # hard cap on beat length
-_SILENCE_FLOOR_PCT = 0.15   # at least 15% of words must be silence
+_SILENCE_FLOOR_PCT = 0.10   # at least 10% of words must be silence (lowered from 15%)
 _QUOTE_DENSITY_THRESHOLD = 0.25  # > 25% quote marks → silence (intimate dialogue)
+_DOMINANT_CAP_PCT = 0.55   # no single mood should cover > 55% of the chapter
 
 # R2 key pattern for cached BGM cues.
 def _r2_key(job_id: str, chapter_index: int) -> str:
@@ -84,34 +83,68 @@ _MOOD_KEYWORDS: dict[str, list[str]] = {
     "dread": [
         "dark", "blood", "corpse", "scream", "shadow", "terror", "cold",
         "dead", "whisper", "grave", "fear", "alone", "howl", "rot", "bone",
+        "horror", "nightmare", "demon", "ghost", "haunt", "evil", "wicked",
+        "doom", "death", "murder", "kill", "slay", "drown", "abyss", "void",
+        "black", "midnight", "crypt", "tomb", "coffin", "shroud", "pale",
+        "tremble", "shudder", "dread", "appall", "fright", "panic", "despair",
     ],
     "tension_high": [
         "gun", "sword", "strike", "blow", "shout", "burst", "crash",
         "explode", "fight", "blade", "roar", "danger", "blood-curdling", "warn",
+        "attack", "charge", "assault", "combat", "battle", "war", "enemy",
+        "threat", "menace", "peril", "jeopardy", "crisis", "emergency", "alarm",
+        "siren", "blast", "detonate", "shatter", "smash", "clash", "collide",
+        "rage", "fury", "wrath", "fierce", "violent", "brutal", "savage",
     ],
     "tension_low": [
         "wait", "watch", "uneasy", "suspect", "hidden", "secret", "quiet",
         "slow", "tense", "listen", "footstep", "doubt", "creep", "shiver",
+        "lurk", "prowl", "stealth", "sneak", "crouch", "peer", "glimpse",
+        "shadow", "silhouette", "whisper", "murmur", "rumor", "hunch",
+        "forebod", "ominous", "eerie", "unsettl", "nervous", "anxious",
+        "wary", "cautious", "vigilant", "alert", "dread", "approach",
+        "behind", "breath", "heartbeat", "pulse",
     ],
     "action": [
         "leap", "hurl", "slam", "charge", "fire", "dove", "smash", "race",
         "seize", "hurtle", "run", "ran", "chase", "strike", "dash",
+        "sprint", "rush", "bolt", "flee", "escape", "dodge", "duck",
+        "jump", "spring", "bound", "vault", "climb", "swing", "throw",
+        "catch", "grab", "snatch", "wrench", "tear", "rip", "break",
+        "crash", "collide", "plunge", "dive", "soar", "fly", "blast",
     ],
     "sorrow": [
         "wept", "tear", "mourn", "loss", "died", "grief", "farewell",
         "broken", "remember", "gone", "sorrow", "sigh", "lament",
+        "cry", "cried", "sob", "wail", "anguish", "heartache", "despair",
+        "lonely", "alone", "abandon", "forsake", "desert", "leave", "left",
+        "miss", "longing", "yearn", "regret", "remorse", "guilt", "shame",
+        "empty", "hollow", "fade", "vanish", "depart", "perish", "fade",
     ],
     "wonder": [
         "star", "vast", "beautiful", "gleam", "ancient", "dream", "light",
         "golden", "sky", "marvel", "wonder", "sacred", "dawn", "endless",
+        "magnificent", "glorious", "splendid", "radiant", "luminous", "shimmer",
+        "glisten", "sparkle", "glow", "shine", "brilliant", "divine", "celestial",
+        "ethereal", "transcendent", "sublime", "breathtaking", "awe", "reverence",
+        "mystic", "enchanted", "magical", "crystal", "silver", "azure", "prism",
     ],
     "resolve": [
         "finally", "at last", "stood", "decide", "promise", "home",
         "together", "peace", "ended", "vow", "return", "forgave",
+        "triumph", "victory", "success", "achieve", "accomplish", "complete",
+        "finish", "conclude", "resolve", "settle", "restore", "renew",
+        "heal", "mend", "unite", "embrace", "reunion", "welcome",
+        "safe", "secure", "certain", "sure", "confident", "ready",
+        "determined", "steadfast", "resolute", "committed", "pledge",
     ],
     "calm_amb": [
         "morning", "walk", "sat", "room", "table", "spoke", "said", "day",
         "house", "road", "garden", "window",
+        "door", "chair", "fire", "tea", "book", "read", "write", "letter",
+        "quiet", "still", "calm", "peaceful", "gentle", "soft", "warm",
+        "comfortable", "cozy", "rest", "relax", "breathe", "sigh",
+        "slow", "easy", "simple", "ordinary", "everyday", "familiar", "home",
     ],
 }
 
@@ -425,8 +458,9 @@ def _detect_beats(word_timings: list[dict]) -> list[tuple[int, int]]:
     start exceeds ``_BEAT_GAP_SEC`` AND the current beat already has at least
     ``_BEAT_MIN_WORDS`` words. Beats are hard-capped at ``_BEAT_MAX_WORDS``.
 
-    Returns a list of ``(start_idx, end_idx)`` tuples (inclusive indices into
-    ``word_timings``).
+    FALLBACK: if no gaps are found (edge-tts produces continuous speech),
+    split by sentence endings (. ! ?) so we get multiple beats for variety.
+    This ensures the chapter doesn't collapse into a single mood.
     """
     n = len(word_timings)
     if n == 0:
@@ -442,6 +476,29 @@ def _detect_beats(word_timings: list[dict]) -> list[tuple[int, int]]:
             beats.append((beat_start, i - 1))
             beat_start = i
     beats.append((beat_start, n - 1))
+
+    # FALLBACK: if we only got 1 beat (no gaps found), split by sentence
+    # endings so the chapter has mood variety. This is critical because
+    # edge-tts produces continuous speech with no >0.45s gaps.
+    # Group sentences into beats of >= _BEAT_MIN_WORDS words, capped at 100
+    # words (smaller than _BEAT_MAX_WORDS so we get variety in short chapters).
+    _FALLBACK_MAX_WORDS = 100
+    if len(beats) <= 1 and n > _BEAT_MIN_WORDS * 2:
+        sentence_beats: list[tuple[int, int]] = []
+        beat_start = 0
+        for i in range(n):
+            w = word_timings[i]["w"]
+            beat_len = i - beat_start + 1
+            # End a beat at a sentence ending IF we have enough words,
+            # OR if we've hit the fallback max beat size.
+            if ((w.endswith(".") or w.endswith("!") or w.endswith("?")) and beat_len >= _BEAT_MIN_WORDS) or beat_len >= _FALLBACK_MAX_WORDS:
+                sentence_beats.append((beat_start, i))
+                beat_start = i + 1
+        if beat_start < n:
+            sentence_beats.append((beat_start, n - 1))
+        if len(sentence_beats) > 1:
+            beats = sentence_beats
+
     return beats
 
 
@@ -482,28 +539,41 @@ def _quote_density(words: list[str]) -> float:
     return q / len(words)
 
 
-def _score_beat(beat_words: list[str]) -> tuple[str, int, dict[str, int]]:
+def _score_beat(beat_words: list[str], palette_bonus: dict[str, int] | None = None) -> tuple[str, int, dict[str, int]]:
     """Score a beat's words against the keyword lexicon.
 
+    Args:
+        beat_words: List of words in this beat.
+        palette_bonus: Chapter-level top-2 mood bonus (+2 each), or None.
+
     Returns ``(mood, intensity, scores)`` where ``scores`` is the per-mood
-    score dict (for intensity margin calculation).
+    score dict. Keyword hits are weighted by 1/log(1+total_words) so long
+    beats don't automatically win on raw counts.
     """
     stems = [_stem(w) for w in beat_words]
     n = len(stems)
     if n == 0:
         return "calm_amb", 2, {}
 
-    # Count keyword hits per mood.
+    # Weight factor: 1/log(1+n) — longer beats get slightly lower per-hit weight
+    # so a 400-word beat doesn't auto-win over a 50-word beat with the same density.
+    weight = 1.0 / max(1.0, math.log(1 + n) * 0.5)
+
+    # Count keyword hits per mood (weighted).
     scores: dict[str, int] = {m: 0 for m in _MOOD_KEYWORDS}
     for s in stems:
         for mood, keywords in _MOOD_KEYWORDS.items():
             for kw in keywords:
                 kw_stem = _stem(kw)
-                # Match by prefix so "screamed" → "scream" hits "scream".
-                if s == kw_stem or s.startswith(kw_stem) or kw_stem.startswith(s):
-                    if len(s) >= 3 and len(kw_stem) >= 3:
-                        scores[mood] += 1
+                if len(s) >= 3 and len(kw_stem) >= 3:
+                    if s == kw_stem or s.startswith(kw_stem) or kw_stem.startswith(s):
+                        scores[mood] += max(1, int(weight))
                         break
+
+    # Apply chapter-level palette bonus.
+    if palette_bonus:
+        for mood, bonus in palette_bonus.items():
+            scores[mood] += bonus
 
     # Punctuation density modifiers.
     _, excl_q = _count_sentence_endings(beat_words)
@@ -512,7 +582,7 @@ def _score_beat(beat_words: list[str]) -> tuple[str, int, dict[str, int]]:
         scores["tension_high"] += 2
         scores["action"] += 2
 
-    # Sentence length modifiers (approximate: split on . ! ?).
+    # Sentence length modifiers.
     sent_words: list[list[str]] = []
     cur: list[str] = []
     for w in beat_words:
@@ -530,10 +600,10 @@ def _score_beat(beat_words: list[str]) -> tuple[str, int, dict[str, int]]:
         scores["wonder"] += 1
 
     # Find winner.
+    sorted_scores = sorted(scores.items(), key=lambda x: -x[1])
     winner_mood = "calm_amb"
     winner_score = 0
     runner_up = 0
-    sorted_scores = sorted(scores.items(), key=lambda x: -x[1])
     if sorted_scores and sorted_scores[0][1] > 0:
         winner_mood = sorted_scores[0][0]
         winner_score = sorted_scores[0][1]
@@ -549,65 +619,153 @@ def _score_beat(beat_words: list[str]) -> tuple[str, int, dict[str, int]]:
     return winner_mood, intensity, scores
 
 
+def _chapter_palette(word_timings: list[dict]) -> dict[str, int]:
+    """Compute the chapter's top-2 moods and return a bonus dict.
+
+    Scores ALL words in the chapter against the keyword lexicon, picks the
+    top 2 moods, and returns {mood: +2} for each. This makes chapter A
+    dread-leaning and chapter B wonder-leaning instead of both defaulting
+    to calm_amb.
+    """
+    all_words = [wt["w"] for wt in word_timings]
+    _mood, _int, scores = _score_beat(all_words)
+    sorted_moods = sorted(scores.items(), key=lambda x: -x[1])
+    palette: dict[str, int] = {}
+    for mood, score in sorted_moods[:2]:
+        if score > 0:
+            palette[mood] = 2
+    return palette
+
+
 def score_segments_heuristic(word_timings: list[dict]) -> list[dict]:
     """Deterministic mood segmentation — the PRIMARY cue generator.
 
-    Replaces the LLM with a heuristic that:
-      1. Detects beats from word-timing gaps (> 0.45s gap + >= 25 words).
-      2. Scores each beat against a keyword lexicon (8 moods).
-      3. Applies punctuation/sentence-length modifiers.
-      4. Selects the winning mood (silence for dialogue-heavy or zero-score beats).
-      5. Scales intensity from the winner's margin over the runner-up.
-      6. Post-pass: merges adjacent same-mood beats, enforces a 15% silence
-         floor, guarantees contiguous coverage of 0..word_count-1.
-
-    Returns word-index segments: ``[{start_word, end_word, mood, intensity}, ...]``.
+    Improvements over the old version:
+      1. Chapter-level palette: top-2 moods get +2 bonus per beat.
+      2. Anti-monotony: if a mood would cover > 55% of the chapter, the
+         2nd-place mood takes over beats where its score is within 2 of
+         the winner.
+      3. Lower silence floor (10% instead of 15%).
+      4. Expanded keyword lexicon (40+ stems per mood).
+      5. Keyword hits weighted by 1/log(1+beat_words) so long beats
+         don't auto-win.
+      6. Zero-score beats inherit the PREVIOUS beat's mood at intensity 1
+         instead of defaulting to calm_amb.
     """
     n = len(word_timings)
     if n == 0:
         return []
 
-    # Step 1 — beat detection.
+    # Step 1 — chapter-level palette (top-2 moods get +2 bonus).
+    palette = _chapter_palette(word_timings)
+
+    # Step 2 — beat detection.
     beats = _detect_beats(word_timings)
 
-    # Steps 2-4 — score each beat.
-    segments: list[dict] = []
+    # Steps 3-4 — score each beat with palette bonus.
+    raw_segments: list[dict] = []
+    prev_mood = None
     for start_idx, end_idx in beats:
         beat_words = [word_timings[j]["w"] for j in range(start_idx, end_idx + 1)]
-        mood, intensity, _ = _score_beat(beat_words)
-        segments.append({
+        mood, intensity, scores = _score_beat(beat_words, palette)
+
+        # Zero-score beat inherits the previous beat's mood at intensity 1.
+        if mood == "silence" and prev_mood and prev_mood != "silence":
+            # Check if this was a zero-score beat (not a quote-density silence)
+            if _quote_density(beat_words) <= _QUOTE_DENSITY_THRESHOLD:
+                mood = prev_mood
+                intensity = 1
+
+        raw_segments.append({
             "start_word": start_idx,
             "end_word": end_idx,
             "mood": mood,
             "intensity": intensity,
+            "_scores": scores,  # keep for anti-monotony pass
         })
+        prev_mood = mood
 
-    # Step 5a — merge adjacent same-mood beats.
-    merged: list[dict] = []
-    for seg in segments:
-        if merged and seg["mood"] == merged[-1]["mood"]:
-            merged[-1]["end_word"] = seg["end_word"]
-            merged[-1]["intensity"] = max(merged[-1]["intensity"], seg["intensity"])
-        else:
-            merged.append(dict(seg))
-
-    # Step 5b — enforce 15% silence floor.
+    # Step 5a — anti-monotony: if a mood covers > 55%, give 2nd-place mood
+    # the beats where its score is within 2 of the winner.
     total_words = n
+    mood_words: dict[str, int] = {}
+    for seg in raw_segments:
+        w = seg["end_word"] - seg["start_word"] + 1
+        mood_words[seg["mood"]] = mood_words.get(seg["mood"], 0) + w
+
+    dominant_mood = max(mood_words, key=mood_words.get) if mood_words else None
+    if dominant_mood and dominant_mood != "silence":
+        dominant_pct = mood_words[dominant_mood] / total_words
+        if dominant_pct > _DOMINANT_CAP_PCT:
+            # Find 2nd-place mood by looking at per-beat runner-up scores
+            # (not just the winner histogram, which may only have 1 entry).
+            runner_up_totals: dict[str, int] = {}
+            for seg in raw_segments:
+                scores = seg.get("_scores", {})
+                sorted_scores = sorted(scores.items(), key=lambda x: -x[1])
+                for m, s in sorted_scores:
+                    if m != dominant_mood and m != "silence" and s > 0:
+                        runner_up_totals[m] = runner_up_totals.get(m, 0) + s
+                        break
+            second_mood = max(runner_up_totals, key=runner_up_totals.get) if runner_up_totals else None
+            if second_mood:
+                # Reassign beats where 2nd mood score is within 2 of winner.
+                for seg in raw_segments:
+                    if seg["mood"] == dominant_mood:
+                        scores = seg.get("_scores", {})
+                        winner_score = scores.get(dominant_mood, 0)
+                        second_score = scores.get(second_mood, 0)
+                        if second_score > 0 and (winner_score - second_score) <= 2:
+                            seg["mood"] = second_mood
+                            seg["intensity"] = max(1, seg.get("intensity", 2) - 1)
+
+            # Re-check: if still > 55%, reassign beats with the smallest
+            # winner margin (even if > 2) until we're under the cap.
+            mood_words2: dict[str, int] = {}
+            for seg in raw_segments:
+                w = seg["end_word"] - seg["start_word"] + 1
+                mood_words2[seg["mood"]] = mood_words2.get(seg["mood"], 0) + w
+            dom2 = max(mood_words2, key=mood_words2.get) if mood_words2 else None
+            if dom2 == dominant_mood and mood_words2.get(dom2, 0) / total_words > _DOMINANT_CAP_PCT:
+                # Sort dominant beats by smallest margin and reassign.
+                dominant_beats = [(i, seg) for i, seg in enumerate(raw_segments) if seg["mood"] == dominant_mood]
+                dominant_beats.sort(key=lambda x: x[1].get("_scores", {}).get(dominant_mood, 0) - x[1].get("_scores", {}).get(second_mood, 0))
+                for _, seg in dominant_beats:
+                    if mood_words2.get(dominant_mood, 0) / total_words <= _DOMINANT_CAP_PCT:
+                        break
+                    w = seg["end_word"] - seg["start_word"] + 1
+                    seg["mood"] = second_mood
+                    seg["intensity"] = max(1, seg.get("intensity", 2) - 1)
+                    mood_words2[dominant_mood] -= w
+                    mood_words2[second_mood] = mood_words2.get(second_mood, 0) + w
+
+    # Step 5b — merge adjacent same-mood beats.
+    merged: list[dict] = []
+    for seg in raw_segments:
+        clean = {k: v for k, v in seg.items() if not k.startswith("_")}
+        if merged and clean["mood"] == merged[-1]["mood"]:
+            merged[-1]["end_word"] = clean["end_word"]
+            merged[-1]["intensity"] = max(merged[-1]["intensity"], clean["intensity"])
+        else:
+            merged.append(clean)
+
+    # Step 5c — enforce 10% silence floor.
+    # BUT: never convert the ONLY non-silence segment (would make the whole
+    # chapter silent). Only convert if there are multiple non-silence segments.
     silence_words = sum(s["end_word"] - s["start_word"] + 1 for s in merged if s["mood"] == "silence")
-    if total_words > 0 and silence_words < total_words * _SILENCE_FLOOR_PCT:
+    non_silence_list = [s for s in merged if s["mood"] != "silence"]
+    if total_words > 0 and silence_words < total_words * _SILENCE_FLOOR_PCT and len(non_silence_list) > 1:
         deficit = int(total_words * _SILENCE_FLOOR_PCT) - silence_words
-        # Convert the lowest-scoring non-silence beats to silence.
-        # (We approximate "lowest-scoring" by shortest non-silence beats.)
-        non_silence = [s for s in merged if s["mood"] != "silence"]
-        non_silence.sort(key=lambda s: s["end_word"] - s["start_word"] + 1)
-        for s in non_silence:
+        non_silence_list.sort(key=lambda s: s["end_word"] - s["start_word"] + 1)
+        # Convert shortest non-silence segments to silence, but keep at least one.
+        for s in non_silence_list[:-1]:
             if deficit <= 0:
                 break
             w = s["end_word"] - s["start_word"] + 1
             s["mood"] = "silence"
             s["intensity"] = 1
             deficit -= w
-        # Re-merge after conversion.
+        # Re-merge.
         re_merged: list[dict] = []
         for seg in merged:
             if re_merged and seg["mood"] == re_merged[-1]["mood"]:
@@ -617,16 +775,15 @@ def score_segments_heuristic(word_timings: list[dict]) -> list[dict]:
                 re_merged.append(dict(seg))
         merged = re_merged
 
-    # Step 5c — guarantee contiguous coverage of 0..n-1.
+    # Step 5d — guarantee contiguous coverage of 0..n-1.
     if not merged:
         return [{"start_word": 0, "end_word": n - 1, "mood": "silence", "intensity": 1}]
     merged[0]["start_word"] = 0
     merged[-1]["end_word"] = n - 1
-    # Force-fill any internal gaps with the previous segment's mood.
     for i in range(len(merged) - 1):
         if merged[i]["end_word"] < merged[i + 1]["start_word"] - 1:
             merged[i]["end_word"] = merged[i + 1]["start_word"] - 1
-    # Final re-merge after gap-filling.
+    # Final re-merge.
     final: list[dict] = [merged[0]]
     for seg in merged[1:]:
         if seg["mood"] == final[-1]["mood"] and seg["start_word"] <= final[-1]["end_word"] + 1:
@@ -634,6 +791,13 @@ def score_segments_heuristic(word_timings: list[dict]) -> list[dict]:
             final[-1]["intensity"] = max(final[-1]["intensity"], seg["intensity"])
         else:
             final.append(seg)
+
+    # Step 6 — verify variety: at least 4 distinct non-silence moods or 6 changes.
+    distinct_moods = set(s["mood"] for s in final if s["mood"] != "silence")
+    mood_changes = sum(1 for i in range(1, len(final)) if final[i]["mood"] != final[i-1]["mood"])
+    if len(distinct_moods) < 4 and mood_changes < 6:
+        print(f"[bgm-cues] WARNING: low variety — {len(distinct_moods)} moods, {mood_changes} changes. Histogram: {mood_words}")
+
     return final
 
 

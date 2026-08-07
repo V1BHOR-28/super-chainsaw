@@ -10717,10 +10717,10 @@ def api_bgm_debug(job_id, chapter_index):
 
     Returns JSON:
       { bgm_mode, has_transcript_cues, word_count, r2_cached, cue_count,
-        first_3_cues, asset_files_present: { <mood>: bool } }
+        first_3_cues, distinct_moods, mood_coverage_pct, dominant_mood_pct,
+        asset_files_present: { <mood>: {present, lufs, duration} } }
 
-    asset_files_present stats the real file for every mood in bgm_registry.
-    Used to diagnose why BGM isn't playing.
+    Used to diagnose why BGM isn't playing and verify cue variety.
     """
     job, err, sc = _check_job_owner(job_id)
     if err is not None:
@@ -10737,37 +10737,99 @@ def api_bgm_debug(job_id, chapter_index):
     _tc_list = _tc.get(chapter_index) or _tc.get(str(chapter_index)) or []
     word_count = len(_tc_list)
 
-    # Check R2 cache.
+    # Gather cues from R2 cache or in-memory.
     r2_cached = False
-    cue_count = 0
-    first_3_cues = []
+    cues = []
     try:
         import bgm_cues as _bgm_cues_mod
         cached = _bgm_cues_mod._download_cues_from_r2(job_id, chapter_index)
         r2_cached = cached is not None
         if cached:
-            cue_count = len(cached)
-            first_3_cues = cached[:3]
-    except Exception as e:
-        first_3_cues = [{"error": str(e)}]
+            cues = cached
+    except Exception:
+        pass
 
-    # If not cached, try in-memory.
-    if cue_count == 0:
+    if not cues:
         bgm_cues_map = job.get("bgm_cues") or {}
         in_mem = bgm_cues_map.get(chapter_index) or bgm_cues_map.get(str(chapter_index))
         if in_mem:
-            cue_count = len(in_mem)
-            first_3_cues = in_mem[:3]
+            cues = in_mem
 
-    # Stat asset files for every mood.
-    asset_files_present = {}
+    # If still no cues but we have transcript_cues, generate on demand (BACKFILL).
+    if not cues and _tc_list:
+        try:
+            import bgm_cues as _bgm_cues_mod
+            _ch_mp3s = job.get("chapter_mp3s") or []
+            _ch_entry = None
+            for _ce in _ch_mp3s:
+                if _ce.get("index") == chapter_index:
+                    _ch_entry = _ce
+                    break
+            _ch_dur = (_ch_entry.get("duration_ms") or 0) / 1000.0 if _ch_entry else None
+            cues = _bgm_cues_mod.get_or_create_bgm_cues(
+                job_id, chapter_index, "", _tc_list, _ch_dur)
+        except Exception:
+            pass
+
+    cue_count = len(cues)
+    first_3_cues = cues[:3] if cues else []
+
+    # Compute mood variety metrics.
+    distinct_moods = set()
+    mood_durations: dict[str, float] = {}
+    total_dur = 0.0
+    for c in cues:
+        m = c.get("mood", "silence")
+        distinct_moods.add(m)
+        dur = max(0, c.get("end", 0) - c.get("start", 0))
+        mood_durations[m] = mood_durations.get(m, 0) + dur
+        total_dur += dur
+
+    mood_coverage_pct = {}
+    dominant_mood = None
+    dominant_mood_pct = 0.0
+    for m, d in mood_durations.items():
+        pct = (d / total_dur * 100) if total_dur > 0 else 0
+        mood_coverage_pct[m] = round(pct, 1)
+        if pct > dominant_mood_pct:
+            dominant_mood_pct = pct
+            dominant_mood = m
+
+    # Asset files with LUFS + duration measurement.
+    asset_info = {}
     try:
-        from bgm_registry import MOODS, MUSIC_MOODS, asset_path_for
+        from bgm_registry import MUSIC_MOODS, asset_path_for, ASSET_DIR
+        import subprocess as _sp
         for mood in MUSIC_MOODS:
             path = asset_path_for(mood)
-            asset_files_present[mood] = bool(path and os.path.isfile(path))
+            present = bool(path and os.path.isfile(path))
+            info = {"present": present}
+            if present:
+                # Measure duration
+                try:
+                    r = _sp.run(
+                        ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+                         "-of", "default=noprint_wrappers=1:nokey=1", path],
+                        capture_output=True, text=True, timeout=5)
+                    info["duration"] = round(float(r.stdout.strip()), 1)
+                except Exception:
+                    info["duration"] = None
+                # Measure LUFS (quick — one-pass loudnorm)
+                try:
+                    r = _sp.run(
+                        ["ffmpeg", "-loglevel", "info", "-i", path,
+                         "-af", "loudnorm=I=-20:TP=-1.5:LRA=11:print_format=summary",
+                         "-f", "null", "-"],
+                        capture_output=True, text=True, timeout=10)
+                    for line in r.stderr.split("\n"):
+                        if "Input Integrated:" in line:
+                            info["lufs"] = round(float(line.split(":")[1].strip().split()[0]), 1)
+                            break
+                except Exception:
+                    info["lufs"] = None
+            asset_info[mood] = info
     except ImportError:
-        asset_files_present = {"error": "bgm_registry not available"}
+        asset_info = {"error": "bgm_registry not available"}
 
     return jsonify({
         "job_id": job_id,
@@ -10778,7 +10840,12 @@ def api_bgm_debug(job_id, chapter_index):
         "r2_cached": r2_cached,
         "cue_count": cue_count,
         "first_3_cues": first_3_cues,
-        "asset_files_present": asset_files_present,
+        "distinct_moods": sorted(distinct_moods),
+        "distinct_mood_count": len(distinct_moods),
+        "mood_coverage_pct": mood_coverage_pct,
+        "dominant_mood": dominant_mood,
+        "dominant_mood_pct": round(dominant_mood_pct, 1),
+        "asset_files": asset_info,
         "asset_dir": getattr(__import__("bgm_registry"), "ASSET_DIR", ""),
     })
 

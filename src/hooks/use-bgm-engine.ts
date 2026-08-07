@@ -8,51 +8,38 @@ import { getAudioElement } from "@/lib/audio-element-registry";
 import type { BgmCue } from "@/lib/abm-api";
 
 /**
- * useBgmEngine — runtime BGM (background music) mixer.
+ * useBgmEngine — runtime BGM mixer using Web Audio API.
  *
- * Runs alongside useAudioEngine + useWordSync. When the current chapter has
- * BGM cues (bgm_mode="runtime"), this hook:
+ * Architecture:
+ *   - Each mood <audio> element → MediaElementSourceNode → GainNode → destination
+ *   - Narration <audio> → AnalyserNode (tap only, doesn't alter playback)
+ *   - Soft ducking: sample narration RMS every ~50ms; when speaking,
+ *     BGM gain target = base × 0.45 (duck), with 120ms attack / 700ms release
+ *     via gain.setTargetAtTime (smooth, not per-frame writes).
+ *   - 1.5s crossfades via gain.linearRampToValueAtTime.
  *
- *   1. Lazily creates one hidden `<audio loop>` per mood (preload="none").
- *   2. In a requestAnimationFrame loop, binary-searches the current cue based
- *      on the main audio's chapter-relative currentTime.
- *   3. Crossfades the outgoing mood's volume → 0 and the incoming → its gain
- *      over 1.5s (linear ramp on audio.volume, gain_db → linear).
- *   4. Applies the user's bgmVolume slider (0-100%) and bgmEnabled toggle.
- *   5. Pauses/resumes all BGM elements in lockstep with the main audio.
- *   6. On seek, jumps the active loop to (currentTime - cue.start) % loopDuration.
- *
- * Fail-soft: if cues are missing, assets fail to load, or BGM is disabled,
- * the hook is a no-op — clean narration plays without music.
- *
- * This hook does NOT touch use-word-sync.ts, transcript-view.tsx, or the
- * existing audio engine. It reads `audio.currentTime` from the shared
- * audio-element-registry singleton (same as useWordSync).
+ * Fail-soft: if AudioContext is unavailable or createMediaElementSource
+ * throws, falls back to the simple audio.volume path.
  */
 
-const CROSSFADE_MS = 1500;
+const CROSSFADE_SEC = 1.5;
 const SEEK_THRESHOLD_SEC = 1.5;
-
-/** Per-element volume ramp state. Updated by the rAF loop. */
-interface ElementRamp {
-  startVolume: number;
-  targetVolume: number;
-  transitionStart: number; // performance.now() ms
-  playing: boolean;
-}
+const DUCK_FACTOR = 0.45;
+const DUCK_ATTACK_SEC = 0.12;
+const DUCK_RELEASE_SEC = 0.70;
+const SPEAKING_RMS_THRESHOLD = 0.02;
+const SPEAKING_HANGOVER_MS = 200;
+const ANALYSER_INTERVAL_MS = 50;
 
 function dbToLinear(db: number): number {
   return Math.pow(10, db / 20);
 }
 
-/** Binary-search the cue that contains time `t` (seconds, chapter-relative).
- *  Returns -1 if no cue covers `t` (silence gap or before first cue). */
 function findActiveCueIndex(cues: BgmCue[], t: number): number {
   let lo = 0, hi = cues.length - 1, result = -1;
   while (lo <= hi) {
     const mid = (lo + hi) >> 1;
     if (cues[mid].start <= t) {
-      // Check if t is within this cue's [start, end) range.
       if (t < cues[mid].end) result = mid;
       lo = mid + 1;
     } else {
@@ -60,6 +47,13 @@ function findActiveCueIndex(cues: BgmCue[], t: number): number {
     }
   }
   return result;
+}
+
+interface MoodChannel {
+  audio: HTMLAudioElement;
+  gainNode: GainNode;
+  sourceNode: MediaElementAudioSourceNode;
+  playing: boolean;
 }
 
 export function useBgmEngine() {
@@ -71,80 +65,121 @@ export function useBgmEngine() {
 
   const fetchCues = useBgmCuesStore((s) => s.fetchCues);
 
-  // ── Refs (read by the rAF loop at 60fps — no React re-renders) ──
+  // Refs
   const cuesRef = useRef<BgmCue[]>([]);
-  const elementsRef = useRef<Map<string, HTMLAudioElement>>(new Map());
-  const rampsRef = useRef<Map<string, ElementRamp>>(new Map());
+  const ctxRef = useRef<AudioContext | null>(null);
+  const channelsRef = useRef<Map<string, MoodChannel>>(new Map());
+  const narrationAnalyserRef = useRef<AnalyserNode | null>(null);
+  const narrationSourceRef = useRef<MediaElementAudioSourceNode | null>(null);
   const activeMoodRef = useRef<string | null>(null);
   const bgmEnabledRef = useRef(bgmEnabled);
   const bgmVolumeRef = useRef(bgmVolume);
-  const lastTimeRef = useRef(0); // for seek detection
-  const initializedRef = useRef(false);
+  const lastTimeRef = useRef(0);
+  const isSpeakingRef = useRef(false);
+  const lastSpeakingTimeRef = useRef(0);
+  const webAudioFailedRef = useRef(false);
 
-  // Keep refs in sync with React state (the rAF loop reads refs, not state).
   useEffect(() => { bgmEnabledRef.current = bgmEnabled; }, [bgmEnabled]);
   useEffect(() => { bgmVolumeRef.current = bgmVolume; }, [bgmVolume]);
 
-  // ── Lazy element creation ──
-  function getOrCreateElement(mood: string): HTMLAudioElement | null {
-    let el = elementsRef.current.get(mood);
-    if (el) return el;
+  // ── Initialize AudioContext + narration analyser (lazy, on first play) ──
+  function initAudioContext(): boolean {
+    if (ctxRef.current) return true;
+    if (webAudioFailedRef.current) return false;
     try {
-      el = new Audio();
-      el.src = getBgmAssetUrl(mood);
-      el.loop = true;
-      el.preload = "auto";
-      el.volume = 0;
-      elementsRef.current.set(mood, el);
-      rampsRef.current.set(mood, {
-        startVolume: 0,
-        targetVolume: 0,
-        transitionStart: 0,
-        playing: false,
-      });
-      return el;
-    } catch {
+      const Ctx = window.AudioContext || (window as unknown as { webkitAudioContext: typeof AudioContext }).webkitAudioContext;
+      const ctx = new Ctx();
+      ctxRef.current = ctx;
+
+      // Tap the narration element for RMS analysis (does NOT alter its audio path)
+      const narration = getAudioElement();
+      if (narration) {
+        try {
+          const src = ctx.createMediaElementSource(narration);
+          const analyser = ctx.createAnalyser();
+          analyser.fftSize = 512;
+          analyser.smoothingTimeConstant = 0.6;
+          src.connect(analyser);
+          // Also connect analyser to destination so narration is still heard
+          analyser.connect(ctx.destination);
+          narrationAnalyserRef.current = analyser;
+          narrationSourceRef.current = src;
+        } catch (e) {
+          // createMediaElementSource can only be called once per element.
+          // If it throws, we can't do ducking but BGM still works via volume.
+          console.warn("[bgm-engine] narration analyser setup failed:", e);
+        }
+      }
+      return true;
+    } catch (e) {
+      console.warn("[bgm-engine] AudioContext unavailable, falling back to volume path:", e);
+      webAudioFailedRef.current = true;
+      return false;
+    }
+  }
+
+  // ── Get or create a mood channel (audio + gain node) ──
+  function getOrCreateChannel(mood: string): MoodChannel | null {
+    const existing = channelsRef.current.get(mood);
+    if (existing) return existing;
+
+    const ctx = ctxRef.current;
+    if (!ctx) return null;
+
+    try {
+      const audio = new Audio();
+      audio.src = getBgmAssetUrl(mood);
+      audio.loop = true;
+      audio.preload = "auto";
+      audio.volume = 1.0; // Web Audio controls gain, element stays at 1.0
+
+      const sourceNode = ctx.createMediaElementSource(audio);
+      const gainNode = ctx.createGain();
+      gainNode.gain.value = 0;
+      sourceNode.connect(gainNode);
+      gainNode.connect(ctx.destination);
+
+      const channel: MoodChannel = { audio, gainNode, sourceNode, playing: false };
+      channelsRef.current.set(mood, channel);
+      return channel;
+    } catch (e) {
+      console.warn(`[bgm-engine] channel setup failed for ${mood}:`, e);
       return null;
     }
   }
 
-  /** Stop all BGM elements (pause + volume 0). Used on chapter change / disable. */
+  // ── Stop all BGM ──
   function stopAll() {
     activeMoodRef.current = null;
-    for (const [mood, el] of elementsRef.current) {
+    const ctx = ctxRef.current;
+    const now = ctx ? ctx.currentTime : 0;
+    for (const [, ch] of channelsRef.current) {
       try {
-        el.pause();
-        el.currentTime = 0;
-        el.volume = 0;
+        ch.gainNode.gain.cancelScheduledValues(now);
+        ch.gainNode.gain.setValueAtTime(ch.gainNode.gain.value, now);
+        ch.gainNode.gain.linearRampToValueAtTime(0, now + 0.1);
+        ch.audio.pause();
+        ch.audio.currentTime = 0;
       } catch { /* */ }
-      const ramp = rampsRef.current.get(mood);
-      if (ramp) {
-        ramp.startVolume = 0;
-        ramp.targetVolume = 0;
-        ramp.playing = false;
-      }
+      ch.playing = false;
     }
   }
 
-  /** Pause all BGM elements (keep volume state for resume). */
   function pauseAll() {
-    for (const [, el] of elementsRef.current) {
-      try { el.pause(); } catch { /* */ }
-    }
-    for (const [, ramp] of rampsRef.current) {
-      ramp.playing = false;
+    for (const [, ch] of channelsRef.current) {
+      try { ch.audio.pause(); } catch { /* */ }
+      ch.playing = false;
     }
   }
 
-  /** Resume the active mood's element. */
   function resumeActive() {
     const mood = activeMoodRef.current;
     if (!mood) return;
-    const el = elementsRef.current.get(mood);
-    if (!el) return;
-    const ramp = rampsRef.current.get(mood);
-    if (!ramp || ramp.targetVolume <= 0) return;
-    try { el.play().catch(() => {}); ramp.playing = true; } catch { /* */ }
+    const ch = channelsRef.current.get(mood);
+    if (!ch) return;
+    if (!ch.playing) {
+      try { ch.audio.play().then(() => { ch.playing = true; }).catch(() => {}); } catch { /* */ }
+    }
   }
 
   // ── Fetch cues when chapter changes ──
@@ -160,7 +195,6 @@ export function useBgmEngine() {
       stopAll();
       return;
     }
-    // Stop BGM for the previous chapter; the new chapter's cues will arrive shortly.
     stopAll();
     cuesRef.current = [];
 
@@ -168,35 +202,26 @@ export function useBgmEngine() {
     fetchCues(currentJob.jobId, chInfo.index).then((cues) => {
       if (cancelled) return;
       cuesRef.current = cues || [];
-      initializedRef.current = true;
-      // ARIA: diagnostic logging — log the fetched cue count once per chapter
-      // change so we can verify the frontend is receiving non-empty cues.
       console.log(`[bgm-engine] chapter ${chInfo.index}: fetched ${cues?.length ?? 0} cues`);
     });
     return () => { cancelled = true; };
   }, [currentJob?.jobId, currentChapterIdx, fetchCues]);
 
-  // ── Pause/resume lockstep with main audio ──
+  // ── Pause/resume lockstep + AudioContext resume ──
   useEffect(() => {
     if (!isPlaying) {
       pauseAll();
     } else {
-      // ARIA: Prime the BGM audio elements for autoplay. Browsers block
-      // audio.play() calls that aren't initiated by a user gesture. The
-      // user clicking "play" on the main audio IS a gesture, but the rAF
-      // loop's el.play() call happens asynchronously and may be blocked.
-      // By calling play() here (inside the isPlaying effect, which fires
-      // in response to the user's click), we "unlock" the audio element.
-      // The rAF loop will fade it in when the first cue becomes active.
-      for (const [mood, el] of elementsRef.current) {
-        if (el.paused) {
-          try {
-            el.play().then(() => {
-              // Successfully unlocked — the rAF loop will fade it in.
-            }).catch((e) => {
-              console.warn(`[bgm-engine] play() blocked for mood "${mood}":`, e);
-            });
-          } catch { /* */ }
+      // Resume AudioContext on user gesture (autoplay policy)
+      if (initAudioContext() && ctxRef.current?.state === "suspended") {
+        ctxRef.current.resume().catch(() => {});
+      }
+      // Prime BGM elements for autoplay
+      for (const [mood, ch] of channelsRef.current) {
+        if (ch.audio.paused) {
+          try { ch.audio.play().then(() => {}).catch((e) => {
+            console.warn(`[bgm-engine] play() blocked for ${mood}:`, e);
+          }); } catch { /* */ }
         }
       }
       resumeActive();
@@ -205,26 +230,50 @@ export function useBgmEngine() {
 
   // ── BGM enabled/disabled ──
   useEffect(() => {
-    if (!bgmEnabled) {
-      stopAll();
-    }
+    if (!bgmEnabled) stopAll();
   }, [bgmEnabled]);
 
   // ── Cleanup on unmount ──
   useEffect(() => {
     return () => {
-      for (const [, el] of elementsRef.current) {
-        try { el.pause(); el.src = ""; } catch { /* */ }
+      for (const [, ch] of channelsRef.current) {
+        try { ch.audio.pause(); ch.audio.src = ""; } catch { /* */ }
       }
-      elementsRef.current.clear();
-      rampsRef.current.clear();
+      channelsRef.current.clear();
+      try { ctxRef.current?.close(); } catch { /* */ }
+      ctxRef.current = null;
     };
   }, []);
 
-  // ── The rAF loop: cue lookup + crossfade ──
+  // ── Narration RMS analyser loop (ducking) ──
   useEffect(() => {
-    if (!bgmEnabled) return; // loop only runs when BGM is enabled
+    if (!bgmEnabled || webAudioFailedRef.current) return;
+    const interval = setInterval(() => {
+      const analyser = narrationAnalyserRef.current;
+      if (!analyser) return;
+      const buf = new Uint8Array(analyser.frequencyBinCount);
+      analyser.getByteTimeDomainData(buf);
+      // Compute RMS
+      let sum = 0;
+      for (let i = 0; i < buf.length; i++) {
+        const v = (buf[i] - 128) / 128;
+        sum += v * v;
+      }
+      const rms = Math.sqrt(sum / buf.length);
+      const now = performance.now();
+      if (rms > SPEAKING_RMS_THRESHOLD) {
+        lastSpeakingTimeRef.current = now;
+        isSpeakingRef.current = true;
+      } else if (now - lastSpeakingTimeRef.current > SPEAKING_HANGOVER_MS) {
+        isSpeakingRef.current = false;
+      }
+    }, ANALYSER_INTERVAL_MS);
+    return () => clearInterval(interval);
+  }, [bgmEnabled]);
 
+  // ── Main rAF loop: cue lookup + gain control ──
+  useEffect(() => {
+    if (!bgmEnabled) return;
     let rafId = 0;
 
     const loop = () => {
@@ -234,103 +283,98 @@ export function useBgmEngine() {
       const cues = cuesRef.current;
       if (!cues || cues.length === 0) return;
 
-      const t = audio.currentTime; // chapter-relative seconds
+      const t = audio.currentTime;
+      const ctx = ctxRef.current;
 
-      // ── Seek detection: large jump → reposition active loop ──
+      // Seek detection
       const prevT = lastTimeRef.current;
       const delta = Math.abs(t - prevT);
       if (prevT > 0 && delta > SEEK_THRESHOLD_SEC) {
         const idx = findActiveCueIndex(cues, t);
         const newMood = idx >= 0 ? cues[idx].mood : null;
-        // If the seek lands in a music cue, jump the loop to maintain sync.
         if (newMood && newMood !== "silence") {
-          const el = getOrCreateElement(newMood);
-          if (el) {
-            const cue = cues[idx];
-            const loopDur = el.duration && isFinite(el.duration) ? el.duration : 30;
-            const offset = (t - cue.start) % loopDur;
-            try { el.currentTime = Math.max(0, offset); } catch { /* */ }
+          const ch = getOrCreateChannel(newMood);
+          if (ch) {
+            const loopDur = ch.audio.duration && isFinite(ch.audio.duration) ? ch.audio.duration : 30;
+            const offset = (t - cues[idx].start) % loopDur;
+            try { ch.audio.currentTime = Math.max(0, offset); } catch { /* */ }
           }
         }
-        // Force-update activeMood to match the new position.
         activeMoodRef.current = newMood && newMood !== "silence" ? newMood : null;
       }
       lastTimeRef.current = t;
 
-      // ── Cue lookup ──
+      // Cue lookup
       const idx = findActiveCueIndex(cues, t);
       const cue = idx >= 0 ? cues[idx] : null;
       const targetMood = cue && cue.mood !== "silence" ? cue.mood : null;
 
-      // ── Mood change → trigger crossfade ──
+      // Mood change → crossfade
       if (targetMood !== activeMoodRef.current) {
-        const now = performance.now();
+        const now = ctx ? ctx.currentTime : 0;
         const volMultiplier = bgmVolumeRef.current / 100;
 
-        // Fade out the outgoing mood.
+        // Fade out outgoing
         if (activeMoodRef.current) {
-          const oldEl = elementsRef.current.get(activeMoodRef.current);
-          const oldRamp = rampsRef.current.get(activeMoodRef.current);
-          if (oldEl && oldRamp) {
-            oldRamp.startVolume = oldEl.volume;
-            oldRamp.targetVolume = 0;
-            oldRamp.transitionStart = now;
+          const oldCh = channelsRef.current.get(activeMoodRef.current);
+          if (oldCh && ctx) {
+            oldCh.gainNode.gain.cancelScheduledValues(now);
+            oldCh.gainNode.gain.setValueAtTime(oldCh.gainNode.gain.value, now);
+            oldCh.gainNode.gain.linearRampToValueAtTime(0, now + CROSSFADE_SEC);
           }
         }
 
-        // Fade in the incoming mood.
-        if (targetMood) {
-          const el = getOrCreateElement(targetMood);
-          if (el) {
-            const ramp = rampsRef.current.get(targetMood)!;
-            const gainLin = dbToLinear(cue!.gain_db) * volMultiplier;
-            ramp.startVolume = el.volume;
-            ramp.targetVolume = gainLin;
-            ramp.transitionStart = now;
-            // Start playing if not already. The play() promise is handled
-            // properly: only set playing=true on success, log on failure.
-            if (!ramp.playing) {
-              try {
-                el.play().then(() => {
-                  ramp.playing = true;
-                }).catch((e) => {
-                  console.warn(`[bgm-engine] play() failed for mood "${targetMood}":`, e);
-                  ramp.playing = false;
-                });
-              } catch { /* */ }
+        // Fade in incoming
+        if (targetMood && cue) {
+          const ch = getOrCreateChannel(targetMood);
+          if (ch) {
+            const baseGain = dbToLinear(cue.gain_db) * volMultiplier;
+            if (ctx) {
+              ch.gainNode.gain.cancelScheduledValues(now);
+              ch.gainNode.gain.setValueAtTime(ch.gainNode.gain.value, now);
+              ch.gainNode.gain.linearRampToValueAtTime(baseGain, now + CROSSFADE_SEC);
+            } else {
+              // Fallback: use audio.volume
+              ch.audio.volume = baseGain;
+            }
+            if (!ch.playing) {
+              try { ch.audio.play().then(() => { ch.playing = true; }).catch(() => {}); } catch { /* */ }
             }
           }
         }
         activeMoodRef.current = targetMood;
       }
 
-      // ── Update volumes for all elements based on their ramp ──
-      const now = performance.now();
-      const volMult = bgmVolumeRef.current / 100;
-      for (const [mood, el] of elementsRef.current) {
-        const ramp = rampsRef.current.get(mood);
-        if (!ramp) continue;
+      // Ducking: adjust the active mood's gain based on speaking state
+      if (ctx && activeMoodRef.current && cue) {
+        const ch = channelsRef.current.get(activeMoodRef.current);
+        if (ch) {
+          const volMult = bgmVolumeRef.current / 100;
+          const baseGain = dbToLinear(cue.gain_db) * volMult;
+          const targetGain = isSpeakingRef.current ? baseGain * DUCK_FACTOR : baseGain;
+          const timeConst = isSpeakingRef.current ? DUCK_ATTACK_SEC : DUCK_RELEASE_SEC;
+          ch.gainNode.gain.setTargetAtTime(targetGain, ctx.currentTime, timeConst);
+        }
+      }
 
-        // If this is the active mood and the volume slider changed, update target.
-        if (mood === activeMoodRef.current && cue) {
-          const newTarget = dbToLinear(cue.gain_db) * volMult;
-          if (Math.abs(newTarget - ramp.targetVolume) > 0.001) {
-            ramp.startVolume = el.volume;
-            ramp.targetVolume = newTarget;
-            ramp.transitionStart = now;
+      // Fallback: if Web Audio failed, use audio.volume
+      if (webAudioFailedRef.current) {
+        const volMult = bgmVolumeRef.current / 100;
+        for (const [mood, ch] of channelsRef.current) {
+          if (mood === activeMoodRef.current && cue) {
+            const baseGain = dbToLinear(cue.gain_db) * volMult;
+            const ducked = isSpeakingRef.current ? baseGain * DUCK_FACTOR : baseGain;
+            ch.audio.volume = Math.max(0, Math.min(1, ducked));
+          } else {
+            ch.audio.volume = 0;
           }
         }
+      }
 
-        // Apply the ramp.
-        const elapsed = now - ramp.transitionStart;
-        const progress = Math.min(1, elapsed / CROSSFADE_MS);
-        const vol = ramp.startVolume + (ramp.targetVolume - ramp.startVolume) * progress;
-        try { el.volume = Math.max(0, Math.min(1, vol)); } catch { /* */ }
-
-        // If the ramp finished and target is 0, pause the element.
-        if (progress >= 1 && ramp.targetVolume <= 0 && ramp.playing) {
-          try { el.pause(); } catch { /* */ }
-          ramp.playing = false;
+      // Pause elements whose gain reached 0
+      for (const [mood, ch] of channelsRef.current) {
+        if (mood !== activeMoodRef.current && ch.playing) {
+          try { ch.audio.pause(); ch.playing = false; } catch { /* */ }
         }
       }
     };
