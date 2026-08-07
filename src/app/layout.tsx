@@ -3,6 +3,7 @@ import { Space_Grotesk, JetBrains_Mono, Instrument_Serif } from "next/font/googl
 import "./globals.css";
 import { Toaster } from "@/components/ui/sonner";
 import { Providers } from "@/components/providers";
+import { Analytics } from "@vercel/analytics/next";
 
 const grotesk = Space_Grotesk({
   variable: "--font-grotesk",
@@ -71,6 +72,7 @@ export default function RootLayout({
             },
           }}
         />
+        <Analytics />
       </body>
     </html>
   );
