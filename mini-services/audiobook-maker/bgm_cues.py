@@ -49,14 +49,15 @@ _MAX_WORDS_PER_CALL = 3000
 _LEAD_IN_SEC = 1.5      # first cue starts 1.5s early (clamped >= 0) — fade-in
 _CROSSFADE_SEC = 2.0    # every cue's end extends 2.0s — overlap = crossfade window
 
-# Gain formula: intensity 1 → -10 dB, intensity 5 → -2 dB.
-# These are MIXING levels (how loud BGM is relative to narration at 0 dB).
-# With the bgmVolume slider at 35%:
-#   intensity 1: 0.35 × 10^(-10/20) = 0.11  (audible background)
-#   intensity 5: 0.35 × 10^(-2/20)  = 0.28  (prominent background)
-# The old formula (-26 + intensity*2 = -24..-16) produced 0.022-0.055 at 35%
-# slider, which was inaudible (narration is at 0.85).
-_GAIN_BASE_DB = -12
+# Gain formula: intensity 1 → -4 dB, intensity 5 → +4 dB.
+# These are MIXING levels. With bgmVolume slider at 35%:
+#   intensity 1: 0.35 × 10^(-4/20)  = 0.22  (clearly audible)
+#   intensity 3: 0.35 × 10^(0/20)   = 0.35  (prominent)
+#   intensity 5: 0.35 × 10^(4/20)   = 0.55  (very prominent)
+# Narration is at ~0.85, so BGM at 0.22-0.55 is clearly audible but doesn't
+# drown out the voice. The old formula (-26 base) produced 0.02-0.055 which
+# was completely inaudible even with headphones.
+_GAIN_BASE_DB = -6
 _GAIN_PER_INTENSITY = 2
 
 # Minimum segment length (words).
