@@ -24,16 +24,20 @@ const instrument = Instrument_Serif({
 });
 
 export const metadata: Metadata = {
-  title: "ARIA",
-  description:
-    "Turn any EPUB or PDF into a narrated audiobook with Spotify-style word-by-word transcripts and adaptive background scoring. Free to try.",
+  title: { default: "ARIA", template: "%s | ARIA" },
+  description: "Listen to your books.",
   keywords: ["ARIA", "AI partner", "AI companion", "thinking partner", "LLM", "personal AI", "audiobook", "EPUB to audiobook", "text to speech", "transcript sync"],
   authors: [{ name: "ARIA" }],
   icons: { icon: "/aria-logo.png" },
   openGraph: {
     title: "ARIA",
-    description: "Turn any EPUB or PDF into a narrated audiobook with Spotify-style word-by-word transcripts and adaptive background scoring. Free to try.",
+    siteName: "ARIA",
+    description: "Listen to your books.",
     type: "website",
+  },
+  twitter: {
+    title: "ARIA",
+    description: "Listen to your books.",
   },
 };
 
