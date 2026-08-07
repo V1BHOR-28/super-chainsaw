@@ -24,15 +24,15 @@ const instrument = Instrument_Serif({
 });
 
 export const metadata: Metadata = {
-  title: "ARIA",
+  title: "ARIA — AI Audiobooks with Word-by-Word Transcripts",
   description:
-    "ARIA (Autonomous Reasoning Intelligent Assistant) is not a chatbot — she's a partner. She remembers the shape of your thinking, pushes back when ideas have holes, and stays with you across every conversation.",
-  keywords: ["ARIA", "AI partner", "AI companion", "thinking partner", "LLM", "personal AI"],
+    "Turn any EPUB or PDF into a narrated audiobook with Spotify-style word-by-word transcripts and adaptive background scoring. Free to try.",
+  keywords: ["ARIA", "AI partner", "AI companion", "thinking partner", "LLM", "personal AI", "audiobook", "EPUB to audiobook", "text to speech", "transcript sync"],
   authors: [{ name: "ARIA" }],
   icons: { icon: "/aria-logo.png" },
   openGraph: {
-    title: "ARIA",
-    description: "Not a chatbot. A partner that remembers the shape of your thinking.",
+    title: "ARIA — AI Audiobooks with Word-by-Word Transcripts",
+    description: "Turn any EPUB or PDF into a narrated audiobook with Spotify-style word-by-word transcripts and adaptive background scoring. Free to try.",
     type: "website",
   },
 };
