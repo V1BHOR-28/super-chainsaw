@@ -473,6 +473,11 @@ async def _edge_tts_call(text, voice, rate, output_path, max_retries=3):
     On failure (silence fallback), returns (False, []).
     """
     last_error = None
+    # ARIA: the audiobook preset uses a fixed -10% rate (not the user-specified
+    # `rate` param) for warmer narration. effective_rate must match the actual
+    # rate passed to edge_tts.Communicate below, otherwise the truncation
+    # check uses the wrong speed factor and false-positives (rejecting valid audio).
+    effective_rate = "-10%"
     for attempt in range(max_retries):
         # CRITICAL: reset boundaries at the start of every retry attempt,
         # otherwise a retry duplicates words from the previous attempt.

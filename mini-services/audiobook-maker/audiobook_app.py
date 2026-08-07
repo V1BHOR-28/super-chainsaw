@@ -9739,12 +9739,14 @@ def api_generate():
     client_id = job.get("client_id", "")
     client_ip = job.get("client_ip", "")
     with _jobs_lock:
-        # ARIA: allow re-generation of completed jobs without requiring
-        # resetToChapters first. The gen_epoch mechanism creates a new
-        # output_{epoch}/ directory for each generation, preserving previous
-        # audio. This eliminates the need for the frontend to call
-        # resetToChapters (which destroyed previous chapter_mp3s data).
-        if job["status"] not in ("analyzed", "optimized", "done"):
+        # ARIA: allow re-generation of completed, failed, or interrupted jobs.
+        # The gen_epoch mechanism creates a new output_{epoch}/ directory for
+        # each generation, preserving previous audio. This eliminates the need
+        # for the frontend to call resetToChapters (which destroyed previous
+        # chapter_mp3s data). Including "error" and "interrupted" here makes
+        # the Retry button work — the user can re-generate without re-uploading
+        # the EPUB after a failure or a server-restart interruption.
+        if job["status"] not in ("analyzed", "optimized", "done", "error", "interrupted", "cancelled"):
             _refund_payment_on_orphan(job_id, job, "status_conflict")
             try: gemini_tts.release_reservation(job_id)
             except Exception: pass
