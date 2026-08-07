@@ -4850,6 +4850,7 @@ def run_generation(job_id, info, voice, rate, single_file, output_format='m4b', 
                 # the browser), "prerender" (mix BGM onto the chapter MP3 server-side).
                 # Fail-soft: any error → clean narration is served.
                 _bgm_mode = (job.get("bgm_mode") or "off").strip().lower()
+                print(f"[{job_id}] BGM block: resolved _bgm_mode={_bgm_mode!r} (job bgm_mode={job.get('bgm_mode')!r})")
                 if _bgm_mode in ("runtime", "prerender"):
                     try:
                         import bgm_cues as _bgm_cues

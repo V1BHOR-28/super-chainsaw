@@ -169,6 +169,9 @@ export function useBgmEngine() {
       if (cancelled) return;
       cuesRef.current = cues || [];
       initializedRef.current = true;
+      // ARIA: diagnostic logging — log the fetched cue count once per chapter
+      // change so we can verify the frontend is receiving non-empty cues.
+      console.log(`[bgm-engine] chapter ${chInfo.index}: fetched ${cues?.length ?? 0} cues`);
     });
     return () => { cancelled = true; };
   }, [currentJob?.jobId, currentChapterIdx, fetchCues]);

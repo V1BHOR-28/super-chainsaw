@@ -9244,12 +9244,14 @@ def api_generate():
     read_round_parens = bool(data.get("read_round_parens", False))
     read_square_brackets = bool(data.get("read_square_brackets", False))
     # ARIA: BGM (background music) delivery mode.
-    #   "off"       — no BGM (default, backward-compatible).
+    #   "off"       — no BGM.
     #   "runtime"   — generate cues, mix in the browser during playback.
     #   "prerender" — mix BGM server-side, store the mixed MP3.
-    bgm_mode = (data.get("bgm_mode") or "off").strip().lower()
+    # Default is "runtime" so new books get BGM automatically. The user can
+    # explicitly send "off" to disable.
+    bgm_mode = (data.get("bgm_mode") or "runtime").strip().lower()
     if bgm_mode not in ("off", "runtime", "prerender"):
-        bgm_mode = "off"
+        bgm_mode = "runtime"
 
     # Refuse Gemini voices when the module is missing or the API key is not configured.
     if _is_gemini_voice(voice):
@@ -10587,14 +10589,15 @@ def api_bgm_asset(mood):
     frontend skips that mood and plays clean narration).
     """
     try:
-        from bgm_registry import asset_path_for, is_valid_mood
+        from bgm_registry import asset_path_for, is_valid_mood, ASSET_DIR
     except ImportError:
         return jsonify({"error": "BGM registry not available"}), 503
     if not is_valid_mood(mood) or mood == "silence":
-        return jsonify({"error": "Unknown mood"}), 404
+        return jsonify({"error": f"Unknown mood: {mood}"}), 404
     path = asset_path_for(mood)
     if not path or not os.path.isfile(path):
-        return jsonify({"error": "Asset not found"}), 404
+        print(f"[bgm-asset] MISSING file for mood '{mood}': {path} (asset_dir={ASSET_DIR})")
+        return jsonify({"error": f"Asset not found on disk: {path}"}), 404
     resp = _send_file_throttled(
         path, as_attachment=False, download_name=f"{mood}.mp3",
         mimetype="audio/mpeg", conditional=True,
@@ -10608,23 +10611,26 @@ def api_bgm_asset(mood):
 def api_bgm_cues(job_id, chapter_index):
     """Return BGM (background music) time cues for a single chapter.
 
-    Only meaningful when the job was generated with ``bgm_mode="runtime"``.
-    For ``"prerender"`` the BGM is already baked into the audio (no cues
-    needed); for ``"off"`` this returns 404. The frontend uses these cues
-    to crossfade mood loops during playback.
+    Diagnostic logging: logs job_id, chapter_idx, resolved bgm_mode,
+    len(cues), and an explicit reason string for every 404 or empty response.
+
+    BACKFILL: if a job's bgm_mode is "off" or missing BUT the job HAS
+    transcript_cues, generate cues on demand (heuristic, then cache) and
+    return them with bgm_mode "runtime" instead of 404. This gives existing
+    books music without regenerating any audio.
 
     Resolution order:
       1. In-memory ``job["bgm_cues"][chapter_index]`` (fast path).
       2. R2 cache ``bgm/{job_id}/{chapter_index}.bgm.json.gz`` (post-restart).
-      3. Regenerate from ``transcript_cues`` (self-healing if R2 missed).
+      3. Regenerate from ``transcript_cues`` (self-healing).
 
     Returns ``{ "cues": [...], "bgm_mode": "runtime" }`` with long-cache
-    headers (cues are immutable once generated). Fail-soft: on any error
-    returns ``{ "cues": [] }`` so the frontend plays clean narration.
+    headers. Fail-soft: on any error returns ``{ "cues": [] }``.
     """
     job, err, sc = _check_job_owner(job_id)
     if err is not None:
         if sc == 404:
+            print(f"[bgm-cues] {job_id}/{chapter_index}: 404 job not found")
             return jsonify({"error": "Job not found"}), 404
         return err, sc
 
@@ -10633,16 +10639,25 @@ def api_bgm_cues(job_id, chapter_index):
         try:
             job = _reconstruct_job_from_storj(job_id, fallback_record=job)
         except Exception as e:
-            print(f"[{job_id}] BGM cues: job reconstruction failed: {e}")
+            print(f"[bgm-cues] {job_id}/{chapter_index}: returning EMPTY (reconstruction failed): {e}")
             return jsonify({"cues": [], "bgm_mode": "off"}), 200
 
     bgm_mode = (job.get("bgm_mode") or "off").strip().lower()
 
-    # For "off" or "prerender", cues are not served — 404 tells the frontend
-    # to skip BGM (prerender audio already has music baked in).
-    if bgm_mode not in ("runtime",):
-        return jsonify({"error": "BGM cues not available for this mode",
-                        "bgm_mode": bgm_mode}), 404
+    # BACKFILL: if bgm_mode is off/missing but the job has transcript_cues,
+    # generate cues on demand and return them with bgm_mode "runtime".
+    # This gives existing books (generated before BGM was added) music
+    # without regenerating any audio.
+    _tc = job.get("transcript_cues") or {}
+    _tc_list = _tc.get(chapter_index) or _tc.get(str(chapter_index)) or []
+    if bgm_mode not in ("runtime", "prerender"):
+        if _tc_list:
+            print(f"[bgm-cues] {job_id}/{chapter_index}: BACKFILL — bgm_mode={bgm_mode} but transcript_cues exist, generating on demand")
+            bgm_mode = "runtime"  # upgrade so the rest of the endpoint proceeds
+        else:
+            print(f"[bgm-cues] {job_id}/{chapter_index}: 404 — bgm_mode={bgm_mode} and no transcript_cues for backfill")
+            return jsonify({"error": "BGM cues not available for this mode",
+                            "bgm_mode": bgm_mode}), 404
 
     # 1. In-memory cache.
     bgm_cues_map = job.get("bgm_cues") or {}
@@ -10654,15 +10669,13 @@ def api_bgm_cues(job_id, chapter_index):
             import bgm_cues as _bgm_cues_mod
             cues = _bgm_cues_mod._download_cues_from_r2(job_id, chapter_index)
         except Exception as e:
-            print(f"[{job_id}] BGM cues R2 fetch failed ch{chapter_index}: {e}")
+            print(f"[bgm-cues] {job_id}/{chapter_index}: R2 fetch failed: {e}")
             cues = None
 
     # 3. Self-heal: regenerate from transcript_cues if available.
     if not cues:
         try:
             import bgm_cues as _bgm_cues_mod
-            _tc = job.get("transcript_cues") or {}
-            _tc_list = _tc.get(chapter_index) or _tc.get(str(chapter_index)) or []
             if _tc_list:
                 _ch_mp3s = job.get("chapter_mp3s") or []
                 _ch_entry = None
@@ -10682,19 +10695,92 @@ def api_bgm_cues(job_id, chapter_index):
                     job_id, chapter_index, _ch_text, _tc_list, _ch_dur
                 )
                 if cues:
-                    # Stash in memory so subsequent requests skip the R2 round-trip.
                     if "bgm_cues" not in job:
                         job["bgm_cues"] = {}
                     job["bgm_cues"][chapter_index] = cues
+            else:
+                print(f"[bgm-cues] {job_id}/{chapter_index}: returning EMPTY (no transcript_cues for self-heal)")
         except Exception as e:
-            print(f"[{job_id}] BGM cues self-heal failed ch{chapter_index}: {e}")
+            print(f"[bgm-cues] {job_id}/{chapter_index}: self-heal failed: {e}")
             cues = None
 
+    print(f"[bgm-cues] {job_id}/{chapter_index}: returning {len(cues or [])} cues, bgm_mode={bgm_mode}")
     resp = jsonify({"cues": cues or [], "bgm_mode": bgm_mode})
-    # Cues are immutable once generated — cache aggressively (7 days).
     resp.headers["Cache-Control"] = "public, max-age=604800, immutable"
     resp.headers["Content-Type"] = "application/json"
     return resp
+
+
+@app.route("/api/bgm_debug/<job_id>/<int:chapter_index>")
+def api_bgm_debug(job_id, chapter_index):
+    """Diagnostic endpoint for BGM cue generation.
+
+    Returns JSON:
+      { bgm_mode, has_transcript_cues, word_count, r2_cached, cue_count,
+        first_3_cues, asset_files_present: { <mood>: bool } }
+
+    asset_files_present stats the real file for every mood in bgm_registry.
+    Used to diagnose why BGM isn't playing.
+    """
+    job, err, sc = _check_job_owner(job_id)
+    if err is not None:
+        return jsonify({"error": "Job not found"}), 404
+
+    if job_id not in jobs:
+        try:
+            job = _reconstruct_job_from_storj(job_id, fallback_record=job)
+        except Exception as e:
+            return jsonify({"error": f"Reconstruction failed: {e}"}), 500
+
+    bgm_mode = (job.get("bgm_mode") or "off").strip().lower()
+    _tc = job.get("transcript_cues") or {}
+    _tc_list = _tc.get(chapter_index) or _tc.get(str(chapter_index)) or []
+    word_count = len(_tc_list)
+
+    # Check R2 cache.
+    r2_cached = False
+    cue_count = 0
+    first_3_cues = []
+    try:
+        import bgm_cues as _bgm_cues_mod
+        cached = _bgm_cues_mod._download_cues_from_r2(job_id, chapter_index)
+        r2_cached = cached is not None
+        if cached:
+            cue_count = len(cached)
+            first_3_cues = cached[:3]
+    except Exception as e:
+        first_3_cues = [{"error": str(e)}]
+
+    # If not cached, try in-memory.
+    if cue_count == 0:
+        bgm_cues_map = job.get("bgm_cues") or {}
+        in_mem = bgm_cues_map.get(chapter_index) or bgm_cues_map.get(str(chapter_index))
+        if in_mem:
+            cue_count = len(in_mem)
+            first_3_cues = in_mem[:3]
+
+    # Stat asset files for every mood.
+    asset_files_present = {}
+    try:
+        from bgm_registry import MOODS, MUSIC_MOODS, asset_path_for
+        for mood in MUSIC_MOODS:
+            path = asset_path_for(mood)
+            asset_files_present[mood] = bool(path and os.path.isfile(path))
+    except ImportError:
+        asset_files_present = {"error": "bgm_registry not available"}
+
+    return jsonify({
+        "job_id": job_id,
+        "chapter_index": chapter_index,
+        "bgm_mode": bgm_mode,
+        "has_transcript_cues": bool(_tc_list),
+        "word_count": word_count,
+        "r2_cached": r2_cached,
+        "cue_count": cue_count,
+        "first_3_cues": first_3_cues,
+        "asset_files_present": asset_files_present,
+        "asset_dir": getattr(__import__("bgm_registry"), "ASSET_DIR", ""),
+    })
 
 
 @app.route("/api/reset_to_chapters/<job_id>", methods=["POST"])

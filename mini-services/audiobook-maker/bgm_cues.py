@@ -1,10 +1,9 @@
-"""BGM cue generation — AI-driven emotional segmentation of audiobook chapters.
+"""BGM cue generation — deterministic emotional segmentation of audiobook chapters.
 
-Given a chapter's word-level timings (from the Edge-TTS WordBoundary pipeline),
-this module asks an LLM to act as a "film-score supervisor" and segment the
-transcript into contiguous emotional beats, each tagged with a background-music
-mood. The word-index segments are then converted to absolute time cues and
-cached as gzipped JSON on R2 (one-time cost per chapter).
+The PRIMARY path is a heuristic scorer (``score_segments_heuristic``) that
+detects beats from word-timing gaps and scores each beat against a keyword
+lexicon. The LLM path is opt-in via ``ABM_BGM_USE_LLM=1`` and only used
+when explicitly enabled AND the shared LLM client is available.
 
 Pipeline::
 
@@ -13,10 +12,10 @@ Pipeline::
         ▼  normalize
     word_timings ([{w, t, d}, ...])  ← float seconds
         │
-        ▼  build indexed transcript  ([0]The [1]corridor ...)
-        │  (cap 3000 words / LLM call, split + offset for long chapters)
-        ▼  LLM (strict JSON schema, response_format=json_object)
-    raw segments [{start_word, end_word, mood, intensity}, ...]
+        ▼  score_segments_heuristic()   ← PRIMARY (deterministic, offline)
+    segments [{start_word, end_word, mood, intensity}, ...]
+        │
+        ▼  (optional) LLM override if ABM_BGM_USE_LLM=1 + client available
         │
         ▼  validate (drop unknown moods, clamp indices, sort, merge, force-fill)
     clean segments
@@ -27,12 +26,14 @@ Pipeline::
         ▼  gzip + upload to R2  (key: bgm/{job_id}/{chapter}.bgm.json.gz)
     cached forever
 
-Fail-soft: any error (LLM unavailable, bad JSON, missing timings) returns an
-empty list → the caller serves clean narration with no BGM.
+Fail-soft: any error returns an empty list → the caller serves clean
+narration with no BGM. Never writes an empty list to R2 (poisoned cache
+self-heals on next request).
 """
 
 import gzip
 import json
+import math
 import os
 import re
 import tempfile
@@ -41,9 +42,7 @@ import tempfile
 # Constants
 # ---------------------------------------------------------------------------
 
-# Maximum words per single LLM call. Longer chapters are split into chunks and
-# the resulting segments are offset-merged. Keeps the prompt well under the
-# model's context window and limits cost.
+# Maximum words per single LLM call (only used when ABM_BGM_USE_LLM=1).
 _MAX_WORDS_PER_CALL = 3000
 
 # Lead-in / crossfade durations (seconds). Applied during index→time conversion.
@@ -54,13 +53,65 @@ _CROSSFADE_SEC = 2.0    # every cue's end extends 2.0s — overlap = crossfade w
 _GAIN_BASE_DB = -26
 _GAIN_PER_INTENSITY = 2
 
-# Minimum segment length (words). Enforced in the prompt; segments shorter than
-# this after validation are merged into their neighbor.
+# Minimum segment length (words).
 _MIN_SEGMENT_WORDS = 25
+
+# Heuristic scorer constants.
+_BEAT_GAP_SEC = 0.45        # gap between words that starts a new beat
+_BEAT_MIN_WORDS = 25        # minimum words before a gap can split a beat
+_BEAT_MAX_WORDS = 400       # hard cap on beat length
+_SILENCE_FLOOR_PCT = 0.15   # at least 15% of words must be silence
+_QUOTE_DENSITY_THRESHOLD = 0.25  # > 25% quote marks → silence (intimate dialogue)
 
 # R2 key pattern for cached BGM cues.
 def _r2_key(job_id: str, chapter_index: int) -> str:
     return f"bgm/{job_id}/{chapter_index}.bgm.json.gz"
+
+
+# ---------------------------------------------------------------------------
+# Keyword lexicon for the heuristic scorer.
+# Matched by simple prefix/stem so "screamed" hits "scream".
+# ---------------------------------------------------------------------------
+
+_MOOD_KEYWORDS: dict[str, list[str]] = {
+    "dread": [
+        "dark", "blood", "corpse", "scream", "shadow", "terror", "cold",
+        "dead", "whisper", "grave", "fear", "alone", "howl", "rot", "bone",
+    ],
+    "tension_high": [
+        "gun", "sword", "strike", "blow", "shout", "burst", "crash",
+        "explode", "fight", "blade", "roar", "danger", "blood-curdling", "warn",
+    ],
+    "tension_low": [
+        "wait", "watch", "uneasy", "suspect", "hidden", "secret", "quiet",
+        "slow", "tense", "listen", "footstep", "doubt", "creep", "shiver",
+    ],
+    "action": [
+        "leap", "hurl", "slam", "charge", "fire", "dove", "smash", "race",
+        "seize", "hurtle", "run", "ran", "chase", "strike", "dash",
+    ],
+    "sorrow": [
+        "wept", "tear", "mourn", "loss", "died", "grief", "farewell",
+        "broken", "remember", "gone", "sorrow", "sigh", "lament",
+    ],
+    "wonder": [
+        "star", "vast", "beautiful", "gleam", "ancient", "dream", "light",
+        "golden", "sky", "marvel", "wonder", "sacred", "dawn", "endless",
+    ],
+    "resolve": [
+        "finally", "at last", "stood", "decide", "promise", "home",
+        "together", "peace", "ended", "vow", "return", "forgave",
+    ],
+    "calm_amb": [
+        "morning", "walk", "sat", "room", "table", "spoke", "said", "day",
+        "house", "road", "garden", "window",
+    ],
+}
+
+# Precompute a set of all keywords for quick "does any keyword match" checks.
+_ALL_KEYWORDS = set()
+for _kws in _MOOD_KEYWORDS.values():
+    _ALL_KEYWORDS.update(_kws)
 
 
 # ---------------------------------------------------------------------------
@@ -357,96 +408,293 @@ def _segments_to_time_cues(
 
 
 # ---------------------------------------------------------------------------
+# Deterministic heuristic scorer (PRIMARY path)
+# ---------------------------------------------------------------------------
+
+def _detect_beats(word_timings: list[dict]) -> list[tuple[int, int]]:
+    """Split word_timings into beats based on inter-word gaps.
+
+    A new beat starts when the gap between one word's end and the next word's
+    start exceeds ``_BEAT_GAP_SEC`` AND the current beat already has at least
+    ``_BEAT_MIN_WORDS`` words. Beats are hard-capped at ``_BEAT_MAX_WORDS``.
+
+    Returns a list of ``(start_idx, end_idx)`` tuples (inclusive indices into
+    ``word_timings``).
+    """
+    n = len(word_timings)
+    if n == 0:
+        return []
+    beats: list[tuple[int, int]] = []
+    beat_start = 0
+    for i in range(1, n):
+        prev_end = word_timings[i - 1]["t"] + word_timings[i - 1]["d"]
+        cur_start = word_timings[i]["t"]
+        gap = cur_start - prev_end
+        beat_len = i - beat_start
+        if (gap >= _BEAT_GAP_SEC and beat_len >= _BEAT_MIN_WORDS) or beat_len >= _BEAT_MAX_WORDS:
+            beats.append((beat_start, i - 1))
+            beat_start = i
+    beats.append((beat_start, n - 1))
+    return beats
+
+
+def _stem(word: str) -> str:
+    """Crude stemmer: lowercase + strip common suffixes so 'screamed' → 'scream'.
+    Not a real NLP stemmer — just good enough for keyword matching.
+    """
+    w = word.lower().strip(".,!?;:\"'()[]—–-")
+    if len(w) <= 3:
+        return w
+    for suffix in ("ing", "ed", "es", "s", "ly", "d"):
+        if w.endswith(suffix) and len(w) > len(suffix) + 2:
+            return w[: -len(suffix)]
+    return w
+
+
+def _count_sentence_endings(words: list[str]) -> tuple[int, int]:
+    """Count sentence-ending punctuation and exclamation/question marks.
+    Returns (total_sentence_endings, exclam_count + question_count).
+    """
+    sent_end = 0
+    excl_q = 0
+    for w in words:
+        if w.endswith(".") or w.endswith("!") or w.endswith("?"):
+            sent_end += 1
+            if w.endswith("!") or w.endswith("?"):
+                excl_q += 1
+    return sent_end, excl_q
+
+
+def _quote_density(words: list[str]) -> float:
+    """Fraction of words that contain a quote mark (" or ').
+    High density → intimate dialogue → assign silence.
+    """
+    if not words:
+        return 0.0
+    q = sum(1 for w in words if '"' in w or "'" in w)
+    return q / len(words)
+
+
+def _score_beat(beat_words: list[str]) -> tuple[str, int, dict[str, int]]:
+    """Score a beat's words against the keyword lexicon.
+
+    Returns ``(mood, intensity, scores)`` where ``scores`` is the per-mood
+    score dict (for intensity margin calculation).
+    """
+    stems = [_stem(w) for w in beat_words]
+    n = len(stems)
+    if n == 0:
+        return "calm_amb", 2, {}
+
+    # Count keyword hits per mood.
+    scores: dict[str, int] = {m: 0 for m in _MOOD_KEYWORDS}
+    for s in stems:
+        for mood, keywords in _MOOD_KEYWORDS.items():
+            for kw in keywords:
+                kw_stem = _stem(kw)
+                # Match by prefix so "screamed" → "scream" hits "scream".
+                if s == kw_stem or s.startswith(kw_stem) or kw_stem.startswith(s):
+                    if len(s) >= 3 and len(kw_stem) >= 3:
+                        scores[mood] += 1
+                        break
+
+    # Punctuation density modifiers.
+    _, excl_q = _count_sentence_endings(beat_words)
+    excl_q_pct = excl_q / n if n > 0 else 0
+    if excl_q_pct > 0.03:
+        scores["tension_high"] += 2
+        scores["action"] += 2
+
+    # Sentence length modifiers (approximate: split on . ! ?).
+    sent_words: list[list[str]] = []
+    cur: list[str] = []
+    for w in beat_words:
+        cur.append(w)
+        if w.endswith(".") or w.endswith("!") or w.endswith("?"):
+            sent_words.append(cur)
+            cur = []
+    if cur:
+        sent_words.append(cur)
+    avg_sent_len = sum(len(s) for s in sent_words) / len(sent_words) if sent_words else n
+    if avg_sent_len < 9:
+        scores["action"] += 1
+    if avg_sent_len > 22:
+        scores["calm_amb"] += 1
+        scores["wonder"] += 1
+
+    # Find winner.
+    winner_mood = "calm_amb"
+    winner_score = 0
+    runner_up = 0
+    sorted_scores = sorted(scores.items(), key=lambda x: -x[1])
+    if sorted_scores and sorted_scores[0][1] > 0:
+        winner_mood = sorted_scores[0][0]
+        winner_score = sorted_scores[0][1]
+        runner_up = sorted_scores[1][1] if len(sorted_scores) > 1 else 0
+
+    # Silence override: high quote density or zero score.
+    if winner_score == 0 or _quote_density(beat_words) > _QUOTE_DENSITY_THRESHOLD:
+        return "silence", 1, scores
+
+    # Intensity from margin: margin 0 → 2, margin >= 6 → 5.
+    margin = winner_score - runner_up
+    intensity = max(1, min(5, 2 + int(margin)))
+    return winner_mood, intensity, scores
+
+
+def score_segments_heuristic(word_timings: list[dict]) -> list[dict]:
+    """Deterministic mood segmentation — the PRIMARY cue generator.
+
+    Replaces the LLM with a heuristic that:
+      1. Detects beats from word-timing gaps (> 0.45s gap + >= 25 words).
+      2. Scores each beat against a keyword lexicon (8 moods).
+      3. Applies punctuation/sentence-length modifiers.
+      4. Selects the winning mood (silence for dialogue-heavy or zero-score beats).
+      5. Scales intensity from the winner's margin over the runner-up.
+      6. Post-pass: merges adjacent same-mood beats, enforces a 15% silence
+         floor, guarantees contiguous coverage of 0..word_count-1.
+
+    Returns word-index segments: ``[{start_word, end_word, mood, intensity}, ...]``.
+    """
+    n = len(word_timings)
+    if n == 0:
+        return []
+
+    # Step 1 — beat detection.
+    beats = _detect_beats(word_timings)
+
+    # Steps 2-4 — score each beat.
+    segments: list[dict] = []
+    for start_idx, end_idx in beats:
+        beat_words = [word_timings[j]["w"] for j in range(start_idx, end_idx + 1)]
+        mood, intensity, _ = _score_beat(beat_words)
+        segments.append({
+            "start_word": start_idx,
+            "end_word": end_idx,
+            "mood": mood,
+            "intensity": intensity,
+        })
+
+    # Step 5a — merge adjacent same-mood beats.
+    merged: list[dict] = []
+    for seg in segments:
+        if merged and seg["mood"] == merged[-1]["mood"]:
+            merged[-1]["end_word"] = seg["end_word"]
+            merged[-1]["intensity"] = max(merged[-1]["intensity"], seg["intensity"])
+        else:
+            merged.append(dict(seg))
+
+    # Step 5b — enforce 15% silence floor.
+    total_words = n
+    silence_words = sum(s["end_word"] - s["start_word"] + 1 for s in merged if s["mood"] == "silence")
+    if total_words > 0 and silence_words < total_words * _SILENCE_FLOOR_PCT:
+        deficit = int(total_words * _SILENCE_FLOOR_PCT) - silence_words
+        # Convert the lowest-scoring non-silence beats to silence.
+        # (We approximate "lowest-scoring" by shortest non-silence beats.)
+        non_silence = [s for s in merged if s["mood"] != "silence"]
+        non_silence.sort(key=lambda s: s["end_word"] - s["start_word"] + 1)
+        for s in non_silence:
+            if deficit <= 0:
+                break
+            w = s["end_word"] - s["start_word"] + 1
+            s["mood"] = "silence"
+            s["intensity"] = 1
+            deficit -= w
+        # Re-merge after conversion.
+        re_merged: list[dict] = []
+        for seg in merged:
+            if re_merged and seg["mood"] == re_merged[-1]["mood"]:
+                re_merged[-1]["end_word"] = seg["end_word"]
+                re_merged[-1]["intensity"] = max(re_merged[-1]["intensity"], seg["intensity"])
+            else:
+                re_merged.append(dict(seg))
+        merged = re_merged
+
+    # Step 5c — guarantee contiguous coverage of 0..n-1.
+    if not merged:
+        return [{"start_word": 0, "end_word": n - 1, "mood": "silence", "intensity": 1}]
+    merged[0]["start_word"] = 0
+    merged[-1]["end_word"] = n - 1
+    # Force-fill any internal gaps with the previous segment's mood.
+    for i in range(len(merged) - 1):
+        if merged[i]["end_word"] < merged[i + 1]["start_word"] - 1:
+            merged[i]["end_word"] = merged[i + 1]["start_word"] - 1
+    # Final re-merge after gap-filling.
+    final: list[dict] = [merged[0]]
+    for seg in merged[1:]:
+        if seg["mood"] == final[-1]["mood"] and seg["start_word"] <= final[-1]["end_word"] + 1:
+            final[-1]["end_word"] = max(final[-1]["end_word"], seg["end_word"])
+            final[-1]["intensity"] = max(final[-1]["intensity"], seg["intensity"])
+        else:
+            final.append(seg)
+    return final
+
+
+# ---------------------------------------------------------------------------
 # Public API: generate_bgm_cues (returns word-index segments)
 # ---------------------------------------------------------------------------
 
 def generate_bgm_cues(chapter_text: str, word_timings: list) -> list[dict]:
     """Generate word-index BGM segments for a chapter.
 
+    The PRIMARY path is the deterministic heuristic scorer
+    (``score_segments_heuristic``). The LLM path is opt-in via
+    ``ABM_BGM_USE_LLM=1`` AND requires the shared LLM client to be available.
+    On any LLM failure, the heuristic segments are kept silently.
+
     Args:
-        chapter_text: Raw chapter text (unused for indexing — the indexed
+        chapter_text: Raw chapter text (unused by the heuristic — the indexed
             transcript is built from ``word_timings`` to guarantee alignment).
-            Kept in the signature per the spec for future context enrichment.
         word_timings: Either ``[[startMs, endMs, word], ...]`` (the on-wire
             ``transcript_cues`` format) or ``[{w, t, d}, ...]`` (float seconds).
 
     Returns:
         List of ``{"start_word": int, "end_word": int, "mood": str, "intensity": int}``
-        dicts covering the full chapter contiguously. Returns ``[]`` on any failure.
+        dicts covering the full chapter contiguously. Never returns ``[]`` when
+        word timings exist.
     """
     try:
         from bgm_registry import MOODS
         valid_moods = frozenset(MOODS)
-        moods_csv = ", ".join(MOODS)
     except ImportError:
         return []
 
     wt = _normalize_word_timings(word_timings)
-    if len(wt) < _MIN_SEGMENT_WORDS:
-        # Too short for meaningful segmentation — single silence cue.
-        return [{"start_word": 0, "end_word": max(0, len(wt) - 1), "mood": "silence", "intensity": 1}]
-
     word_count = len(wt)
-    all_segments: list[dict] = []
+    if word_count == 0:
+        return []
+    if word_count < _MIN_SEGMENT_WORDS:
+        # Too short for beat detection — single silence cue.
+        return [{"start_word": 0, "end_word": word_count - 1, "mood": "silence", "intensity": 1}]
 
-    # Split long chapters into chunks ≤ _MAX_WORDS_PER_CALL, offsetting indices.
-    _llm_used = False
-    for chunk_start in range(0, word_count, _MAX_WORDS_PER_CALL):
-        chunk_end = min(chunk_start + _MAX_WORDS_PER_CALL, word_count)
-        chunk_wt = wt[chunk_start:chunk_end]
-        indexed = _build_indexed_transcript(chunk_wt, offset=chunk_start)
-        raw = _call_llm_for_segments(indexed, moods_csv)
-        if raw is None:
-            # LLM failed for this chunk — use deterministic fallback so the
-            # user still hears music (not silence). The fallback segments the
-            # chunk into mood zones based on position: calm → wonder → tension
-            # → resolve, with a silence interlude in the middle.
-            all_segments.extend(_deterministic_fallback_segments(chunk_start, chunk_end - 1))
-        else:
-            _llm_used = True
-            all_segments.extend(raw)
+    # PRIMARY: deterministic heuristic scorer.
+    segments = score_segments_heuristic(wt)
 
-    if not _llm_used:
-        print(f"[bgm-cues] LLM unavailable — used deterministic fallback ({word_count} words)")
+    # OPTIONAL: LLM override (only if explicitly enabled + client available).
+    if os.environ.get("ABM_BGM_USE_LLM") == "1":
+        try:
+            import generation_engine as ge
+            client = getattr(ge, "_llm_client", None)
+            if client is not None:
+                moods_csv = ", ".join(MOODS)
+                llm_segments: list[dict] = []
+                for chunk_start in range(0, word_count, _MAX_WORDS_PER_CALL):
+                    chunk_end = min(chunk_start + _MAX_WORDS_PER_CALL, word_count)
+                    chunk_wt = wt[chunk_start:chunk_end]
+                    indexed = _build_indexed_transcript(chunk_wt, offset=chunk_start)
+                    raw = _call_llm_for_segments(indexed, moods_csv)
+                    if raw is not None:
+                        llm_segments.extend(raw)
+                # Only override if the LLM produced valid segments.
+                if llm_segments:
+                    validated = _validate_segments(llm_segments, word_count, valid_moods)
+                    if validated:
+                        print(f"[bgm-cues] LLM override used ({word_count} words, {len(validated)} segments)")
+                        return validated
+        except Exception as e:
+            print(f"[bgm-cues] LLM override failed (keeping heuristic): {e}")
 
-    return _validate_segments(all_segments, word_count, valid_moods)
-
-
-def _deterministic_fallback_segments(start_word: int, end_word: int) -> list[dict]:
-    """Deterministic mood assignment when the LLM is unavailable.
-
-    Segments the word range into 5 mood zones with a silence interlude,
-    so the user hears real music instead of silence:
-      0-20%  : calm_amb (intro / scene-setting)
-      20-40% : wonder   (development / curiosity)
-      40-50% : silence  (reflective interlude — satisfies the 15% silence rule)
-      50-75% : tension_low (rising action)
-      75-100%: resolve  (resolution / denouement)
-
-    Each segment is ≥25 words (enforced by the _MIN_SEGMENT_WORDS check in
-    the caller). Intensity is set to 3 (mid) for all zones.
-    """
-    span = end_word - start_word + 1
-    if span <= 0:
-        return [{"start_word": start_word, "end_word": end_word, "mood": "silence", "intensity": 1}]
-    zones = [
-        (0.0, 0.20, "calm_amb", 3),
-        (0.20, 0.40, "wonder", 3),
-        (0.40, 0.50, "silence", 1),
-        (0.50, 0.75, "tension_low", 3),
-        (0.75, 1.0, "resolve", 3),
-    ]
-    out: list[dict] = []
-    for frac_start, frac_end, mood, intensity in zones:
-        ws = start_word + int(frac_start * span)
-        we = start_word + int(frac_end * span) - 1
-        if we < ws:
-            we = ws
-        out.append({"start_word": ws, "end_word": we, "mood": mood, "intensity": intensity})
-    # Ensure the last segment covers through end_word exactly.
-    if out:
-        out[-1]["end_word"] = end_word
-    return out
+    return _validate_segments(segments, word_count, valid_moods)
 
 
 # ---------------------------------------------------------------------------
@@ -529,9 +777,12 @@ def get_or_create_bgm_cues(
 ) -> list[dict]:
     """Get cached BGM cues from R2, or generate + cache them.
 
-    This is the main entry point called by the generation engine (prerender)
-    and the Flask endpoint (runtime). Aggressive caching — regeneration is a
-    one-time cost per chapter.
+    Diagnostic logging: prints one of "cache hit (n cues)" / "cache miss" /
+    "generated n cues" / "returning EMPTY: <reason>" for every call.
+
+    Self-healing: a cached EMPTY list is treated as a cache MISS so poisoned
+    cache entries self-heal on the next request. Never writes an empty list
+    to R2.
 
     Args:
         job_id: Job UUID.
@@ -544,22 +795,38 @@ def get_or_create_bgm_cues(
         List of ``{"start": float, "end": float, "mood": str, "gain_db": float}``
         time cues. Empty list on any failure (fail-soft → no BGM).
     """
+    tag = f"[bgm-cues] {job_id}/{chapter_index}:"
+
     # 1. Check R2 cache first.
     cached = _download_cues_from_r2(job_id, chapter_index)
-    if cached is not None:
+    if cached is not None and len(cached) > 0:
+        print(f"{tag} cache hit ({len(cached)} cues)")
         return cached
+    if cached is not None and len(cached) == 0:
+        # Poisoned cache entry — treat as MISS so it self-heals.
+        print(f"{tag} cache miss (cached empty list ignored — self-healing)")
+        cached = None
+    else:
+        print(f"{tag} cache miss")
 
     # 2. Not cached — generate.
     if not transcript_cues:
+        print(f"{tag} returning EMPTY: no transcript_cues")
         return []
     try:
         segments = generate_bgm_cues(chapter_text, transcript_cues)
+        if not segments:
+            print(f"{tag} returning EMPTY: generate_bgm_cues returned no segments")
+            return []
         cues = _segments_to_time_cues(segments, _normalize_word_timings(transcript_cues), chapter_duration_sec)
+        if not cues:
+            print(f"{tag} returning EMPTY: _segments_to_time_cues produced no cues")
+            return []
+        print(f"{tag} generated {len(cues)} cues")
     except Exception as e:
-        print(f"[bgm-cues] generation failed for {job_id}/{chapter_index}: {e}")
+        print(f"{tag} returning EMPTY: generation failed: {e}")
         return []
 
-    # 3. Cache (best-effort — don't fail if R2 is unavailable).
-    if cues:
-        _upload_cues_to_r2(job_id, chapter_index, cues)
+    # 3. Cache (best-effort — never write an empty list, never fail on R2).
+    _upload_cues_to_r2(job_id, chapter_index, cues)
     return cues
