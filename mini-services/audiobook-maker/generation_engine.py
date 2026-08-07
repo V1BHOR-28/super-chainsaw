@@ -1459,6 +1459,10 @@ def _create_download_token(job_id):
         # ARIA: last_status — so startup recovery can detect jobs that were
         # "generating" when the worker died and mark them "interrupted".
         "last_status": job.get("status", ""),
+        # ARIA: bgm_mode + bgm_cues — so /api/my_jobs can report the correct
+        # mode and the runtime BGM endpoint can serve cached cues after a restart.
+        "bgm_mode": job.get("bgm_mode", "off"),
+        "bgm_cues": job.get("bgm_cues", {}) or {},
     }
     # Riusa un token gia' esistente per lo stesso job (idempotenza), MA aggiorna
     # i campi snapshot con i valori correnti del job in memoria. Senza questo

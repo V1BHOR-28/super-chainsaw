@@ -11038,6 +11038,9 @@ def api_my_jobs():
             # monogram fallback. Checks cover_s3_key too so restored jobs
             # (after Render restart) still advertise their cover.
             "has_cover": bool(job.get("cover_thumb") or job.get("cover_s3_key")),
+            # ARIA: bgm_mode so the frontend knows whether to fetch BGM cues
+            # (runtime) or play pre-mixed audio (prerender) or skip BGM (off).
+            "bgm_mode": job.get("bgm_mode", "off"),
         }
         if _is_admin_pending:
             entry["admin_copy"] = True
@@ -11133,6 +11136,9 @@ def api_my_jobs():
             # ARIA: has_cover from the token snapshot — check cover_s3_key too
             # so restored jobs (after Render restart) still advertise their cover.
             "has_cover": bool(tinfo.get("has_cover", False) or tinfo.get("cover_s3_key", "")),
+            # ARIA: bgm_mode from the token snapshot so restored jobs know
+            # whether to fetch BGM cues (runtime) after a restart.
+            "bgm_mode": tinfo.get("bgm_mode", "off"),
         })
         # ARIA: only use the token's chapter_mp3s if the in-memory job didn't
         # already provide them. The in-memory job's chapter_mp3s are always

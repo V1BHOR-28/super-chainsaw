@@ -390,23 +390,63 @@ def generate_bgm_cues(chapter_text: str, word_timings: list) -> list[dict]:
     all_segments: list[dict] = []
 
     # Split long chapters into chunks ≤ _MAX_WORDS_PER_CALL, offsetting indices.
+    _llm_used = False
     for chunk_start in range(0, word_count, _MAX_WORDS_PER_CALL):
         chunk_end = min(chunk_start + _MAX_WORDS_PER_CALL, word_count)
         chunk_wt = wt[chunk_start:chunk_end]
         indexed = _build_indexed_transcript(chunk_wt, offset=chunk_start)
         raw = _call_llm_for_segments(indexed, moods_csv)
         if raw is None:
-            # LLM failed for this chunk — fill with silence.
-            all_segments.append({
-                "start_word": chunk_start,
-                "end_word": chunk_end - 1,
-                "mood": "silence",
-                "intensity": 1,
-            })
+            # LLM failed for this chunk — use deterministic fallback so the
+            # user still hears music (not silence). The fallback segments the
+            # chunk into mood zones based on position: calm → wonder → tension
+            # → resolve, with a silence interlude in the middle.
+            all_segments.extend(_deterministic_fallback_segments(chunk_start, chunk_end - 1))
         else:
+            _llm_used = True
             all_segments.extend(raw)
 
+    if not _llm_used:
+        print(f"[bgm-cues] LLM unavailable — used deterministic fallback ({word_count} words)")
+
     return _validate_segments(all_segments, word_count, valid_moods)
+
+
+def _deterministic_fallback_segments(start_word: int, end_word: int) -> list[dict]:
+    """Deterministic mood assignment when the LLM is unavailable.
+
+    Segments the word range into 5 mood zones with a silence interlude,
+    so the user hears real music instead of silence:
+      0-20%  : calm_amb (intro / scene-setting)
+      20-40% : wonder   (development / curiosity)
+      40-50% : silence  (reflective interlude — satisfies the 15% silence rule)
+      50-75% : tension_low (rising action)
+      75-100%: resolve  (resolution / denouement)
+
+    Each segment is ≥25 words (enforced by the _MIN_SEGMENT_WORDS check in
+    the caller). Intensity is set to 3 (mid) for all zones.
+    """
+    span = end_word - start_word + 1
+    if span <= 0:
+        return [{"start_word": start_word, "end_word": end_word, "mood": "silence", "intensity": 1}]
+    zones = [
+        (0.0, 0.20, "calm_amb", 3),
+        (0.20, 0.40, "wonder", 3),
+        (0.40, 0.50, "silence", 1),
+        (0.50, 0.75, "tension_low", 3),
+        (0.75, 1.0, "resolve", 3),
+    ]
+    out: list[dict] = []
+    for frac_start, frac_end, mood, intensity in zones:
+        ws = start_word + int(frac_start * span)
+        we = start_word + int(frac_end * span) - 1
+        if we < ws:
+            we = ws
+        out.append({"start_word": ws, "end_word": we, "mood": mood, "intensity": intensity})
+    # Ensure the last segment covers through end_word exactly.
+    if out:
+        out[-1]["end_word"] = end_word
+    return out
 
 
 # ---------------------------------------------------------------------------
