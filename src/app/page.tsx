@@ -56,19 +56,11 @@ export default function HomePage() {
     // never flip back to 'needs-onboarding' even if the session is stale.
     // This prevents the onboarding loop where updateSession() returns a
     // session with onboarded=false before the JWT cookie refreshes.
+    // Also: do NOT call setUser here — onboarding-screen.tsx already set
+    // the correct user object (with the name the user just entered). The
+    // stale session may still have the old/empty name, and overriding
+    // would show "Hello Vibhor" (the admin's name from the stale JWT).
     if (onboardingCompletedRef.current) {
-      // Still update user info from the session, but don't touch authState.
-      const userEmail = session.user.email || ''
-      const userName = session.user.name || ''
-      const userImage = (session.user as { image?: string | null }).image || null
-      const userId = (session.user as { id?: string }).id || ''
-      setUser({
-        id: userId,
-        email: userEmail,
-        name: userName,
-        image: userImage,
-        tier: 'Free',
-      } as any)
       return
     }
 
@@ -101,17 +93,29 @@ export default function HomePage() {
   // to the NextAuth session. Without this, a new user on the same browser
   // inherits the previous user's Flask client ID and sees their audiobook
   // library (e.g. admin's "Pride and Prejudice" test book). When the
-  // authenticated user's ID changes, delete the abm_cid cookie so the Flask
-  // backend issues a fresh one on the next request.
+  // authenticated user's ID changes, OR when a user logs in for the first
+  // time on this browser, delete the abm_cid cookie so the Flask backend
+  // issues a fresh one on the next request.
+  // Strategy: store the last-seen userId in localStorage (survives page
+  // reloads). If the current session's userId differs from the stored one,
+  // clear the cookie and update the stored userId.
   const prevUserIdRef = useRef<string | null>(null)
   useEffect(() => {
-    if (typeof document === 'undefined') return
+    if (typeof document === 'undefined' || typeof window === 'undefined') return
     const currentUserId = (session?.user as { id?: string } | undefined)?.id || null
-    if (currentUserId && prevUserIdRef.current && prevUserIdRef.current !== currentUserId) {
-      // User changed — clear the abm_cid cookie so Flask issues a fresh one.
+    if (!currentUserId) return
+
+    // Check localStorage for the last-seen userId (survives reloads).
+    const storedUserId = localStorage.getItem('aria-last-user-id')
+
+    if (storedUserId !== currentUserId) {
+      // User changed (or first login on this browser) — clear the abm_cid
+      // cookie so Flask issues a fresh one scoped to this new user.
       document.cookie = 'abm_cid=; expires=Thu, 01 Jan 1970 00:00:00 UTC; path=/;'
+      localStorage.setItem('aria-last-user-id', currentUserId)
     }
-    if (currentUserId) prevUserIdRef.current = currentUserId
+
+    prevUserIdRef.current = currentUserId
   }, [session])
 
   // ─── App data bootstrap (only when authenticated + onboarded) ───

@@ -388,6 +388,9 @@ export function Sidebar() {
                   // NextAuth's built-in redirect can fail on z.ai preview domains
                   // when NEXTAUTH_URL isn't set.
                   const { signOut } = await import('next-auth/react')
+                  // Clear the stored user ID so the next login is treated as
+                  // a fresh user (clears the abm_cid cookie via page.tsx).
+                  try { localStorage.removeItem('aria-last-user-id') } catch { /* */ }
                   const result = await signOut({ redirect: false, callbackUrl: '/' })
                   // Manually redirect to the landing page
                   if (result?.url) {

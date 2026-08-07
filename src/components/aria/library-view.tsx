@@ -190,20 +190,26 @@ export function LibraryView() {
     }
   }, [deletedIds]);
 
-  // Clear cards when the user changes (login/logout/switch) so stale
-  // localStorage from a previous user doesn't flash before the API responds.
+  // Clear cards and re-trigger fetch when the user changes (login/logout/switch)
+  // so stale localStorage from a previous user doesn't flash before the API responds.
+  // Also reset loading=true so the user sees the loading indicator (not the
+  // empty "No audiobooks yet" state) while the fresh fetch is in flight.
   useEffect(() => {
     setCards([]);
     setDeletedIds(new Set());
+    setLoading(true);
+    setError(null);
+    setWakingUp(false);
   }, [userId]);
 
   // One-time migration: remove old unscoped localStorage keys so admin's
   // library doesn't leak to new users on browsers that had the old format.
+  // This runs on every mount (not gated) so it cleans up even if the
+  // migration flag was set in a previous session but old keys reappeared.
   useEffect(() => {
     if (typeof window === "undefined") return;
     try {
-      // Only run once per browser.
-      if (localStorage.getItem("aria-audiobook-migrated") === "v2") return;
+      // Always remove old unscoped keys — they should never be used again.
       localStorage.removeItem("aria-audiobook-library");
       localStorage.removeItem("aria-audiobook-deleted");
       localStorage.setItem("aria-audiobook-migrated", "v2");
@@ -331,8 +337,10 @@ export function LibraryView() {
 
   useEffect(() => {
     // Initial fetch with cold-start retry logic.
+    // Re-runs when userId changes (login/logout/switch) so the new user's
+    // library is fetched fresh.
     fetchJobsWithRetry(true).finally(() => setLoading(false));
-  }, [fetchJobsWithRetry]);
+  }, [fetchJobsWithRetry, userId]);
 
   // Poll while any job is still generating / optimizing / translating.
   // Also send heartbeats to keep generating jobs alive (the Flask app cancels
