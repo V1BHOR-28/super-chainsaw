@@ -213,7 +213,11 @@ MIN_REPEAT_FOR_HEADER = 3  # minimo ripetizioni per considerare una riga header/
 # scarta più del 5% — la si considera inaffidabile (tipicamente un titolo non
 # riconosciuto fa collassare intere sezioni in un unico capitolo, perdendo tutto
 # il testo che le precede) e si passa alla strategia successiva.
-MIN_TITLE_STRATEGY_COVERAGE = 0.95
+# Lowered from 0.95 to 0.50: real-world PDFs (especially from Archive.org /
+# Project Gutenberg) often have front matter, copyright pages, and indexes that
+# aren't captured by heading detection. The 0.95 threshold was discarding valid
+# chapter detection just because it missed 5% of non-narrative text.
+MIN_TITLE_STRATEGY_COVERAGE = 0.50
 
 # ── Rilevamento suddivisioni per pattern testuale ──
 # Definito una sola volta in epub_to_tts (modulo base condiviso) per evitare
@@ -382,7 +386,11 @@ def _extract_page_text_filtered(page: fitz.Page, body_font_size: float,
             continue
 
         # ── Filtro: posizione header/footer con testo corto ──
-        if len(block_text) < 80:
+        # BUT: don't filter chapter headings (e.g. "CHAPTER II", "Chapter 3")
+        # even if they're short and at the top of the page — they're not headers,
+        # they're content. This was causing chapter headings to be stripped on
+        # every page, collapsing the whole book into a single chapter.
+        if len(block_text) < 80 and not _line_is_chapter_marker(block_text):
             if bbox[1] < header_y or bbox[3] > footer_y:
                 # Probabilmente header o footer
                 continue
@@ -497,15 +505,21 @@ def _clean_pdf_text(text: str) -> str:
 
 
 def _is_non_content_section(title: str, text: str) -> bool:
-    """Determina se una sezione PDF è non-contenuto (indice, bibliografia, ecc.)."""
+    """Determina se una sezione PDF è non-contenuto (indice, bibliografia, ecc.).
+
+    Uses lenient=True for the content check because PDF text extraction can
+    be lossy (line breaks create artificial paragraph splits, reducing word
+    counts per chapter). A chapter with 15 words is likely real content that
+    was just poorly extracted — we'd rather keep it than lose it.
+    """
     # Match per parola intera (vedi epub_to_tts._title_is_non_content): evita
     # falsi positivi su token corti ("note" in "notevole", "toc" in
     # "autocrazia"). NON_CONTENT_TITLES include "目录" (sommario cinese).
     if _title_is_non_content(title, NON_CONTENT_TITLES):
         return True
 
-    # Euristica content-based
-    if not is_content_chapter(text, title):
+    # Euristica content-based — lenient for PDFs (extraction is lossy)
+    if not is_content_chapter(text, title, lenient=True):
         return True
 
     return False
@@ -917,6 +931,9 @@ def _build_chapters_from_raw(raw_chapters: list, pdf_path: str) -> list:
     """Pulisce e filtra i capitoli grezzi, restituendo una lista di Chapter.
 
     Applica pulizia PDF, pulizia TTS e filtra le sezioni non-contenuto.
+    Per PDF: se un capitolo ha un titolo riconosciuto (es. "CHAPTER I"),
+    salta il controllo word-count — l'estrazione PDF può perdere testo
+    (a-capo, colonne) e un titolo valido è segnale forte di contenuto reale.
     """
     chapters = []
     chapter_index = 0
@@ -927,13 +944,24 @@ def _build_chapters_from_raw(raw_chapters: list, pdf_path: str) -> list:
         # Pulizia generica TTS (condivisa con epub_to_tts)
         cleaned = clean_text_for_tts(cleaned)
 
-        # Filtro contenuto
-        if _is_non_content_section(title, cleaned):
+        # Filtro contenuto: salta per capitoli con titolo riconosciuto
+        # (chapter heading). L'estrazione PDF può perdere testo, ma un
+        # titolo come "CHAPTER I" è segnale forte di contenuto reale.
+        has_heading = bool(title.strip()) and _line_is_chapter_marker(title.strip())
+        if not has_heading:
+            if _is_non_content_section(title, cleaned):
+                continue
+        else:
+            # Even with a heading, skip if the title itself is non-content
+            # (e.g. "Index", "Bibliography")
+            if _title_is_non_content(title, NON_CONTENT_TITLES):
+                continue
+
+        # Skip empty chapters
+        if not cleaned.strip():
             continue
 
         chapter_index += 1
-        # Fallback per capitoli senza titolo (es. testo che precede il primo
-        # heading riconosciuto): etichetta generica in inglese.
         chapter_title = title.strip() or f"Chapter {chapter_index}"
         chapter = Chapter(
             index=chapter_index,
@@ -956,6 +984,69 @@ def _extract_full_text(doc: fitz.Document, body_font_size: float,
         if page_text:
             all_text_parts.append(page_text)
     return "\n\n".join(all_text_parts)
+
+
+def _split_by_chapter_regex(full_text: str) -> list:
+    """Split full text on 'Chapter X' / 'CHAPTER X' / 'CHAPTER I' patterns.
+
+    This is a fallback for PDFs where chapter headings have the same font size
+    as body text (common in plain-text-derived PDFs). It scans the full text
+    line-by-line and splits whenever it finds a line that looks like a chapter
+    heading (e.g. "Chapter 1", "CHAPTER III", "Chapter Two — The Garden").
+
+    Returns a list of (title, text) tuples.
+    """
+    if not full_text or not full_text.strip():
+        return []
+
+    # Regex: matches "Chapter 1", "CHAPTER III", "Chapter Two", "Chapter 12: Title"
+    # Also matches "Prologue", "Epilogue", "Introduction", "Foreword", "Preface"
+    _WORD_NUM = (
+        r"(?:One|Two|Three|Four|Five|Six|Seven|Eight|Nine|Ten|"
+        r"Eleven|Twelve|Thirteen|Fourteen|Fifteen|Sixteen|Seventeen|"
+        r"Eighteen|Nineteen|Twenty|First|Second|Third|Fourth|Fifth|"
+        r"Sixth|Seventh|Eighth|Ninth|Tenth)"
+    )
+    chapter_re = re.compile(
+        r"^\s*("
+        r"(?:CHAPTER|Chapter|chapter)\s+"
+        r"(?:\d+|[IVXLCDM]+|" + _WORD_NUM + r")"
+        r"(?:\s*[:.\-—–]\s*.*)?"
+        r"|PROLOGUE|EPILOGUE|INTRODUCTION|FOREWORD|PREFACE"
+        r")\s*$",
+        re.IGNORECASE | re.MULTILINE,
+    )
+
+    lines = full_text.split("\n")
+    chapters = []
+    current_title = ""
+    current_lines = []
+
+    for line in lines:
+        stripped = line.strip()
+        if chapter_re.match(stripped):
+            # Save previous chapter
+            if current_lines:
+                text = "\n".join(current_lines).strip()
+                if text:
+                    chapters.append((current_title or "Introduction", text))
+            current_title = stripped
+            current_lines = []
+        else:
+            current_lines.append(line)
+
+    # Don't forget the last chapter
+    if current_lines:
+        text = "\n".join(current_lines).strip()
+        if text:
+            chapters.append((current_title or "Introduction", text))
+
+    # Also handle text before the first chapter heading
+    if chapters and chapters[0][0] == "Introduction" and not current_title:
+        # There was pre-chapter text — keep it as the intro
+        pass
+
+    return chapters if len(chapters) > 1 else []
 
 
 def parse_pdf(pdf_path: str) -> BookInfo:
@@ -1022,8 +1113,15 @@ def parse_pdf(pdf_path: str) -> BookInfo:
     if raw:
         strategies.append(("indice visuale", raw))
 
-    # Strategia 4: fallback — tutto il documento come singolo capitolo
+    # Strategia 4: regex fallback — split full text on "Chapter X" / "CHAPTER X"
+    # patterns. This catches PDFs where chapter headings have the same font size
+    # as body text (common in plain-text-derived PDFs from Archive.org / Gutenberg).
     full_text = _extract_full_text(doc, body_font_size, repeated_headers)
+    raw = _split_by_chapter_regex(full_text)
+    if raw and len(raw) > 1:
+        strategies.append(("regex chapter split", raw))
+
+    # Strategia 5: fallback — tutto il documento come singolo capitolo
     if full_text.strip():
         strategies.append(("documento singolo", [(info.title, full_text)]))
 
