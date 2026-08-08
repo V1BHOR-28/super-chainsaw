@@ -607,7 +607,7 @@ export function LibraryView() {
             </div>
             <div className="flex items-center gap-3">
               <p className="text-sm text-[var(--aria-fg-muted)] max-w-xs hidden sm:block">
-                Upload an EPUB and ARIA narrates it — free, fast,
+                Upload an EPUB or PDF and ARIA narrates it — free, fast,
                 and yours to keep.
               </p>
               <input
@@ -699,7 +699,7 @@ export function LibraryView() {
             </p>
             <p className="text-xs mt-2" style={{ color: "var(--aria-fg-dim)" }}>
               Click <span className="font-medium">Upload book</span> above to pick an
-              EPUB — ARIA will analyze it and let you choose which chapters to narrate.
+              EPUB or PDF — ARIA will analyze it and let you choose which chapters to narrate.
             </p>
           </div>
         ) : (
