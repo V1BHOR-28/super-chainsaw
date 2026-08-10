@@ -1001,6 +1001,8 @@ def _split_by_chapter_regex(full_text: str) -> list:
 
     # Regex: matches "Chapter 1", "CHAPTER III", "Chapter Two", "Chapter 12: Title"
     # Also matches "Prologue", "Epilogue", "Introduction", "Foreword", "Preface"
+    # Also matches bare roman numerals or numbers on their own line (common in
+    # older PDFs where the chapter title is just "I", "II", "III" etc.)
     _WORD_NUM = (
         r"(?:One|Two|Three|Four|Five|Six|Seven|Eight|Nine|Ten|"
         r"Eleven|Twelve|Thirteen|Fourteen|Fifteen|Sixteen|Seventeen|"
@@ -1011,9 +1013,9 @@ def _split_by_chapter_regex(full_text: str) -> list:
         r"^\s*("
         r"(?:CHAPTER|Chapter|chapter)\s+"
         r"(?:\d+|[IVXLCDM]+|" + _WORD_NUM + r")"
-        r"(?:\s*[:.\-—–]\s*.*)?"
+        r"(?:\s*[:.\-—–.]\s*.*)?"
         r"|PROLOGUE|EPILOGUE|INTRODUCTION|FOREWORD|PREFACE"
-        r")\s*$",
+        r")\s*\.?\s*$",
         re.IGNORECASE | re.MULTILINE,
     )
 
@@ -1047,6 +1049,47 @@ def _split_by_chapter_regex(full_text: str) -> list:
         pass
 
     return chapters if len(chapters) > 1 else []
+
+
+def _split_by_page_count(doc, body_font_size, repeated_headers, pages_per_chapter=20, base_title=""):
+    """Last-resort fallback: split the PDF into chapters by page count.
+
+    Used when no chapter headings are detected at all. Groups pages into
+    chunks of `pages_per_chapter` pages each, so the user gets navigable
+    sections instead of one massive chapter.
+    """
+    chapters = []
+    total_pages = len(doc)
+    chapter_num = 0
+
+    for start_page in range(0, total_pages, pages_per_chapter):
+        end_page = min(start_page + pages_per_chapter, total_pages)
+        text_parts = []
+        for page_num in range(start_page, end_page):
+            page_text = _extract_page_text_filtered(
+                doc[page_num], body_font_size, repeated_headers)
+            if page_text:
+                text_parts.append(page_text)
+
+        chapter_text = "\n\n".join(text_parts)
+        if not chapter_text.strip():
+            continue
+
+        cleaned = _clean_pdf_text(chapter_text)
+        cleaned = clean_text_for_tts(cleaned)
+        if not cleaned.strip():
+            continue
+
+        chapter_num += 1
+        title = f"Part {chapter_num}" if not base_title else f"{base_title} — Part {chapter_num}"
+        chapters.append(Chapter(
+            index=chapter_num,
+            title=title,
+            text=cleaned.strip(),
+            source_file="",
+        ))
+
+    return chapters
 
 
 def parse_pdf(pdf_path: str) -> BookInfo:
@@ -1086,8 +1129,9 @@ def parse_pdf(pdf_path: str) -> BookInfo:
     body_font_size = _detect_body_font_size(doc)
     repeated_headers = _detect_repeated_headers_footers(doc)
     outline = _get_pdf_outline(doc)
+    doc_page_count = doc.page_count
 
-    print(f"[pdf] Pagine: {doc.page_count}, font body: {body_font_size:.1f}pt, "
+    print(f"[pdf] Pagine: {doc_page_count}, font body: {body_font_size:.1f}pt, "
           f"outline: {len(outline)} voci, "
           f"header/footer ripetuti: {len(repeated_headers)}")
 
@@ -1150,6 +1194,19 @@ def parse_pdf(pdf_path: str) -> BookInfo:
             print(f"[pdf] Capitoli da {strategy_name}: {len(chapters)}")
             info.chapters = chapters
             break
+
+    # ── Recovery: page-count fallback ──
+    # If all strategies produced only 1 chapter (the whole document), but the
+    # document has multiple pages, split by page count so the user gets
+    # navigable sections instead of one giant chapter. Target ~20 pages per
+    # chapter (a reasonable audiobook chapter length).
+    if len(info.chapters) <= 1 and doc_page_count > 20 and full_text.strip():
+        print(f"[pdf] Page-count fallback: splitting {doc_page_count} pages into ~20-page chapters")
+        page_chapters = _split_by_page_count(doc, body_font_size, repeated_headers,
+                                             pages_per_chapter=20, base_title=info.title)
+        if page_chapters and len(page_chapters) > 1:
+            info.chapters = page_chapters
+            print(f"[pdf] Page-count fallback: {len(info.chapters)} chapters")
 
     # ── Recovery di ultima istanza ──
     # Se tutte le strategie hanno prodotto 0 capitoli dopo il filtro,
