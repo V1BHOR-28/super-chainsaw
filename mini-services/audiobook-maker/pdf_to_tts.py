@@ -47,8 +47,7 @@ except ImportError:
     try:
         import pymupdf as fitz  # PyMuPDF >= 1.24 new import name
     except ImportError:
-        print("ERRORE: PyMuPDF non installato. Eseguire: pip install pymupdf", file=sys.stderr)
-        sys.exit(1)
+        raise ImportError("PyMuPDF not installed. Run: pip install pymupdf")
 
 # Importa strutture dati e funzioni di pulizia dal modulo EPUB
 # (evita duplicazione di logica — stessa interfaccia BookInfo/Chapter)

@@ -8336,7 +8336,7 @@ def api_analyze():
     if not is_epub and not is_txt and not is_pdf and not is_abm:
         return jsonify({"error": "File must be .epub, .pdf, .txt or .abm"}), 400
     if is_pdf and parse_pdf is None:
-        return jsonify({"error": "PDF support not available. Install pymupdf: pip install pymupdf"}), 400
+        return jsonify({"error": "PDF support not available on the server. The backend needs to redeploy with pymupdf installed.", "error_code": "pdf_not_supported"}), 400
 
     # Sanitize filename for disk storage (Security: prevent Path Traversal)
     from werkzeug.utils import secure_filename
