@@ -76,6 +76,10 @@ export function ChapterSelector({
     { id: "en-US-DavisNeural", name: "Davis — Deep Male", engine: "edge", gender: "Male", gender_icon: "♂", locale: "en-US" },
     { id: "en-US-JasonNeural", name: "Jason — Young Male", engine: "edge", gender: "Male", gender_icon: "♂", locale: "en-US" },
     { id: "en-GB-RyanNeural", name: "Ryan — British Male", engine: "edge", gender: "Male", gender_icon: "♂", locale: "en-GB" },
+    // 11th voice: Hindi narrator — only for Hindi content (summaries, glossary, explanations)
+    { id: "hi-IN-SwaraNeural", name: "Swara — Hindi Narrator", engine: "edge", gender: "Female", gender_icon: "♀", locale: "hi-IN" },
+    // Alternate male Hindi (not in active list):
+    // { id: "hi-IN-MadhurNeural", name: "Madhur — Hindi Male", engine: "edge", gender: "Male", gender_icon: "♂", locale: "hi-IN" },
   ];
 
   // No need to fetch voices from the API — all voices are edge-tts.

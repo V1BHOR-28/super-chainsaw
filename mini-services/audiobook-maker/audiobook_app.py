@@ -10440,6 +10440,17 @@ def _purge_job_completely(job_id):
     except Exception as e:
         print(f"[purge] {job_id} cold cleanup failed (non-fatal): {e}")
 
+    # ARIA: purge Hindi comprehension artifacts (summaries + glossary)
+    try:
+        if storage_backend.is_enabled():
+            for prefix in (f"summaries/{job_id}/", f"glossary/{job_id}/"):
+                try:
+                    storage_backend.delete_prefix(prefix)
+                except Exception as _e:
+                    print(f"[purge] {job_id} Hindi cleanup failed for {prefix} (non-fatal): {_e}")
+    except Exception:
+        pass
+
     print(f"[purge] {job_id} hard-delete complete")
 
     # ARIA: record the job_id in the persisted _deleted_job_ids set so
@@ -10991,6 +11002,331 @@ def api_bgm_debug(job_id, chapter_index):
         "asset_files": asset_info,
         "asset_dir": getattr(__import__("bgm_registry"), "ASSET_DIR", ""),
     })
+
+
+# ═══════════════════════════════════════════════════════════════════
+# ARIA: Hindi comprehension endpoints (summary, glossary, explain)
+# ═══════════════════════════════════════════════════════════════════
+
+@app.route("/api/chapter/summary", methods=["POST"])
+def api_chapter_summary():
+    """Generate a Hindi chapter summary + synthesize audio.
+
+    POST { book_id, chapter_index }
+    Returns { summary: str, audio_url: str }
+    """
+    data = request.json or {}
+    book_id = (data.get("book_id") or "").strip()
+    chapter_index = data.get("chapter_index")
+    if not book_id or chapter_index is None:
+        return jsonify({"error": "book_id and chapter_index required"}), 400
+
+    job, err, sc = _check_job_owner(book_id)
+    if err is not None:
+        return jsonify({"error": "Job not found"}), 404
+
+    # Reconstruct if needed
+    if book_id not in jobs:
+        try:
+            job = _reconstruct_job_from_storj(book_id, fallback_record=job)
+        except Exception:
+            return jsonify({"error": "Could not load book data"}), 500
+
+    # Get chapter text
+    _tc = job.get("transcript_cues") or {}
+    _tc_list = _tc.get(chapter_index) or _tc.get(str(chapter_index)) or []
+    if not _tc_list:
+        return jsonify({"error": "No transcript data for this chapter"}), 400
+
+    # Reconstruct text from word cues
+    chapter_text = " ".join(str(c[2]) for c in _tc_list if len(c) >= 3)
+
+    # Check R2 cache
+    summary_cache_key = f"summaries/{book_id}/{chapter_index}.hi.json"
+    audio_cache_key = f"summaries/{book_id}/{chapter_index}.hi.mp3"
+
+    try:
+        import storage_backend
+        if storage_backend.is_enabled() and storage_backend.object_exists(summary_cache_key):
+            import tempfile as _tf
+            fd, tmp = _tf.mkstemp(suffix=".json")
+            os.close(fd)
+            try:
+                storage_backend.download_file(summary_cache_key, tmp)
+                import json as _json
+                with open(tmp, "r", encoding="utf-8") as f:
+                    cached = _json.load(f)
+                audio_url = ""
+                if storage_backend.object_exists(audio_cache_key):
+                    audio_url = storage_backend.presigned_get_url(audio_cache_key)
+                return jsonify({"summary": cached.get("summary", ""), "audio_url": audio_url})
+            finally:
+                try: os.remove(tmp)
+                except: pass
+    except Exception as e:
+        print(f"[summary] R2 cache read failed: {e}")
+
+    # Generate summary via Groq
+    try:
+        import translate as _translate_mod
+        groq_client = _translate_mod.get_groq_client()
+        if groq_client is None:
+            return jsonify({"error": "अभी उपलब्ध नहीं है, बाद में कोशिश करें"}), 503
+
+        _SUMMARY_PROMPT = (
+            "You write Hindi chapter summaries for English literature audiobooks.\n"
+            "Rules:\n"
+            "- Output natural Hindi in Devanagari script. No Hinglish, no romanization.\n"
+            "- 120-180 words. Plain, clear, conversational Hindi — not literary Hindi.\n"
+            "- Keep proper nouns in their original form (Odysseus, Heathcliff, Dante) "
+            "written in Devanagari transliteration with the English spelling in "
+            "parentheses on first mention.\n"
+            "- Cover: what happened, who was involved, why it matters to the larger story.\n"
+            "- Do NOT add interpretation, morals, or spoilers beyond this chapter.\n"
+            "- Output plain text only. No markdown, no headings, no bullet points."
+        )
+
+        # Take first ~2000 chars of chapter text for context
+        context = chapter_text[:2000] if len(chapter_text) > 2000 else chapter_text
+
+        resp = groq_client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[
+                {"role": "system", "content": _SUMMARY_PROMPT},
+                {"role": "user", "content": context},
+            ],
+            temperature=0.3,
+            max_tokens=1024,
+        )
+        summary = (resp.choices[0].message.content or "").strip()
+        if not summary:
+            return jsonify({"error": "अभी उपलब्ध नहीं है, बाद में कोशिश करें"}), 503
+
+        # Synthesize audio
+        audio_url = ""
+        try:
+            import hindi_tts
+            import tempfile as _tf
+            work_dir = UPLOAD_DIR / book_id
+            work_dir.mkdir(parents=True, exist_ok=True)
+            audio_path = str(work_dir / f"summary_{chapter_index}.hi.mp3")
+            if hindi_tts.synthesize_hindi(summary, audio_path):
+                # Upload to R2
+                try:
+                    import storage_backend
+                    if storage_backend.is_enabled():
+                        storage_backend.upload_file(audio_path, audio_cache_key)
+                        audio_url = storage_backend.presigned_get_url(audio_cache_key)
+                except Exception as e:
+                    print(f"[summary] R2 audio upload failed: {e}")
+        except Exception as e:
+            print(f"[summary] Hindi TTS failed: {e}")
+
+        # Cache summary text to R2
+        try:
+            import storage_backend, json as _json
+            if storage_backend.is_enabled():
+                import tempfile as _tf
+                fd, tmp = _tf.mkstemp(suffix=".json")
+                os.close(fd)
+                with open(tmp, "w", encoding="utf-8") as f:
+                    _json.dump({"summary": summary}, f, ensure_ascii=False)
+                storage_backend.upload_file(tmp, summary_cache_key)
+                try: os.remove(tmp)
+                except: pass
+        except Exception as e:
+            print(f"[summary] R2 cache write failed: {e}")
+
+        return jsonify({"summary": summary, "audio_url": audio_url})
+
+    except Exception as e:
+        print(f"[summary] failed: {e}")
+        return jsonify({"error": "अभी उपलब्ध नहीं है, बाद में कोशिश करें"}), 503
+
+
+@app.route("/api/glossary", methods=["POST"])
+def api_glossary():
+    """Explain a term in Hindi.
+
+    POST { book_id, term, context_snippet }
+    Returns { explanation: str, audio_url: str }
+    """
+    data = request.json or {}
+    book_id = (data.get("book_id") or "").strip()
+    term = (data.get("term") or "").strip()
+    context = (data.get("context_snippet") or "").strip()
+    if not term:
+        return jsonify({"error": "term required"}), 400
+
+    # Normalize term for cache key
+    import re as _re
+    normalized = _re.sub(r'[^a-zA-Z0-9]', '_', term.lower())[:60]
+    glossary_cache_key = f"glossary/{book_id}/{normalized}.hi.json"
+    audio_cache_key = f"glossary/{book_id}/{normalized}.hi.mp3"
+
+    # Check R2 cache
+    try:
+        import storage_backend
+        if storage_backend.is_enabled() and storage_backend.object_exists(glossary_cache_key):
+            import tempfile as _tf, json as _json
+            fd, tmp = _tf.mkstemp(suffix=".json")
+            os.close(fd)
+            try:
+                storage_backend.download_file(glossary_cache_key, tmp)
+                with open(tmp, "r", encoding="utf-8") as f:
+                    cached = _json.load(f)
+                audio_url = ""
+                if storage_backend.object_exists(audio_cache_key):
+                    audio_url = storage_backend.presigned_get_url(audio_cache_key)
+                return jsonify({"explanation": cached.get("explanation", ""), "audio_url": audio_url})
+            finally:
+                try: os.remove(tmp)
+                except: pass
+    except Exception as e:
+        print(f"[glossary] R2 cache read failed: {e}")
+
+    # Generate via Groq
+    try:
+        import translate as _translate_mod
+        groq_client = _translate_mod.get_groq_client()
+        if groq_client is None:
+            return jsonify({"error": "अभी उपलब्ध नहीं है, बाद में कोशिश करें"}), 503
+
+        _GLOSSARY_PROMPT = (
+            "Explain the given term from a work of literature in simple Hindi "
+            "(Devanagari), in 40-70 words.\n"
+            "Say who or what it is, and why it matters in this book.\n"
+            "No spoilers beyond the provided context. Plain text only."
+        )
+
+        user_content = f"Term: {term}\nContext: {context[:500]}"
+
+        resp = groq_client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[
+                {"role": "system", "content": _GLOSSARY_PROMPT},
+                {"role": "user", "content": user_content},
+            ],
+            temperature=0.3,
+            max_tokens=512,
+        )
+        explanation = (resp.choices[0].message.content or "").strip()
+        if not explanation:
+            return jsonify({"error": "अभी उपलब्ध नहीं है, बाद में कोशिश करें"}), 503
+
+        # Synthesize audio
+        audio_url = ""
+        try:
+            import hindi_tts, tempfile as _tf
+            work_dir = UPLOAD_DIR / (book_id or "glossary")
+            work_dir.mkdir(parents=True, exist_ok=True)
+            audio_path = str(work_dir / f"glossary_{normalized}.hi.mp3")
+            if hindi_tts.synthesize_hindi(explanation, audio_path):
+                try:
+                    import storage_backend
+                    if storage_backend.is_enabled():
+                        storage_backend.upload_file(audio_path, audio_cache_key)
+                        audio_url = storage_backend.presigned_get_url(audio_cache_key)
+                except Exception as e:
+                    print(f"[glossary] R2 audio upload failed: {e}")
+        except Exception as e:
+            print(f"[glossary] Hindi TTS failed: {e}")
+
+        # Cache to R2
+        try:
+            import storage_backend, json as _json, tempfile as _tf
+            if storage_backend.is_enabled():
+                fd, tmp = _tf.mkstemp(suffix=".json")
+                os.close(fd)
+                with open(tmp, "w", encoding="utf-8") as f:
+                    _json.dump({"explanation": explanation, "term": term}, f, ensure_ascii=False)
+                storage_backend.upload_file(tmp, glossary_cache_key)
+                try: os.remove(tmp)
+                except: pass
+        except Exception as e:
+            print(f"[glossary] R2 cache write failed: {e}")
+
+        return jsonify({"explanation": explanation, "audio_url": audio_url})
+
+    except Exception as e:
+        print(f"[glossary] failed: {e}")
+        return jsonify({"error": "अभी उपलब्ध नहीं है, बाद में कोशिश करें"}), 503
+
+
+@app.route("/api/explain", methods=["POST"])
+def api_explain():
+    """Explain a paragraph in Hindi.
+
+    POST { book_id, chapter_index, paragraph_text }
+    Returns { explanation: str, audio_url: str }
+    """
+    # Rate limit: 20 requests/hour per client id
+    cid = _get_client_id() or _client_ip()
+    _rl_key = f"explain_{cid}"
+    _allowed, _retry = _ip_rl_check(_rl_key, cid, 20, 20)
+    if not _allowed:
+        return jsonify({"error": "Rate limit. बाद में कोशिश करें।"}), 429
+
+    data = request.json or {}
+    paragraph = (data.get("paragraph_text") or "").strip()
+    if not paragraph or len(paragraph) < 10:
+        return jsonify({"error": "paragraph_text required"}), 400
+
+    try:
+        import translate as _translate_mod
+        groq_client = _translate_mod.get_groq_client()
+        if groq_client is None:
+            return jsonify({"error": "अभी उपलब्ध नहीं है, बाद में कोशिश करें"}), 503
+
+        _EXPLAIN_PROMPT = (
+            "Explain this passage of English literature in plain Hindi "
+            "(Devanagari), 80-120 words.\n"
+            "Unpack difficult vocabulary, archaic phrasing, and any cultural or "
+            "historical reference.\n"
+            "Do not translate word-for-word — explain the meaning.\n"
+            "Plain text only."
+        )
+
+        resp = groq_client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[
+                {"role": "system", "content": _EXPLAIN_PROMPT},
+                {"role": "user", "content": paragraph[:2000]},
+            ],
+            temperature=0.3,
+            max_tokens=1024,
+        )
+        explanation = (resp.choices[0].message.content or "").strip()
+        if not explanation:
+            return jsonify({"error": "अभी उपलब्ध नहीं है, बाद में कोशिश करें"}), 503
+
+        # Synthesize audio (no cache for explain)
+        audio_url = ""
+        try:
+            import hindi_tts, tempfile as _tf
+            fd, audio_path = _tf.mkstemp(suffix=".mp3")
+            os.close(fd)
+            if hindi_tts.synthesize_hindi(explanation, audio_path):
+                # Upload to R2 temporarily (1-hour TTL via presigned URL)
+                try:
+                    import storage_backend
+                    if storage_backend.is_enabled():
+                        import uuid as _uuid
+                        _temp_key = f"explain/{_uuid.uuid4().hex}.mp3"
+                        storage_backend.upload_file(audio_path, _temp_key)
+                        audio_url = storage_backend.presigned_get_url(_temp_key, ttl=3600)
+                except Exception as e:
+                    print(f"[explain] R2 audio upload failed: {e}")
+            try: os.remove(audio_path)
+            except: pass
+        except Exception as e:
+            print(f"[explain] Hindi TTS failed: {e}")
+
+        return jsonify({"explanation": explanation, "audio_url": audio_url})
+
+    except Exception as e:
+        print(f"[explain] failed: {e}")
+        return jsonify({"error": "अभी उपलब्ध नहीं है, बाद में कोशिश करें"}), 503
 
 
 @app.route("/api/reset_to_chapters/<job_id>", methods=["POST"])

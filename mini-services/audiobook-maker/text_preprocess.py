@@ -135,6 +135,83 @@ def preprocess_for_tts(text: str) -> str:
     return text
 
 
+# ── Devanagari detection ──
+_DEVANAGARI_RE = re.compile(r"[\u0900-\u097F]")
+
+def is_hindi_text(text: str) -> bool:
+    """True if text contains Devanagari characters (Hindi/Marathi/etc)."""
+    return bool(_DEVANAGARI_RE.search(text or ""))
+
+
+def preprocess_hindi_for_tts(text: str) -> str:
+    """Devanagari-safe text prep for Hindi TTS.
+
+    Does NOT run the English abbreviation expander (mangles Devanagari).
+    Escapes &<>, strips markdown, leaves numerals as-is (Edge TTS reads
+    Devanagari/Arabic numerals correctly in hi-IN).
+    """
+    if not text:
+        return text
+    # Strip markdown: **bold**, *italic*, # headings, [text](url), `code`
+    text = re.sub(r'\*\*(.+?)\*\*', r'\1', text)
+    text = re.sub(r'\*(.+?)\*', r'\1', text)
+    text = re.sub(r'^#+\s*', '', text, flags=re.MULTILINE)
+    text = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', text)
+    text = re.sub(r'`([^`]+)`', r'\1', text)
+    # Escape XML special characters
+    text = text.replace("&", "&amp;")
+    text = text.replace("<", "&lt;")
+    text = text.replace(">", "&gt;")
+    # Clean up whitespace
+    text = re.sub(r'[ \t]+', ' ', text)
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    return text.strip()
+
+
+def wrap_in_hindi_ssml(text: str, voice_name: str) -> str:
+    """Wrap Hindi text in an audiobook SSML template with longer pauses.
+
+    Hindi narration needs longer pauses than English to feel like reading,
+    not reporting:
+    - <prosody rate="-8%" pitch="-2Hz"> (Hindi TTS runs fast, clips consonants)
+    - <break time="450ms"/> between sentences (inserted by caller via split)
+    - <break time="800ms"/> between paragraphs
+    """
+    # Split into sentences and paragraphs, insert breaks
+    # Sentence boundaries: . ! ? । (Devanagari danda)  followed by whitespace
+    sentences = re.split(r'(?<=[.!?।])\s+', text)
+    parts = []
+    for i, sent in enumerate(sentences):
+        parts.append(sent)
+        # Check if this sentence ends a paragraph (next sentence starts a new line)
+        # or if it's the last sentence
+        if i < len(sentences) - 1:
+            # If the sentence ends with a double-newline or the next starts on a new line,
+            # use a paragraph break; otherwise sentence break.
+            if '\n' in sent[-5:]:
+                parts.append('<break time="800ms"/>')
+            else:
+                parts.append('<break time="450ms"/>')
+        else:
+            parts.append('<break time="400ms"/>')
+
+    body = ' '.join(parts)
+
+    return (
+        '<speak version="1.0" xmlns="http://www.w3.org/2001/10/synthesis" '
+        'xmlns:mstts="https://www.w3.org/2001/mstts">'
+        f'<voice name="{voice_name}">'
+        '<mstts:express-as style="narration" styledegree="1.2">'
+        '<prosody rate="-8%" pitch="-2Hz">'
+        '<break time="300ms"/>'
+        f'{body}'
+        '</prosody>'
+        '</mstts:express-as>'
+        '</voice>'
+        '</speak>'
+    )
+
+
 def wrap_in_ssml(text: str, voice_name: str) -> str:
     """Wrap text in an audiobook-style SSML template.
 

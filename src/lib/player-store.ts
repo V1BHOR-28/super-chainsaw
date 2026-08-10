@@ -86,6 +86,9 @@ interface PlayerState {
   //   the final linear volume of each mood loop.
   bgmEnabled: boolean;
   bgmVolume: number;
+  // ARIA: Hindi help toggle — shows/hides all Hindi comprehension UI
+  // (summary, glossary, explain). Defaults to OFF.
+  hindiHelp: boolean;
 
   // Actions
   play: () => void;
@@ -108,6 +111,7 @@ interface PlayerState {
   // BGM actions
   toggleBgm: () => void;
   setBgmVolume: (v: number) => void;
+  toggleHindiHelp: () => void;
 }
 
 // ── Playback progress persistence (localStorage) ──
@@ -233,6 +237,7 @@ export const usePlayerStore = create<PlayerState>()(
       // and duck under speech, so 70% gives clearly audible background music.
       bgmEnabled: true,
       bgmVolume: 70,
+      hindiHelp: false,
 
       play: () => set({ isPlaying: true }),
       pause: () => set({ isPlaying: false }),
@@ -274,6 +279,7 @@ export const usePlayerStore = create<PlayerState>()(
 
       toggleBgm: () => set((s) => ({ bgmEnabled: !s.bgmEnabled })),
       setBgmVolume: (v) => set({ bgmVolume: Math.max(0, Math.min(100, Math.round(v))) }),
+      toggleHindiHelp: () => set((s) => ({ hindiHelp: !s.hindiHelp })),
     }),
     {
       name: "aria-audiobooks",
@@ -283,6 +289,7 @@ export const usePlayerStore = create<PlayerState>()(
         volume: s.volume,
         bgmEnabled: s.bgmEnabled,
         bgmVolume: s.bgmVolume,
+        hindiHelp: s.hindiHelp,
       }),
     }
   )

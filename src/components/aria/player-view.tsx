@@ -773,6 +773,8 @@ function SettingsPanel() {
   const bgmVolume = usePlayerStore((s) => s.bgmVolume);
   const toggleBgm = usePlayerStore((s) => s.toggleBgm);
   const setBgmVolume = usePlayerStore((s) => s.setBgmVolume);
+  const hindiHelp = usePlayerStore((s) => s.hindiHelp);
+  const toggleHindiHelp = usePlayerStore((s) => s.toggleHindiHelp);
 
   return (
     <>
@@ -857,6 +859,25 @@ function SettingsPanel() {
             <span>{bgmVolume}%</span>
             <span>100%</span>
           </div>
+        </div>
+
+        {/* Hindi सहायता toggle */}
+        <div>
+          <div className="flex items-center justify-between mb-3">
+            <label className="text-sm text-[var(--aria-fg)] flex items-center gap-2">
+              <span className="font-serif text-base">हिंदी</span>
+              <span className="text-xs text-[var(--aria-fg-muted)]">Hindi help</span>
+            </label>
+            <button
+              onClick={toggleHindiHelp}
+              className="font-mono text-xs text-[var(--aria-fg-muted)] hover:text-[var(--aria-accent-glow)]"
+            >
+              {hindiHelp ? "on" : "off"}
+            </button>
+          </div>
+          <p className="text-[11px] text-[var(--aria-fg-dim)]">
+            Show Hindi chapter summaries, word meanings, and paragraph explanations.
+          </p>
         </div>
 
         <AriaDivider />

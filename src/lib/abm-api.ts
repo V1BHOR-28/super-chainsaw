@@ -525,3 +525,57 @@ export function getCoverUrl(jobId: string, hasCover: boolean): string {
   const cid = getStoredClientId();
   return `${ABM_BASE}/cover/${jobId}${cid ? `?cid=${encodeURIComponent(cid)}` : ""}`;
 }
+
+/* ──── Hindi comprehension API ──── */
+
+export interface HindiSummary {
+  summary: string;
+  audio_url: string;
+}
+
+export interface HindiGlossary {
+  explanation: string;
+  audio_url: string;
+}
+
+export async function getChapterSummary(bookId: string, chapterIndex: number): Promise<HindiSummary> {
+  const res = await fetch(`${ABM_BASE}/chapter/summary`, {
+    method: "POST",
+    headers: cidHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify({ book_id: bookId, chapter_index: chapterIndex }),
+    credentials: "include",
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Summary failed (${res.status})`);
+  }
+  return (await res.json()) as HindiSummary;
+}
+
+export async function getGlossaryEntry(bookId: string, term: string, contextSnippet: string): Promise<HindiGlossary> {
+  const res = await fetch(`${ABM_BASE}/glossary`, {
+    method: "POST",
+    headers: cidHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify({ book_id: bookId, term, context_snippet: contextSnippet }),
+    credentials: "include",
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Glossary failed (${res.status})`);
+  }
+  return (await res.json()) as HindiGlossary;
+}
+
+export async function explainParagraph(bookId: string, chapterIndex: number, paragraphText: string): Promise<HindiGlossary> {
+  const res = await fetch(`${ABM_BASE}/explain`, {
+    method: "POST",
+    headers: cidHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify({ book_id: bookId, chapter_index: chapterIndex, paragraph_text: paragraphText }),
+    credentials: "include",
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    throw new Error(body.error || `Explain failed (${res.status})`);
+  }
+  return (await res.json()) as HindiGlossary;
+}
