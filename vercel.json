@@ -17,6 +17,9 @@
     },
     "src/app/api/memory/detect/route.ts": {
       "maxDuration": 30
+    },
+    "src/app/api/abm/[...path]/route.ts": {
+      "maxDuration": 60
     }
   },
   "crons": [
