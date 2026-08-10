@@ -102,7 +102,7 @@ export async function generateWithFallback(
       headers: {
         'Content-Type': 'application/json',
         'Authorization': `Bearer ${process.env.OPENROUTER_API_KEY}`,
-        'HTTP-Referer': 'https://ariav2-seven.vercel.app',
+        'HTTP-Referer': 'https://ariaggn.vercel.app',
         'X-Title': 'ARIA',
       },
       body: JSON.stringify({ model, messages, max_tokens: maxTokens }),
