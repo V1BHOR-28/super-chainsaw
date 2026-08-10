@@ -10440,10 +10440,13 @@ def _purge_job_completely(job_id):
     except Exception as e:
         print(f"[purge] {job_id} cold cleanup failed (non-fatal): {e}")
 
-    # ARIA: purge Hindi comprehension artifacts (summaries + glossary)
+    # ARIA: purge Hindi comprehension artifacts (summaries + glossary, v1 + v2)
     try:
         if storage_backend.is_enabled():
-            for prefix in (f"summaries/{job_id}/", f"glossary/{job_id}/"):
+            for prefix in (
+                f"summaries/{job_id}/", f"summaries/v2/{job_id}/",
+                f"glossary/{job_id}/", f"glossary/v2/{job_id}/",
+            ):
                 try:
                     storage_backend.delete_prefix(prefix)
                 except Exception as _e:
@@ -11042,8 +11045,8 @@ def api_chapter_summary():
     chapter_text = " ".join(str(c[2]) for c in _tc_list if len(c) >= 3)
 
     # Check R2 cache
-    summary_cache_key = f"summaries/{book_id}/{chapter_index}.hi.json"
-    audio_cache_key = f"summaries/{book_id}/{chapter_index}.hi.mp3"
+    summary_cache_key = f"summaries/v2/{book_id}/{chapter_index}.hi.json"
+    audio_cache_key = f"summaries/v2/{book_id}/{chapter_index}.hi.mp3"
 
     try:
         import storage_backend
@@ -11083,7 +11086,8 @@ def api_chapter_summary():
             "parentheses on first mention.\n"
             "- Cover: what happened, who was involved, why it matters to the larger story.\n"
             "- Do NOT add interpretation, morals, or spoilers beyond this chapter.\n"
-            "- Output plain text only. No markdown, no headings, no bullet points."
+            "- Return only plain Hindi prose in Devanagari. No markdown, no bullet "
+            "points, no headings, no URLs, no English preamble."
         )
 
         # Take first ~2000 chars of chapter text for context
@@ -11101,6 +11105,20 @@ def api_chapter_summary():
         summary = (resp.choices[0].message.content or "").strip()
         if not summary:
             return jsonify({"error": "अभी उपलब्ध नहीं है, बाद में कोशिश करें"}), 503
+
+        # Clean LLM output: strip markdown, drop non-Devanagari leading lines
+        import re as _re_clean
+        _lines = summary.split("\n")
+        _clean_lines = []
+        for _ln in _lines:
+            _ln = _ln.strip()
+            if not _ln:
+                continue
+            # Drop lines with no Devanagari (English preamble, "Here is...", etc)
+            if not _re_clean.search(r"[\u0900-\u097F]", _ln):
+                continue
+            _clean_lines.append(_ln)
+        summary = "\n".join(_clean_lines) if _clean_lines else summary
 
         # Synthesize audio
         audio_url = ""
@@ -11161,8 +11179,8 @@ def api_glossary():
     # Normalize term for cache key
     import re as _re
     normalized = _re.sub(r'[^a-zA-Z0-9]', '_', term.lower())[:60]
-    glossary_cache_key = f"glossary/{book_id}/{normalized}.hi.json"
-    audio_cache_key = f"glossary/{book_id}/{normalized}.hi.mp3"
+    glossary_cache_key = f"glossary/v2/{book_id}/{normalized}.hi.json"
+    audio_cache_key = f"glossary/v2/{book_id}/{normalized}.hi.mp3"
 
     # Check R2 cache
     try:
@@ -11213,6 +11231,12 @@ def api_glossary():
         explanation = (resp.choices[0].message.content or "").strip()
         if not explanation:
             return jsonify({"error": "अभी उपलब्ध नहीं है, बाद में कोशिश करें"}), 503
+
+        # Clean LLM output: drop non-Devanagari lines
+        import re as _re_clean
+        _lines = explanation.split("\n")
+        _clean_lines = [_ln.strip() for _ln in _lines if _ln.strip() and _re_clean.search(r"[\u0900-\u097F]", _ln)]
+        explanation = "\n".join(_clean_lines) if _clean_lines else explanation
 
         # Synthesize audio
         audio_url = ""
@@ -11299,6 +11323,12 @@ def api_explain():
         explanation = (resp.choices[0].message.content or "").strip()
         if not explanation:
             return jsonify({"error": "अभी उपलब्ध नहीं है, बाद में कोशिश करें"}), 503
+
+        # Clean LLM output: drop non-Devanagari lines
+        import re as _re_clean
+        _lines = explanation.split("\n")
+        _clean_lines = [_ln.strip() for _ln in _lines if _ln.strip() and _re_clean.search(r"[\u0900-\u097F]", _ln)]
+        explanation = "\n".join(_clean_lines) if _clean_lines else explanation
 
         # Synthesize audio (no cache for explain)
         audio_url = ""

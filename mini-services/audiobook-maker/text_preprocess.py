@@ -147,8 +147,9 @@ def preprocess_hindi_for_tts(text: str) -> str:
     """Devanagari-safe text prep for Hindi TTS.
 
     Does NOT run the English abbreviation expander (mangles Devanagari).
-    Escapes &<>, strips markdown, leaves numerals as-is (Edge TTS reads
+    Strips markdown, leaves numerals as-is (Edge TTS reads
     Devanagari/Arabic numerals correctly in hi-IN).
+    Does NOT escape &<> (we pass plain text to edge_tts, not SSML).
     """
     if not text:
         return text
@@ -158,24 +159,60 @@ def preprocess_hindi_for_tts(text: str) -> str:
     text = re.sub(r'^#+\s*', '', text, flags=re.MULTILINE)
     text = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', text)
     text = re.sub(r'`([^`]+)`', r'\1', text)
-    # Escape XML special characters
-    text = text.replace("&", "&amp;")
-    text = text.replace("<", "&lt;")
-    text = text.replace(">", "&gt;")
+    # Strip bullet points
+    text = re.sub(r'^[\s]*[-•·]\s+', '', text, flags=re.MULTILINE)
     # Clean up whitespace
     text = re.sub(r'[ \t]+', ' ', text)
     text = re.sub(r'\n{3,}', '\n\n', text)
     return text.strip()
 
 
-def wrap_in_hindi_ssml(text: str, voice_name: str) -> str:
-    """Wrap Hindi text in an audiobook SSML template with longer pauses.
+def plain_text_for_tts(text: str) -> str:
+    """Final safety pass: never let markup or URLs reach the TTS engine.
 
-    Hindi narration needs longer pauses than English to feel like reading,
-    not reporting:
-    - <prosody rate="-8%" pitch="-2Hz"> (Hindi TTS runs fast, clips consonants)
-    - <break time="450ms"/> between sentences (inserted by caller via split)
-    - <break time="800ms"/> between paragraphs
+    Run AFTER preprocess_hindi_for_tts(). Reverses XML entity escaping
+    (which is no longer needed since we pass plain text, not SSML),
+    strips residual tags, URLs, and ensures sentence-ending punctuation
+    for natural Edge TTS pauses.
+    """
+    if not text:
+        return ""
+    # Un-escape XML entities (preprocess_hindi_for_tts used to escape these
+    # for SSML — we no longer emit SSML, so reverse it)
+    text = (text.replace("&amp;", " और ")
+                .replace("&lt;", " ")
+                .replace("&gt;", " "))
+    # Strip any residual tags (SSML, HTML)
+    text = re.sub(r"<[^>]+>", " ", text)
+    # Strip URLs and bare domains — the voice should never read these
+    text = re.sub(r"https?://\S+", " ", text)
+    text = re.sub(r"www\.\S+", " ", text)
+    text = re.sub(r"\b\S+\.(com|org|net|in|io)\b", " ", text)
+    # Drop stray XML-ish leftovers
+    text = re.sub(r"[<>{}]", " ", text)
+    # Ensure sentence-ending punctuation for natural pauses:
+    # Convert paragraph breaks (double newlines) into danda + space
+    text = re.sub(r"\n{2,}", " । ", text)
+    # Convert remaining single newlines to spaces (inline)
+    text = re.sub(r"\n", " ", text)
+    # If the text doesn't end with sentence punctuation, add a danda
+    text = text.rstrip()
+    if text and text[-1] not in ".!?।":
+        text += " ।"
+    # Collapse whitespace
+    text = re.sub(r"\s+", " ", text)
+    return text.strip()
+
+
+def wrap_in_hindi_ssml(text: str, voice_name: str) -> str:
+    """DEPRECATED — DO NOT pass to edge_tts.Communicate.
+
+    edge-tts treats the first argument as plain text, NOT SSML. Passing
+    this string to Communicate causes the voice to read XML tags aloud
+    ("break time 450 ms", "prosody rate minus 8 percent", etc).
+
+    This function is kept for reference only. Use plain_text_for_tts()
+    + Communicate(text=..., rate="-8%", pitch="-2Hz") instead.
     """
     # Split into sentences and paragraphs, insert breaks
     # Sentence boundaries: . ! ? । (Devanagari danda)  followed by whitespace
