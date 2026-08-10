@@ -90,6 +90,7 @@ export interface AnalyzeResponse {
    *  "prerender" → BGM is already baked into the chapter audio (no mixing needed).
    *  "off" → no BGM at all. */
   bgm_mode?: "off" | "runtime" | "prerender";
+  narration_language?: "en" | "hinglish";
 }
 
 /** A single BGM time cue — when to start/stop a mood loop and at what gain.
@@ -190,6 +191,7 @@ export interface MyJob {
   /** Unix timestamp of the last progress update. Used by the frontend
    *  to show a "No progress for a few minutes" stall banner. */
   progress_updated_at?: number;
+  narration_language?: "en" | "hinglish";
   // Present when status === "done" (from download token)
   download_token?: string;
   expires_at?: number;
@@ -301,6 +303,7 @@ export async function generate(
   outputFormat: "mp3" | "m4b" | "zip" = "mp3",
   rate: string = "+0%",
   bgmMode: "off" | "runtime" | "prerender" = "off",
+  language: "en" | "hinglish" = "en",
 ): Promise<void> {
   const res = await fetch(`${ABM_BASE}/generate`, {
     method: "POST",
@@ -313,6 +316,7 @@ export async function generate(
       output_format: outputFormat,
       single_file: false,
       bgm_mode: bgmMode,
+      language,
     }),
     credentials: "include",
   });

@@ -76,6 +76,7 @@ interface LibraryCard {
   progressFinalizePct?: number;
   /** Unix timestamp of the last progress update (for stall detection). */
   progressUpdatedAt?: number;
+  narrationLanguage?: "en" | "hinglish";
   selectedChapters?: number[];
   totalChapters?: number;
   chapterMp3s?: ChapterMp3Info[];
@@ -103,6 +104,7 @@ function toCard(job: MyJob): LibraryCard {
     progressPhase: job.progress_phase,
     progressFinalizePct: job.progress_finalize_pct,
     progressUpdatedAt: job.progress_updated_at,
+    narrationLanguage: job.narration_language,
     selectedChapters: job.selected_chapters,
     totalChapters: job.total_chapters,
     chapterMp3s: job.chapter_mp3s,
@@ -796,6 +798,11 @@ export function LibraryView() {
 
                       {/* status pill (top-right) */}
                       <div className="absolute top-3 right-3 flex items-center gap-1.5">
+                        {card.narrationLanguage === "hinglish" && (
+                          <span className="text-[9px] px-1.5 py-0.5 rounded-full font-mono uppercase tracking-wider" style={{ background: "rgba(168,85,247,0.18)", color: "#a855f7" }}>
+                            Hinglish
+                          </span>
+                        )}
                         {isDone ? (
                           <span className="text-[10px] px-2 py-0.5 rounded-full flex items-center gap-1" style={{ background: "rgba(34,197,94,0.18)", color: "#22c55e" }}>
                             <CheckCircle2 size={10} /> Ready

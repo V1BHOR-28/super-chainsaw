@@ -1462,6 +1462,7 @@ def _create_download_token(job_id):
         # ARIA: bgm_mode + bgm_cues — so /api/my_jobs can report the correct
         # mode and the runtime BGM endpoint can serve cached cues after a restart.
         "bgm_mode": job.get("bgm_mode", "off"),
+        "narration_language": job.get("narration_language", "en"),
         "bgm_cues": job.get("bgm_cues", {}) or {},
     }
     # Riusa un token gia' esistente per lo stesso job (idempotenza), MA aggiorna
@@ -3816,6 +3817,52 @@ def run_generation(job_id, info, voice, rate, single_file, output_format='m4b', 
         print(f"[{job_id}] Generation started: voice={voice}, rate={rate}, "
               f"chapters={len(info.chapters)}, single_file={single_file}, "
               f"output_format={output_format}, engine={engine}")
+
+        # ARIA: Hinglish translation — run BEFORE chunking so word timings
+        # are Hinglish word timings. English-only behavior is byte-identical
+        # (the entire block is skipped when language != "hinglish").
+        _narration_lang = (job.get("narration_language") or "en").strip().lower()
+        if _narration_lang == "hinglish":
+            try:
+                import translate as _translate_mod
+                _groq_client = _translate_mod.get_groq_client()
+                if _groq_client is None:
+                    print(f"[{job_id}] Hinglish: no Groq client — falling back to English")
+                    _narration_lang = "en"
+                else:
+                    _total_ch = len(info.chapters)
+                    for _ch_i, _ch in enumerate(info.chapters):
+                        job["progress_phase"] = "translating"
+                        job["progress_message"] = f"Translating chapter {_ch_i+1}/{_total_ch} to Hinglish…"
+                        job["progress_updated_at"] = time.time()
+                        print(f"[{job_id}] Hinglish: translating chapter {_ch.index} ({_ch.word_count} words)")
+                        _original = _ch.text
+                        _translated = _translate_mod.translate_to_hinglish(_original, _groq_client)
+                        _ch.text = _translated
+                        _ch.word_count = len(_translated.split())
+                        _ch.char_count = len(_translated)
+                    # Recalculate totals
+                    info.total_words = sum(ch.word_count for ch in info.chapters)
+                    info.total_chars = sum(ch.char_count for ch in info.chapters)
+                    print(f"[{job_id}] Hinglish: translation complete ({info.total_words} words)")
+                    job["progress_phase"] = "synthesizing"
+                    job["progress_message"] = ""
+            except Exception as _e_hinglish:
+                print(f"[{job_id}] Hinglish translation failed (non-fatal): {_e_hinglish}")
+                _narration_lang = "en"
+
+        # ARIA: Voice enforcement for Hinglish — force Indian English voice
+        if _narration_lang == "hinglish":
+            _orig_gender = "female"  # default
+            _v_lower = (voice or "").lower()
+            if "neerja" in _v_lower or "swara" in _v_lower or "aria" in _v_lower or "jenny" in _v_lower or "michelle" in _v_lower or "emma" in _v_lower or "sonia" in _v_lower or "natasha" in _v_lower:
+                _orig_gender = "female"
+            elif "prabhat" in _v_lower or "guy" in _v_lower or "davis" in _v_lower or "jason" in _v_lower or "ryan" in _v_lower:
+                _orig_gender = "male"
+            _forced_voice = "en-IN-NeerjaNeural" if _orig_gender == "female" else "en-IN-PrabhatNeural"
+            print(f"[{job_id}] Hinglish: forcing voice from {voice} to {_forced_voice}")
+            voice = _forced_voice
+
         max_chars = _pick_chunk_max_chars(voice, getattr(info, "language", None) or "")
         max_bytes = _pick_chunk_max_bytes(voice)
         # Lettura opzionale del testo tra parentesi: di default (flag assenti o

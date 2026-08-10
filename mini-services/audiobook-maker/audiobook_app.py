@@ -873,6 +873,7 @@ def _build_job_descriptor(job, phase):
         # ARIA: BGM delivery mode — preserved across restarts so the recovery
         # batch re-runs generation with the same BGM setting.
         "bgm_mode": job.get("bgm_mode", "off"),
+        "narration_language": job.get("narration_language", "en"),
         # Copie amministrative (indagine) agganciate a un job ancora in corso:
         # sopravvivono a un restart così il COMPLETE post-recovery le materializza.
         "admin_copy_cids": list(job.get("admin_copy_cids", []) or []),
@@ -986,6 +987,7 @@ def _reenqueue_orphan(job_id, rec):
         "read_square_brackets": bool(rec.get("read_square_brackets", False)),
         # ARIA: restore BGM mode so re-generation uses the same setting.
         "bgm_mode": rec.get("bgm_mode", "off"),
+        "narration_language": rec.get("narration_language", "en"),
         # Copie admin agganciate prima del restart: da materializzare al COMPLETE.
         "admin_copy_cids": list(rec.get("admin_copy_cids", []) or []),
     }
@@ -1740,6 +1742,7 @@ def _save_tokens():
                     # are also cached in R2 (bgm/{job_id}/{ch}.bgm.json.gz) —
                     # the token copy is a secondary cache for fast restart recovery.
                     "bgm_mode": info.get("bgm_mode", "off"),
+                    "narration_language": info.get("narration_language", "en"),
                     "bgm_cues": info.get("bgm_cues", {}) or {},
                     # ARIA: cover persistence — cover_thumb (local path) +
                     # cover_s3_key (R2 key) + cover_mime. Without these, a
@@ -2037,6 +2040,7 @@ def _reconstruct_job_from_storj(job_id, fallback_record=None):
         for k in ("epub_s3_key", "client_id", "original_filename", "file_hash",
                   "language_detected", "selected_chapters", "chapter_mp3s",
                   "total_chapters", "transcript_cues", "bgm_mode", "bgm_cues",
+                  "narration_language",
                   "cover_s3_key", "cover_mime", "cover_thumb"):
             if not rec.get(k) and fallback_record.get(k):
                 rec[k] = fallback_record[k]
@@ -2083,6 +2087,7 @@ def _reconstruct_job_from_storj(job_id, fallback_record=None):
             "transcript_cues": rec.get("transcript_cues", {}) or {},
             # ARIA: BGM mode + cached cues restored from the token snapshot.
             "bgm_mode": rec.get("bgm_mode", "off"),
+        "narration_language": rec.get("narration_language", "en"),
             "bgm_cues": rec.get("bgm_cues", {}) or {},
             # ARIA: cover restored from token snapshot. cover_thumb may point
             # to a wiped disk path (Render ephemeral storage), but cover_s3_key
@@ -9338,6 +9343,13 @@ def api_generate():
     if bgm_mode not in ("off", "runtime", "prerender"):
         bgm_mode = "runtime"
 
+    # ARIA: Hinglish narration language. "en" (default) or "hinglish".
+    # When "hinglish", chapter text is translated to romanized Hindi before TTS,
+    # and the voice is forced to an Indian English voice.
+    narration_language = (data.get("language") or "en").strip().lower()
+    if narration_language not in ("en", "hinglish"):
+        narration_language = "en"
+
     # Refuse Gemini voices when the module is missing or the API key is not configured.
     if _is_gemini_voice(voice):
         if gemini_tts is None or not gemini_tts.is_available():
@@ -9376,6 +9388,7 @@ def api_generate():
     job["read_round_parens"] = read_round_parens
     job["read_square_brackets"] = read_square_brackets
     job["bgm_mode"] = bgm_mode
+    job["narration_language"] = narration_language
     if podcast_base_url:
         job["podcast_base_url"] = podcast_base_url
     if output_format == "zip_rss":
@@ -11301,6 +11314,7 @@ def api_my_jobs():
             # ARIA: bgm_mode so the frontend knows whether to fetch BGM cues
             # (runtime) or play pre-mixed audio (prerender) or skip BGM (off).
             "bgm_mode": job.get("bgm_mode", "off"),
+            "narration_language": job.get("narration_language", "en"),
         }
         if _is_admin_pending:
             entry["admin_copy"] = True
