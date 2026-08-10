@@ -593,10 +593,13 @@ _MOBILE_CID_RE = re.compile(r"^[A-Za-z0-9_-]{8,64}$")
 
 
 def _get_client_id():
-    """Return the client_id from mobile header or cookie, or empty string."""
+    """Return the client_id from mobile header, query param, or cookie, or empty string."""
     hdr = (request.headers.get(_MOBILE_CID_HEADER) or "").strip()
     if hdr and _MOBILE_CID_RE.match(hdr):
         return hdr
+    q = (request.args.get("cid") or "").strip()
+    if q and _MOBILE_CID_RE.match(q):
+        return q
     return request.cookies.get(_CLIENT_COOKIE_NAME, "")
 
 
@@ -8449,6 +8452,7 @@ def api_analyze():
                 "language_detected": existing_job.get("language_detected", False),
                 "file_type": "abm" if is_abm else ("txt" if is_txt else ("pdf" if is_pdf else "epub")),
                 "has_cover": bool(existing_job.get("cover_thumb")),
+                "client_id": existing_job.get("client_id", ""),
                 "total_chapters": len(info.chapters), "total_words": info.total_words,
                 "total_chars": info.total_chars,
                 "estimated_minutes": round(_total_secs_re / 60.0, 1),
@@ -8513,6 +8517,7 @@ def api_analyze():
                         "language_detected": _reg_job.get("language_detected", False),
                         "file_type": "abm" if is_abm else ("txt" if is_txt else ("pdf" if is_pdf else "epub")),
                         "has_cover": bool(_reg_job.get("cover_thumb")),
+                        "client_id": _reg_job.get("client_id", ""),
                         "total_chapters": len(_reg_info.chapters),
                         "total_words": _reg_info.total_words,
                         "total_chars": _reg_info.total_chars,
@@ -8644,6 +8649,29 @@ def api_analyze():
                     jobs[job_id]["cover_s3_key"] = _cover_key
             except Exception as _e_cover:
                 print(f"[cover] R2 upload failed for {job_id}: {_e_cover}")
+    elif is_pdf:
+        try:
+            import fitz
+            _doc = fitz.open(str(file_path))
+            if _doc.page_count > 0:
+                _pix = _doc.load_page(0).get_pixmap(matrix=fitz.Matrix(2, 2))
+                _cover_out = str(work_dir / "cover_thumb.jpg")
+                _pix.save(_cover_out)
+                _doc.close()
+                if os.path.exists(_cover_out) and os.path.getsize(_cover_out) > 1024:
+                    has_cover = True
+                    jobs[job_id]["cover_thumb"] = _cover_out
+                    jobs[job_id]["cover_mime"] = "image/jpeg"
+                    try:
+                        import storage_backend
+                        if storage_backend.is_enabled():
+                            _cover_key = f"covers/{job_id}/cover.jpg"
+                            storage_backend.upload_file(_cover_out, _cover_key)
+                            jobs[job_id]["cover_s3_key"] = _cover_key
+                    except Exception as _e:
+                        print(f"[cover] R2 upload failed for {job_id}: {_e}")
+        except Exception as _e:
+            print(f"[cover] PDF cover render failed for {job_id}: {_e}")
 
     _log_activity(job_id, file.filename, "ANALYZE",
                   jobs[job_id]["client_id"], jobs[job_id]["client_ip"],
@@ -8735,6 +8763,7 @@ def api_analyze():
         "language_detected": language_detected,
         "file_type": "abm" if is_abm else ("txt" if is_txt else ("pdf" if is_pdf else "epub")),
         "has_cover": has_cover,
+        "client_id": jobs[job_id].get("client_id", ""),
         "total_chapters": len(info.chapters), "total_words": info.total_words,
         "total_chars": info.total_chars,
         "estimated_minutes": _total_minutes_new,
@@ -15453,19 +15482,32 @@ def _set_client_cookie(response):
     Sec: il cookie è il bearer di ownership su tutti gli endpoint job (vedi _check_job_owner).
     - secure=True quando la request è HTTPS (anche dietro reverse proxy) per impedire
       interception in chiaro su navigazioni HTTP plain verso lo stesso host.
-    - samesite='Lax' mantenuto: il cookie deve essere inviato sui link cliccati dalle
-      email di notifica (/dl/<token>) che possono provenire da altri domini.
+    - samesite='Lax' per same-origin requests.
+    - samesite='None'; Secure when the request is cross-origin (direct Flask upload
+      from the Vercel frontend via NEXT_PUBLIC_ABM_DIRECT_URL). Without this, the
+      browser drops the cookie and the cover/audio endpoints get a different cid.
     """
     if _CLIENT_COOKIE_NAME not in request.cookies:
         cid = str(uuid.uuid4())[:12]
         is_https = (request.scheme == "https") or (request.headers.get("X-Forwarded-Proto", "") == "https")
-        response.set_cookie(
-            _CLIENT_COOKIE_NAME, cid,
-            max_age=_CLIENT_COOKIE_MAX_AGE,
-            httponly=True,
-            secure=is_https,
-            samesite="Lax",
-        )
+        # Check if this is a cross-origin request (direct upload from Vercel)
+        origin = request.headers.get("Origin", "")
+        if origin and is_https:
+            response.set_cookie(
+                _CLIENT_COOKIE_NAME, cid,
+                max_age=_CLIENT_COOKIE_MAX_AGE,
+                httponly=True,
+                secure=True,
+                samesite="None",
+            )
+        else:
+            response.set_cookie(
+                _CLIENT_COOKIE_NAME, cid,
+                max_age=_CLIENT_COOKIE_MAX_AGE,
+                httponly=True,
+                secure=is_https,
+                samesite="Lax",
+            )
     return response
 
 

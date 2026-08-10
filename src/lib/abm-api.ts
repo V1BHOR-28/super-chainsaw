@@ -17,6 +17,23 @@
 
 const ABM_BASE = "/api/abm";
 
+/* ──── Client ID helpers ──── */
+const CID_KEY = "abm_cid";
+export function getStoredClientId(): string {
+  if (typeof window === "undefined") return "";
+  return localStorage.getItem(CID_KEY) || "";
+}
+export function setStoredClientId(cid: string) {
+  if (typeof window !== "undefined" && cid) localStorage.setItem(CID_KEY, cid);
+}
+/** Build headers with the X-ABM-Cid header if we have a stored cid. */
+function cidHeaders(extra?: Record<string, string>): Record<string, string> {
+  const h: Record<string, string> = { ...extra };
+  const cid = getStoredClientId();
+  if (cid) h["X-ABM-Cid"] = cid;
+  return h;
+}
+
 /* ──────────────────────────── Types ──────────────────────────── */
 
 export interface AnalyzeChapter {
@@ -39,6 +56,10 @@ export interface AnalyzeResponse {
   language_detected?: boolean;
   file_type?: "epub" | "txt" | "pdf" | "abm";
   has_cover?: boolean;
+  /** Client ID assigned by the Flask backend. Stored in localStorage and
+   *  sent as X-ABM-Cid header / ?cid= query param on all subsequent requests
+   *  so cover/audio endpoints can identify the owner. */
+  client_id?: string;
   total_chapters: number;
   total_words: number;
   total_chars?: number;
@@ -233,6 +254,7 @@ export async function analyzeEpub(file: File): Promise<AnalyzeResponse> {
       body: form,
       credentials: "include",
       signal: controller.signal,
+      headers: cidHeaders(),
     });
   } catch (err) {
     clearTimeout(timeoutId);
@@ -259,7 +281,9 @@ export async function analyzeEpub(file: File): Promise<AnalyzeResponse> {
 
   // Parse the JSON response
   try {
-    return (await res.json()) as AnalyzeResponse;
+    const json = (await res.json()) as AnalyzeResponse;
+    if (json.client_id) setStoredClientId(json.client_id);
+    return json;
   } catch {
     throw new Error('The server returned an invalid response. The file may be corrupted or in an unsupported format.');
   }
@@ -280,7 +304,7 @@ export async function generate(
 ): Promise<void> {
   const res = await fetch(`${ABM_BASE}/generate`, {
     method: "POST",
-    headers: { "Content-Type": "application/json" },
+    headers: cidHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify({
       job_id: jobId,
       voice,
@@ -330,6 +354,7 @@ export async function sendHeartbeat(jobId: string): Promise<void> {
     await fetch(`${ABM_BASE}/heartbeat/${jobId}`, {
       method: "POST",
       credentials: "include",
+      headers: cidHeaders(),
     });
   } catch {
     // Non-blocking — heartbeat failure shouldn't crash the UI
@@ -345,6 +370,7 @@ export async function resetToChapters(jobId: string): Promise<void> {
   const res = await fetch(`${ABM_BASE}/reset_to_chapters/${jobId}`, {
     method: "POST",
     credentials: "include",
+    headers: cidHeaders(),
   });
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
@@ -368,6 +394,7 @@ export async function resetToChapters(jobId: string): Promise<void> {
 export async function getJobChapters(jobId: string): Promise<AnalyzeResponse> {
   const res = await fetch(`${ABM_BASE}/job_chapters/${jobId}`, {
     credentials: "include",
+    headers: cidHeaders(),
   });
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
@@ -387,6 +414,7 @@ export async function deleteJob(jobId: string): Promise<void> {
   const res = await fetch(`${ABM_BASE}/delete/${jobId}`, {
     method: "POST",
     credentials: "include",
+    headers: cidHeaders(),
   });
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
@@ -406,6 +434,7 @@ export async function getBgmCues(
 ): Promise<BgmCue[]> {
   const res = await fetch(`${ABM_BASE}/bgm_cues/${jobId}/${chapterIdx}`, {
     credentials: "include",
+    headers: cidHeaders(),
   });
   if (!res.ok) {
     // 404 = bgm_mode is off/prerender → no cues (expected, not an error)
@@ -420,13 +449,15 @@ export async function getBgmCues(
  *  Served by Flask /api/bgm_asset/<mood> with 30-day immutable cache headers.
  *  Used as the `src` of hidden <audio loop> elements in the runtime mixer. */
 export function getBgmAssetUrl(mood: string): string {
-  return `${ABM_BASE}/bgm_asset/${mood}`;
+  const cid = getStoredClientId();
+  return `${ABM_BASE}/bgm_asset/${mood}${cid ? `?cid=${encodeURIComponent(cid)}` : ""}`;
 }
 
 /** Fetch the voice catalog grouped by language code. */
 export async function getVoices(): Promise<VoicesResponse> {
   const res = await fetch(`${ABM_BASE}/voices`, {
     credentials: "include",
+    headers: cidHeaders(),
   });
   if (!res.ok) {
     throw new Error(`Voices fetch failed (${res.status})`);
@@ -438,6 +469,7 @@ export async function getVoices(): Promise<VoicesResponse> {
 export async function getMyJobs(): Promise<MyJobsResponse> {
   const res = await fetch(`${ABM_BASE}/my_jobs`, {
     credentials: "include",
+    headers: cidHeaders(),
   });
   if (!res.ok) {
     throw new Error(`My jobs fetch failed (${res.status})`);
@@ -451,7 +483,8 @@ export async function getMyJobs(): Promise<MyJobsResponse> {
  * MP3 with proper streaming + range support.
  */
 export function getDownloadUrl(jobId: string): string {
-  return `${ABM_BASE}/download/${jobId}`;
+  const cid = getStoredClientId();
+  return `${ABM_BASE}/download/${jobId}${cid ? `?cid=${encodeURIComponent(cid)}` : ""}`;
 }
 
 /**
@@ -460,7 +493,8 @@ export function getDownloadUrl(jobId: string): string {
  * The Flask app serves the file with HTTP Range support for seeking.
  */
 export function getChapterMp3Url(jobId: string, chapterIndex: number): string {
-  return `${ABM_BASE}/chapter_mp3/${jobId}/${chapterIndex}`;
+  const cid = getStoredClientId();
+  return `${ABM_BASE}/chapter_mp3/${jobId}/${chapterIndex}${cid ? `?cid=${encodeURIComponent(cid)}` : ""}`;
 }
 
 /**
@@ -475,5 +509,6 @@ export function getChapterMp3Url(jobId: string, chapterIndex: number): string {
  */
 export function getCoverUrl(jobId: string, hasCover: boolean): string {
   if (!hasCover) return "";
-  return `${ABM_BASE}/cover/${jobId}`;
+  const cid = getStoredClientId();
+  return `${ABM_BASE}/cover/${jobId}${cid ? `?cid=${encodeURIComponent(cid)}` : ""}`;
 }
