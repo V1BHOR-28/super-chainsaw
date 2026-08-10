@@ -978,6 +978,309 @@
   </div>
 </section>
 
+<!-- ═══════════════════════════════════════════════════════════ -->
+<!-- AUDIOBOOK SHOWCASE SECTION -->
+<!-- ═══════════════════════════════════════════════════════════ -->
+<div class="divider"></div>
+
+<section id="audiobook-section" style="contain: layout style paint;" class="relative px-8 py-32 overflow-hidden">
+  <div class="ambient-glow w-[600px] h-[600px] bg-[#f59e0b] top-1/4 right-0 opacity-[0.08]"></div>
+
+  <div class="max-w-6xl mx-auto relative z-10">
+
+    <!-- Heading -->
+    <div class="mb-20 fade-up max-w-3xl">
+      <div class="text-xs text-[var(--accent-glow)] tracking-[0.2em] uppercase mb-5">Audiobooks</div>
+      <h2 class="serif text-5xl md:text-7xl leading-[0.95]">
+        Turn any book into an<br><em class="gradient-text">audiobook.</em>
+      </h2>
+      <p class="text-lg text-[var(--fg-muted)] mt-8 leading-relaxed">
+        Upload an EPUB or PDF. ARIA narrates it with natural voices, synced transcripts, and adaptive background music. Free.
+      </p>
+    </div>
+
+    <!-- Live Demo Widget: Fake Player Card -->
+    <div class="ab-demo-card fade-up" style="max-width: 520px; margin: 0 auto 80px;">
+      <style>
+        @keyframes abWave {
+          0%, 100% { height: 4px; }
+          50% { height: 16px; }
+        }
+        @keyframes abProgress {
+          0% { width: 0%; }
+          100% { width: 68%; }
+        }
+        @keyframes abPulse {
+          0%, 100% { opacity: 0.3; }
+          50% { opacity: 0.6; }
+        }
+        .ab-demo-card {
+          background: var(--bg-soft);
+          border: 1px solid var(--border);
+          border-radius: 20px;
+          padding: 28px;
+          position: relative;
+          overflow: hidden;
+        }
+        .ab-demo-card::before {
+          content: '';
+          position: absolute;
+          inset: 0;
+          border-radius: 20px;
+          background: radial-gradient(circle at 50% 0%, rgba(245,158,11,0.12), transparent 60%);
+          pointer-events: none;
+          animation: abPulse 4s ease-in-out infinite;
+        }
+        .ab-now-playing {
+          display: flex;
+          align-items: center;
+          gap: 8px;
+          font-size: 11px;
+          text-transform: uppercase;
+          letter-spacing: 0.15em;
+          color: var(--accent-glow);
+          margin-bottom: 16px;
+        }
+        .ab-eq {
+          display: flex;
+          align-items: flex-end;
+          gap: 2px;
+          height: 16px;
+        }
+        .ab-eq span {
+          width: 3px;
+          background: var(--accent-glow);
+          border-radius: 2px;
+          animation: abWave 0.8s ease-in-out infinite;
+        }
+        .ab-eq span:nth-child(1) { animation-delay: 0ms; }
+        .ab-eq span:nth-child(2) { animation-delay: 100ms; }
+        .ab-eq span:nth-child(3) { animation-delay: 200ms; }
+        .ab-eq span:nth-child(4) { animation-delay: 300ms; }
+        .ab-eq span:nth-child(5) { animation-delay: 400ms; }
+        .ab-book-title {
+          font-family: var(--font-serif), Georgia, serif;
+          font-size: 20px;
+          color: var(--fg);
+          margin-bottom: 4px;
+        }
+        .ab-chapter {
+          font-size: 13px;
+          color: var(--fg-muted);
+          margin-bottom: 20px;
+        }
+        .ab-progress-row {
+          display: flex;
+          align-items: center;
+          gap: 12px;
+          margin-bottom: 20px;
+        }
+        .ab-progress-bar {
+          flex: 1;
+          height: 4px;
+          background: var(--border);
+          border-radius: 2px;
+          overflow: hidden;
+          position: relative;
+        }
+        .ab-progress-fill {
+          height: 100%;
+          background: linear-gradient(90deg, var(--accent), var(--accent-glow));
+          border-radius: 2px;
+          animation: abProgress 20s linear infinite;
+        }
+        .ab-time {
+          font-size: 12px;
+          color: var(--fg-muted);
+          font-family: var(--font-mono), monospace;
+          min-width: 70px;
+          text-align: right;
+        }
+        .ab-quote {
+          background: rgba(245,158,11,0.06);
+          border-left: 2px solid var(--accent-glow);
+          border-radius: 0 12px 12px 0;
+          padding: 16px 20px;
+          font-family: var(--font-serif), Georgia, serif;
+          font-size: 15px;
+          line-height: 1.6;
+          color: var(--fg-muted);
+          font-style: italic;
+          min-height: 80px;
+        }
+        .ab-quote .ab-word {
+          transition: color 0.15s, background 0.15s;
+          padding: 0 1px;
+          border-radius: 3px;
+        }
+        .ab-quote .ab-word.active {
+          color: var(--accent-glow);
+          background: rgba(245,158,11,0.12);
+          font-weight: 500;
+        }
+      </style>
+      <div class="ab-now-playing">
+        <div class="ab-eq">
+          <span></span><span></span><span></span><span></span><span></span>
+        </div>
+        Now Playing
+      </div>
+      <div class="ab-book-title">Wuthering Heights</div>
+      <div class="ab-chapter">Chapter 1 — by Emily Brontë</div>
+      <div class="ab-progress-row">
+        <div class="ab-progress-bar">
+          <div class="ab-progress-fill"></div>
+        </div>
+        <div class="ab-time">2:31 / 12:04</div>
+      </div>
+      <div class="ab-quote" id="ab-quote">
+        <span class="ab-word">The</span> <span class="ab-word">old</span> <span class="ab-word">house</span> <span class="ab-word">stood</span> <span class="ab-word">at</span> <span class="ab-word">the</span> <span class="ab-word">edge</span> <span class="ab-word">of</span> <span class="ab-word">the</span> <span class="ab-word">lane,</span> <span class="ab-word">its</span> <span class="ab-word">windows</span> <span class="ab-word">dark</span> <span class="ab-word">and</span> <span class="ab-word">empty.</span> <span class="ab-word">Sarah</span> <span class="ab-word">approached</span> <span class="ab-word">cautiously,</span> <span class="ab-word">her</span> <span class="ab-word">footsteps</span> <span class="ab-word">crunching</span> <span class="ab-word">on</span> <span class="ab-word">the</span> <span class="ab-word">gravel</span> <span class="ab-word">path.</span>
+      </div>
+    </div>
+
+    <!-- Three Feature Cards -->
+    <div class="grid md:grid-cols-3 gap-6 mb-20">
+      <div class="ab-feature-card fade-up">
+        <style>
+          .ab-feature-card {
+            background: var(--bg-soft);
+            border: 1px solid var(--border);
+            border-radius: 16px;
+            padding: 28px;
+            transition: border-color 0.3s, transform 0.3s;
+          }
+          .ab-feature-card:hover {
+            border-color: var(--accent-glow);
+            transform: translateY(-4px);
+          }
+          .ab-feature-icon {
+            font-size: 32px;
+            margin-bottom: 16px;
+          }
+          .ab-feature-title {
+            font-family: var(--font-serif), Georgia, serif;
+            font-size: 20px;
+            color: var(--fg);
+            margin-bottom: 8px;
+          }
+          .ab-feature-desc {
+            font-size: 14px;
+            color: var(--fg-muted);
+            line-height: 1.6;
+          }
+        </style>
+        <div class="ab-feature-icon">📄</div>
+        <div class="ab-feature-title">Any EPUB or PDF</div>
+        <div class="ab-feature-desc">Drop your book — ARIA detects chapters, extracts text, and narrates it. No manual splitting.</div>
+      </div>
+      <div class="ab-feature-card fade-up">
+        <div class="ab-feature-icon">🎙️</div>
+        <div class="ab-feature-title">10 Natural Voices</div>
+        <div class="ab-feature-desc">Warm narration with audiobook-grade pacing. No robotic TTS. No cost — always free.</div>
+      </div>
+      <div class="ab-feature-card fade-up">
+        <div class="ab-feature-icon">🎧</div>
+        <div class="ab-feature-title">Synced Transcripts</div>
+        <div class="ab-feature-desc">Word-by-word highlighting like karaoke. Click any word to jump there. Spotify-style.</div>
+      </div>
+    </div>
+
+    <!-- Stats Counter -->
+    <div class="ab-stats fade-up" style="display: flex; justify-content: center; gap: 48px; flex-wrap: wrap; padding: 32px 0;">
+      <style>
+        .ab-stat { text-align: center; }
+        .ab-stat-num {
+          font-family: var(--font-serif), Georgia, serif;
+          font-size: 48px;
+          color: var(--accent-glow);
+          line-height: 1;
+          margin-bottom: 8px;
+        }
+        .ab-stat-label {
+          font-size: 13px;
+          color: var(--fg-muted);
+          text-transform: uppercase;
+          letter-spacing: 0.1em;
+        }
+        .ab-stat-underline {
+          width: 0;
+          height: 2px;
+          background: var(--accent-glow);
+          margin: 12px auto 0;
+          transition: width 0.8s ease;
+        }
+        .ab-stats.visible .ab-stat-underline { width: 60px; }
+      </style>
+      <div class="ab-stat">
+        <div class="ab-stat-num" data-count="10">0</div>
+        <div class="ab-stat-label">Natural Voices</div>
+        <div class="ab-stat-underline"></div>
+      </div>
+      <div class="ab-stat">
+        <div class="ab-stat-num" data-count="8">0</div>
+        <div class="ab-stat-label">Music Moods</div>
+        <div class="ab-stat-underline"></div>
+      </div>
+      <div class="ab-stat">
+        <div class="ab-stat-num" data-count="0" data-suffix="¢">0¢</div>
+        <div class="ab-stat-label">Per Book</div>
+        <div class="ab-stat-underline"></div>
+      </div>
+    </div>
+  </div>
+</section>
+
+<script>
+// Audiobook word highlighter — highlights words one by one on a loop
+(function() {
+  var words = document.querySelectorAll('#ab-quote .ab-word');
+  if (!words.length) return;
+  var idx = 0;
+  function highlightNext() {
+    words.forEach(function(w) { w.classList.remove('active'); });
+    if (words[idx]) words[idx].classList.add('active');
+    idx = (idx + 1) % words.length;
+  }
+  highlightNext();
+  setInterval(highlightNext, 220);
+})();
+
+// Stats counter — counts up when visible
+(function() {
+  var statsContainer = document.querySelector('.ab-stats');
+  if (!statsContainer) return;
+  var observer = new IntersectionObserver(function(entries) {
+    entries.forEach(function(entry) {
+      if (entry.isIntersecting) {
+        statsContainer.classList.add('visible');
+        statsContainer.querySelectorAll('.ab-stat-num').forEach(function(el) {
+          var target = parseInt(el.dataset.count || '0');
+          var suffix = el.dataset.suffix || '';
+          if (target === 0) {
+            el.textContent = '0' + suffix;
+            return;
+          }
+          var current = 0;
+          var step = Math.ceil(target / 30);
+          var interval = setInterval(function() {
+            current += step;
+            if (current >= target) {
+              current = target;
+              clearInterval(interval);
+            }
+            el.textContent = current + suffix;
+          }, 40);
+        });
+        observer.disconnect();
+      }
+    });
+  }, { threshold: 0.3 });
+  observer.observe(statsContainer);
+})();
+</script>
+<!-- ═══════════════════════════════════════════════════════════ -->
+
+
 <!-- FEATURES -->
 <section id="features" style="contain: layout style paint;" class="relative px-8 py-32">
   <div class="max-w-7xl mx-auto">
