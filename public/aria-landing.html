@@ -741,8 +741,8 @@
       <span class="serif text-2xl tracking-tight">ARIA</span>
     </div>
     <div class="hidden md:flex items-center gap-10">
-      <a href="#how-it-works" class="nav-link">How it works</a>
-      <a href="#transcript-demo" class="nav-link">Transcripts</a>
+      <a href="#features" class="nav-link">Features</a>
+      <a href="#terminal-section" class="nav-link">Preview</a>
       <a href="#about" class="nav-link">About</a>
     </div>
     <div class="flex items-center gap-5">
@@ -762,7 +762,7 @@
   </div>
 </nav>
 
-<!-- HERO: Audiobook-first -->
+<!-- HERO -->
 <section style="contain: layout style paint;" class="relative min-h-screen flex items-center px-8 pt-32 pb-24 overflow-hidden">
   <div class="ambient-glow w-[700px] h-[700px] bg-[#f59e0b] -top-40 -right-40 opacity-25"></div>
   <div class="ambient-glow w-[500px] h-[500px] bg-[#92400e] bottom-0 -left-32 opacity-15"></div>
@@ -771,25 +771,26 @@
     <div class="space-y-8">
       <div class="status-pill">
         <span class="status-dot"></span>
-        FREE · NO SIGNUP REQUIRED
+        ONLINE · AUTONOMOUS REASONING ACTIVE
       </div>
 
       <h1 class="serif text-6xl md:text-7xl lg:text-[88px] leading-[0.95] tracking-tight">
-        Your books,<br>
-        <em class="gradient-text">narrated.</em>
+        Not a chatbot.<br>
+        <em class="gradient-text">A partner.</em>
       </h1>
 
       <p class="text-lg text-[var(--fg-muted)] max-w-md leading-relaxed">
-        Upload an EPUB or PDF. ARIA narrates it with natural voices, synced transcripts, and adaptive background music — free, forever.
+        ARIA doesn't just respond — she reasons, pushes back, and remembers the shape of your thinking. Built to think alongside you, not for you.
       </p>
 
       <div class="flex flex-wrap items-center gap-4">
         <button class="btn-primary" onclick="openModal()">
-          <span>Start listening</span>
+          <span>Start talking to ARIA</span>
           <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14M13 5l7 7-7 7"/></svg>
         </button>
-        <button class="btn-ghost" onclick="document.getElementById('how-it-works').scrollIntoView({behavior:'smooth'})">
-          See how it works
+        <button class="btn-ghost" onclick="document.getElementById('terminal-section').scrollIntoView({behavior:'smooth'})">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="currentColor"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+          Watch her think
         </button>
       </div>
 
@@ -803,11 +804,10 @@
           <span class="wave-bar" style="animation-delay: 0.5s"></span>
           <span class="wave-bar" style="animation-delay: 0.6s"></span>
         </div>
-        <span class="text-xs text-[var(--fg-muted)] tracking-[0.2em] uppercase">10 voices · 8 moods · 0¢</span>
+        <span class="text-xs text-[var(--fg-muted)] tracking-[0.2em] uppercase">Listening · 0:14</span>
       </div>
     </div>
 
-    <!-- Sphere + Player widget in hero -->
     <div class="sphere-stage">
       <div class="orbit orbit-1"></div>
       <div class="orbit orbit-2"></div>
@@ -818,64 +818,20 @@
         <div class="sphere-highlight"></div>
       </div>
 
-      <!-- Player card floating over the sphere -->
-      <div class="ab-hero-player">
-        <style>
-          .ab-hero-player {
-            background: var(--bg-soft);
-            border: 1px solid var(--border);
-            border-radius: 20px;
-            padding: 28px;
-            position: relative;
-            overflow: hidden;
-            box-shadow: 0 20px 60px rgba(0,0,0,0.5);
-            z-index: 5;
-            max-width: 380px;
-            margin: 0 auto;
-          }
-          .ab-hero-player::before {
-            content: '';
-            position: absolute;
-            inset: 0;
-            border-radius: 20px;
-            background: radial-gradient(circle at 50% 0%, rgba(245,158,11,0.12), transparent 60%);
-            pointer-events: none;
-          }
-        </style>
-        <div class="ab-now-playing">
-          <div class="ab-eq">
-            <span></span><span></span><span></span><span></span><span></span>
-          </div>
-          Now Playing
-        </div>
-        <div class="ab-book-title">Wuthering Heights</div>
-        <div class="ab-chapter">Chapter 1 — by Emily Brontë</div>
-        <div class="ab-progress-row">
-          <div class="ab-progress-bar">
-            <div class="ab-progress-fill"></div>
-          </div>
-          <div class="ab-time">2:31 / 12:04</div>
-        </div>
-        <div class="ab-quote" id="ab-quote-hero">
-          <span class="ab-word">The</span> <span class="ab-word">old</span> <span class="ab-word">house</span> <span class="ab-word">stood</span> <span class="ab-word">at</span> <span class="ab-word">the</span> <span class="ab-word">edge</span> <span class="ab-word">of</span> <span class="ab-word">the</span> <span class="ab-word">lane,</span> <span class="ab-word">its</span> <span class="ab-word">windows</span> <span class="ab-word">dark</span> <span class="ab-word">and</span> <span class="ab-word">empty.</span> <span class="ab-word">Sarah</span> <span class="ab-word">approached</span> <span class="ab-word">cautiously,</span> <span class="ab-word">her</span> <span class="ab-word">footsteps</span> <span class="ab-word">crunching</span> <span class="ab-word">on</span> <span class="ab-word">the</span> <span class="ab-word">gravel</span> <span class="ab-word">path.</span>
-        </div>
-      </div>
-
-      <!-- Chat bubbles floating around -->
       <div class="bubble" style="top: 5%; left: -2%; animation-delay: 0s;">
         <div class="bubble-label">ARIA</div>
-        "The old house stood..."
+        "I don't buy that, actually..."
       </div>
 
       <div class="bubble accent" style="top: 32%; right: -8%; animation-delay: 1.2s;">
         <div class="bubble-label">ARIA</div>
-        "Chapter 1, narrated."
+        "Tell me why you believe that."
       </div>
 
       <div class="bubble" style="bottom: 22%; left: -6%; animation-delay: 2.4s;">
-        <div class="bubble-label">ARIA · NARRATING</div>
+        <div class="bubble-label">ARIA · THINKING</div>
         <div class="flex items-center gap-1">
-          Word-by-word sync
+          Reasoning through this
           <span class="typing-dot"></span>
           <span class="typing-dot"></span>
           <span class="typing-dot"></span>
@@ -897,31 +853,59 @@
 
 <div class="divider"></div>
 
-<!-- HOW IT WORKS: 3 steps -->
-<section id="how-it-works" style="contain: layout style paint;" class="relative px-8 py-32 overflow-hidden">
-  <div class="ambient-glow w-[500px] h-[500px] bg-[#f59e0b] top-1/4 right-0 opacity-[0.06]"></div>
-  <div class="max-w-6xl mx-auto relative z-10">
-    <div class="mb-20 fade-up max-w-3xl">
-      <div class="text-xs text-[var(--accent-glow)] tracking-[0.2em] uppercase mb-5">How it works</div>
-      <h2 class="serif text-5xl md:text-7xl leading-[0.95]">
-        Three steps to your<br><em class="gradient-text">audiobook.</em>
+<!-- SECTION 2: She's already listening -->
+<section id="preview" style="contain: layout style paint;" class="relative px-8 py-32 overflow-hidden">
+  <div class="ambient-glow w-[600px] h-[600px] bg-[#f59e0b] top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 opacity-10"></div>
+
+  <div class="max-w-5xl mx-auto text-center relative z-10">
+    <div class="fade-up">
+      <div class="status-pill mb-8">
+        <span class="status-dot"></span>
+        TWO-MINUTE INTRO
+      </div>
+
+      <h2 class="serif text-5xl md:text-7xl lg:text-8xl leading-[0.95] mb-8">
+        She's already <em class="gradient-text">listening.</em>
       </h2>
+
+      <p class="text-xl text-[var(--fg-muted)] max-w-2xl mx-auto mb-12 leading-relaxed">
+        Give her two minutes. You'll leave with a different opinion about what an assistant can be.
+      </p>
+
+      <div class="flex flex-wrap items-center justify-center gap-4">
+        <button class="btn-primary" onclick="openModal()">
+          <span>Start talking</span>
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14M13 5l7 7-7 7"/></svg>
+        </button>
+        <button class="btn-ghost" onclick="openModal()">Sign in</button>
+      </div>
     </div>
-    <div class="grid md:grid-cols-3 gap-6">
-      <div class="ab-feature-card fade-up">
-        <div class="ab-feature-icon">📄</div>
-        <div class="ab-feature-title">1. Upload</div>
-        <div class="ab-feature-desc">Drop any EPUB or PDF. ARIA detects chapters automatically — no manual splitting.</div>
+
+    <div class="max-w-3xl mx-auto text-left space-y-5 mt-24">
+      <div class="msg-row">
+        <div class="avatar user">YOU</div>
+        <div class="msg-bubble">I think I should quit my job.</div>
       </div>
-      <div class="ab-feature-card fade-up">
-        <div class="ab-feature-icon">🎙️</div>
-        <div class="ab-feature-title">2. Narrate</div>
-        <div class="ab-feature-desc">Pick from 10 natural voices. ARIA narrates with audiobook pacing — always free.</div>
+
+      <div class="msg-row justify-end">
+        <div class="msg-bubble aria">
+          <div class="text-[10px] tracking-[0.15em] text-[var(--accent-glow)] uppercase mb-1.5">ARIA</div>
+          Why now? And why is this the version of you that's deciding?
+        </div>
+        <div class="avatar aria">A</div>
       </div>
-      <div class="ab-feature-card fade-up">
-        <div class="ab-feature-icon">🎧</div>
-        <div class="ab-feature-title">3. Listen</div>
-        <div class="ab-feature-desc">Word-by-word synced transcripts. Adaptive background music. Click any word to jump.</div>
+
+      <div class="msg-row">
+        <div class="avatar user">YOU</div>
+        <div class="msg-bubble">I don't know. I'm just tired.</div>
+      </div>
+
+      <div class="msg-row justify-end">
+        <div class="msg-bubble aria">
+          <div class="text-[10px] tracking-[0.15em] text-[var(--accent-glow)] uppercase mb-1.5">ARIA</div>
+          Tired is a feeling, not a reason. Let's separate them — what's the feeling actually about?
+        </div>
+        <div class="avatar aria">A</div>
       </div>
     </div>
   </div>
@@ -929,126 +913,77 @@
 
 <div class="divider"></div>
 
-<!-- TRANSCRIPT DEMO: Word-by-word highlighting -->
-<section id="transcript-demo" style="contain: layout style paint;" class="relative px-8 py-32 overflow-hidden">
-  <div class="ambient-glow w-[600px] h-[600px] bg-[#f59e0b] top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 opacity-[0.08]"></div>
-  <div class="max-w-4xl mx-auto text-center relative z-10">
-    <div class="fade-up mb-12">
-      <div class="text-xs text-[var(--accent-glow)] tracking-[0.2em] uppercase mb-5">Synced Transcripts</div>
-      <h2 class="serif text-5xl md:text-7xl leading-[0.95] mb-8">
-        Every word, <em class="gradient-text">highlighted.</em>
+<!-- TERMINAL SECTION -->
+<section id="terminal-section" style="contain: layout style paint;" class="relative px-8 py-32 border-y border-[var(--border)] overflow-hidden">
+  <div class="ambient-glow w-[700px] h-[700px] bg-[#f59e0b] top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 opacity-12"></div>
+
+  <div class="max-w-4xl mx-auto relative z-10">
+    <div class="text-center mb-12 fade-up">
+      <div class="status-pill mb-6 inline-flex">
+        <span class="status-dot"></span>
+        LIVE SESSION · FRONTEND PREVIEW
+      </div>
+      <h2 class="serif text-5xl md:text-6xl lg:text-7xl leading-[0.95] mb-5">
+        Talk to her <em class="gradient-text">right now.</em>
       </h2>
-      <p class="text-lg text-[var(--fg-muted)] max-w-2xl mx-auto leading-relaxed">
-        Like karaoke for your book. ARIA syncs every word to the narration — follow along, or click any word to jump there.
+      <p class="text-[var(--fg-muted)] max-w-xl mx-auto text-lg">
+        A live preview of how ARIA thinks. Type something honest — she'll meet you there.
       </p>
     </div>
-    <div class="ab-quote fade-up" style="font-size: 22px; line-height: 1.8; max-width: 700px; margin: 0 auto; text-align: left; padding: 32px 40px;" id="ab-quote-demo">
-      <span class="ab-word">It</span> <span class="ab-word">was</span> <span class="ab-word">the</span> <span class="ab-word">best</span> <span class="ab-word">of</span> <span class="ab-word">times,</span> <span class="ab-word">it</span> <span class="ab-word">was</span> <span class="ab-word">the</span> <span class="ab-word">worst</span> <span class="ab-word">of</span> <span class="ab-word">times,</span> <span class="ab-word">it</span> <span class="ab-word">was</span> <span class="ab-word">the</span> <span class="ab-word">age</span> <span class="ab-word">of</span> <span class="ab-word">wisdom,</span> <span class="ab-word">it</span> <span class="ab-word">was</span> <span class="ab-word">the</span> <span class="ab-word">age</span> <span class="ab-word">of</span> <span class="ab-word">foolishness,</span> <span class="ab-word">it</span> <span class="ab-word">was</span> <span class="ab-word">the</span> <span class="ab-word">epoch</span> <span class="ab-word">of</span> <span class="ab-word">belief,</span> <span class="ab-word">it</span> <span class="ab-word">was</span> <span class="ab-word">the</span> <span class="ab-word">epoch</span> <span class="ab-word">of</span> <span class="ab-word">incredulity,</span> <span class="ab-word">it</span> <span class="ab-word">was</span> <span class="ab-word">the</span> <span class="ab-word">season</span> <span class="ab-word">of</span> <span class="ab-word">Light,</span> <span class="ab-word">it</span> <span class="ab-word">was</span> <span class="ab-word">the</span> <span class="ab-word">season</span> <span class="ab-word">of</span> <span class="ab-word">Darkness,</span> <span class="ab-word">it</span> <span class="ab-word">was</span> <span class="ab-word">the</span> <span class="ab-word">spring</span> <span class="ab-word">of</span> <span class="ab-word">hope,</span> <span class="ab-word">it</span> <span class="ab-word">was</span> <span class="ab-word">the</span> <span class="ab-word">winter</span> <span class="ab-word">of</span> <span class="ab-word">despair.</span>
+
+    <div class="terminal fade-up">
+      <div class="terminal-header">
+        <div class="terminal-dots">
+          <span></span><span></span><span></span>
+        </div>
+        <div class="terminal-title">aria — interactive session · ~/.aria/live</div>
+        <div class="terminal-status">
+          <span class="status-dot"></span>
+          <span id="sessionTimer">00:00:14</span>
+        </div>
+      </div>
+
+      <div class="terminal-body" id="terminalBody">
+        <div class="term-line system">ARIA v2.4.1 — autonomous reasoning engine</div>
+        <div class="term-line system">Type your message. Press Enter to send.</div>
+        <div class="term-line system">— — — — — — — — — — — — — — — — — — — —</div>
+        <div class="term-line empty"></div>
+
+        <div class="term-line user">
+          <span class="term-prompt">you</span>
+          <span class="term-text">everyone seems to have it figured out except me</span>
+        </div>
+        <div class="term-line aria">
+          <span class="term-prompt">aria</span>
+          <span class="term-text">they're performing the same act you are. the audience just can't see the backstage.</span>
+        </div>
+        <div class="term-line empty"></div>
+      </div>
+
+      <div class="terminal-input-row">
+        <span class="term-prompt">you</span>
+        <input type="text" id="terminalInput" placeholder="type something honest..." autocomplete="off" spellcheck="false">
+        <span class="input-hint">ENTER</span>
+      </div>
+    </div>
+
+    <div class="flex flex-wrap items-center justify-center gap-2 mt-6 fade-up">
+      <span class="text-xs text-[var(--fg-dim)] mr-2 mono">try:</span>
+      <button class="suggest-chip" data-text="i feel like an imposter">i feel like an imposter</button>
+      <button class="suggest-chip" data-text="i don't know who i am anymore">i don't know who i am anymore</button>
+      <button class="suggest-chip" data-text="i'm scared i'll end up alone">i'm scared i'll end up alone</button>
+      <button class="suggest-chip" data-text="i just want to be happy">i just want to be happy</button>
+      <button class="suggest-chip" data-text="why does nothing feel enough">why does nothing feel enough</button>
     </div>
   </div>
 </section>
 
-<div class="divider"></div>
-
-<!-- STATS COUNTER -->
-<section style="contain: layout style paint;" class="relative px-8 py-20">
-  <div class="ab-stats fade-up" style="display: flex; justify-content: center; gap: 64px; flex-wrap: wrap; padding: 24px 0;">
-    <div class="ab-stat">
-      <div class="ab-stat-num" data-count="10">0</div>
-      <div class="ab-stat-label">Natural Voices</div>
-      <div class="ab-stat-underline"></div>
-    </div>
-    <div class="ab-stat">
-      <div class="ab-stat-num" data-count="8">0</div>
-      <div class="ab-stat-label">Music Moods</div>
-      <div class="ab-stat-underline"></div>
-    </div>
-    <div class="ab-stat">
-      <div class="ab-stat-num" data-count="0" data-suffix="¢">0¢</div>
-      <div class="ab-stat-label">Per Book</div>
-      <div class="ab-stat-underline"></div>
-    </div>
-  </div>
-</section>
-
-<div class="divider"></div>
-
-<!-- ARIA IS ALSO A THINKING PARTNER (demoted) -->
-<section id="partner-section" style="contain: layout style paint;" class="relative px-8 py-24 overflow-hidden">
-  <div class="ambient-glow w-[400px] h-[400px] bg-[#92400e] bottom-0 right-0 opacity-[0.08]"></div>
-  <div class="max-w-3xl mx-auto text-center relative z-10 fade-up">
-    <div class="text-xs text-[var(--fg-muted)] tracking-[0.2em] uppercase mb-5">And there's more</div>
-    <h2 class="serif text-4xl md:text-5xl leading-[0.95] mb-6">
-      ARIA is also a <em class="gradient-text">thinking partner.</em>
-    </h2>
-    <p class="text-lg text-[var(--fg-muted)] max-w-xl mx-auto leading-relaxed mb-8">
-      When you're done listening, talk to her. She reasons, pushes back, and remembers the shape of your thinking across every conversation.
-    </p>
-    <button class="btn-ghost" onclick="openModal()">
-      Try the chat
-      <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M5 12h14M13 5l7 7-7 7"/></svg>
-    </button>
-  </div>
-</section>
-
-<script>
-// Word highlighter for BOTH hero quote and demo quote
-(function() {
-  function setupHighlighter(containerId) {
-    var container = document.getElementById(containerId);
-    if (!container) return;
-    var words = container.querySelectorAll('.ab-word');
-    if (!words.length) return;
-    var idx = 0;
-    function highlightNext() {
-      words.forEach(function(w) { w.classList.remove('active'); });
-      if (words[idx]) words[idx].classList.add('active');
-      idx = (idx + 1) % words.length;
-    }
-    highlightNext();
-    setInterval(highlightNext, 220);
-  }
-  setupHighlighter('ab-quote-hero');
-  setupHighlighter('ab-quote-demo');
-  // Also setup the original one if it exists
-  setupHighlighter('ab-quote');
-})();
-
-// Stats counter
-(function() {
-  var statsContainer = document.querySelector('.ab-stats');
-  if (!statsContainer) return;
-  var observer = new IntersectionObserver(function(entries) {
-    entries.forEach(function(entry) {
-      if (entry.isIntersecting) {
-        statsContainer.classList.add('visible');
-        statsContainer.querySelectorAll('.ab-stat-num').forEach(function(el) {
-          var target = parseInt(el.dataset.count || '0');
-          var suffix = el.dataset.suffix || '';
-          if (target === 0) { el.textContent = '0' + suffix; return; }
-          var current = 0;
-          var step = Math.ceil(target / 30);
-          var interval = setInterval(function() {
-            current += step;
-            if (current >= target) { current = target; clearInterval(interval); }
-            el.textContent = current + suffix;
-          }, 40);
-        });
-        observer.disconnect();
-      }
-    });
-  }, { threshold: 0.3 });
-  observer.observe(statsContainer);
-})();
-</script>
 <!-- ═══════════════════════════════════════════════════════════ -->
-<!-- AUDIOBOOK SHOWCASE SECTION (kept for CSS/JS, hidden) -->
-<!-- ═══════════════════════════════════════════════════════════ --><!-- ═══════════════════════════════════════════════════════════ -->
 <!-- AUDIOBOOK SHOWCASE SECTION -->
 <!-- ═══════════════════════════════════════════════════════════ -->
 <div class="divider"></div>
 
-<section id="audiobook-section" style="display:none;" aria-hidden="true">
+<section id="audiobook-section" style="contain: layout style paint;" class="relative px-8 py-32 overflow-hidden">
   <div class="ambient-glow w-[600px] h-[600px] bg-[#f59e0b] top-1/4 right-0 opacity-[0.08]"></div>
 
   <div class="max-w-6xl mx-auto relative z-10">
