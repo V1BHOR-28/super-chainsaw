@@ -288,6 +288,12 @@ def _handle_request_too_large(e):
 @app.after_request
 def add_security_headers(response):
     """Aggiunge header di sicurezza alle risposte HTTP."""
+    # CORS: allow direct browser uploads to /api/analyze (bypasses Vercel proxy).
+    # Reflect the request Origin (never use * with credentials).
+    if request.path == "/api/analyze" and request.headers.get("Origin"):
+        response.headers["Access-Control-Allow-Origin"] = request.headers["Origin"]
+        response.headers["Access-Control-Allow-Credentials"] = "true"
+        response.headers["Vary"] = "Origin"
     response.headers['X-Content-Type-Options'] = 'nosniff'
     response.headers['X-Frame-Options'] = 'DENY'
     response.headers['X-XSS-Protection'] = '1; mode=block'
@@ -8310,6 +8316,23 @@ def _file_hash(path):
                 break
             h.update(chunk)
     return h.hexdigest()
+
+
+# ── CORS for direct browser→Flask uploads (bypasses Vercel proxy) ──
+# When NEXT_PUBLIC_ABM_DIRECT_URL is set, the browser POSTs multipart/form-data
+# directly to /api/analyze. This requires CORS with credentials (for the
+# abm_cid cookie). We reflect the request Origin (never use * with credentials).
+@app.route("/api/analyze", methods=["OPTIONS"])
+def api_analyze_cors_preflight():
+    origin = request.headers.get("Origin", "")
+    resp = app.make_default_options_response()
+    if origin:
+        resp.headers["Access-Control-Allow-Origin"] = origin
+        resp.headers["Access-Control-Allow-Credentials"] = "true"
+        resp.headers["Access-Control-Allow-Methods"] = "POST, OPTIONS"
+        resp.headers["Access-Control-Allow-Headers"] = "Content-Type, X-ABM-Cid"
+        resp.headers["Vary"] = "Origin"
+    return resp
 
 
 @app.route("/api/analyze", methods=["POST"])

@@ -394,7 +394,24 @@ export function LibraryView() {
     const file = e.target.files?.[0];
     e.target.value = ""; // reset so re-picking the same file fires onChange
     if (!file) return;
+
+    // Reject files > 50MB client-side to save a round-trip
+    if (file.size > 50 * 1024 * 1024) {
+      toast({
+        title: "File too large",
+        description: `${file.name} is ${(file.size / (1024 * 1024)).toFixed(1)}MB. Maximum is 50MB.`,
+      });
+      return;
+    }
+
     setUploading(true);
+    // Persistent "analyzing" toast — only dismissed in the finally block
+    const analyzingToast = toast({
+      title: `Analyzing ${file.name}…`,
+      description: file.name.toLowerCase().endsWith(".pdf")
+        ? "PDFs can take a few minutes to parse. Please wait."
+        : "This can take a few seconds.",
+    });
     try {
       const resp = await analyzeEpub(file);
       // If the user previously deleted this job_id (e.g. the old backend
@@ -411,10 +428,6 @@ export function LibraryView() {
         title: "Book analyzed",
         description: `${resp.title} — ${resp.total_chapters} chapters detected`,
       });
-      // Note: cover art is extracted from the EPUB by the Flask /api/analyze
-      // endpoint and served from /api/cover/<job_id>. No client-side
-      // generation needed — the cover appears immediately when the card
-      // is rendered (toCard() sets coverImgUrl from getCoverUrl()).
     } catch (err) {
       console.error("[library-view] analyze failed", err);
       toast({
@@ -423,6 +436,10 @@ export function LibraryView() {
       });
     } finally {
       setUploading(false);
+      // Dismiss the persistent "analyzing" toast
+      if (analyzingToast && typeof analyzingToast.dismiss === "function") {
+        analyzingToast.dismiss();
+      }
     }
   };
 

@@ -213,18 +213,56 @@ export function isPollingStatus(status: JobStatus | string | undefined): boolean
 export async function analyzeEpub(file: File): Promise<AnalyzeResponse> {
   const form = new FormData();
   form.append("epub", file);
-  const res = await fetch(`${ABM_BASE}/analyze`, {
-    method: "POST",
-    body: form,
-    credentials: "include",
-  });
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({}));
-    throw new Error(
-      (body && (body.error || body.message)) || `Analyze failed (${res.status})`,
-    );
+
+  // If NEXT_PUBLIC_ABM_DIRECT_URL is set, POST directly to the Flask service
+  // to bypass Vercel's ~4.5MB request body limit. This is essential for
+  // large PDF uploads that exceed the Vercel proxy's buffering capacity.
+  const directUrl = process.env.NEXT_PUBLIC_ABM_DIRECT_URL;
+  const analyzeUrl = directUrl
+    ? `${directUrl}/api/analyze`
+    : `${ABM_BASE}/analyze`;
+
+  // 300s timeout — large PDFs can take minutes to parse on Render free tier
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), 300000);
+
+  let res: Response;
+  try {
+    res = await fetch(analyzeUrl, {
+      method: "POST",
+      body: form,
+      credentials: "include",
+      signal: controller.signal,
+    });
+  } catch (err) {
+    clearTimeout(timeoutId);
+    if (err instanceof Error && err.name === 'AbortError') {
+      throw new Error('Upload timed out after 5 minutes. The file may be too large or the server is still waking up.');
+    }
+    throw new Error('Upload failed — the file may be too large or the server timed out.');
   }
-  return (await res.json()) as AnalyzeResponse;
+  clearTimeout(timeoutId);
+
+  if (!res.ok) {
+    // Try to parse JSON error, fall back to raw text
+    const text = await res.text().catch(() => '');
+    let errorMsg = `Analyze failed (${res.status})`;
+    try {
+      const body = JSON.parse(text);
+      if (body.error || body.message) errorMsg = body.error || body.message;
+    } catch {
+      // Not JSON — include the first 200 chars of the response
+      if (text) errorMsg += `: ${text.substring(0, 200)}`;
+    }
+    throw new Error(errorMsg);
+  }
+
+  // Parse the JSON response
+  try {
+    return (await res.json()) as AnalyzeResponse;
+  } catch {
+    throw new Error('The server returned an invalid response. The file may be corrupted or in an unsupported format.');
+  }
 }
 
 /**

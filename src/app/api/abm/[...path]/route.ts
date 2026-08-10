@@ -1,6 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server'
 export const runtime = 'nodejs'
-export const maxDuration = 60
+export const maxDuration = 300
 
 /**
  * /api/abm/[...path] — Next.js API proxy for the audiobook-maker Flask service.
@@ -80,10 +80,11 @@ async function proxy(
   const clientIp = req.headers.get('x-forwarded-for') || req.headers.get('x-real-ip') || '127.0.0.1'
   headers.set('X-Forwarded-For', clientIp)
 
-  // Forward the body as-is (works for JSON, multipart form-data, plain text)
+  // Forward the body — stream it instead of buffering to avoid Vercel's
+  // ~4.5MB request body limit on large file uploads. For GET/HEAD there's no body.
   let body: BodyInit | null = null
   if (req.method !== 'GET' && req.method !== 'HEAD') {
-    body = await req.arrayBuffer()
+    body = req.body
   }
 
   try {

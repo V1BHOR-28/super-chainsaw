@@ -48,18 +48,12 @@ export function FeedAriaModal() {
       return
     }
 
-    // === EPUB PIPELINE ===
-    // EPUBs are parsed server-side by the Flask audiobook-maker service.
-    // The analyze endpoint parses the EPUB and returns the chapter list.
+    // === EPUB + PDF PIPELINE ===
+    // Both EPUBs and PDFs are parsed server-side by the Flask audiobook-maker service.
+    // The analyze endpoint parses the book and returns the chapter list.
     // TTS generation happens via the Flask /api/generate endpoint.
-    if (tab === 'file' && file && (file.name.toLowerCase().endsWith('.epub') || file.type === 'application/epub+zip')) {
-      return handleEpubUpload(file)
-    }
-
-    // Reject PDF files — only EPUB is supported now
-    if (tab === 'file' && file && file.name.toLowerCase().endsWith('.pdf')) {
-      toast.error('PDF files are no longer supported. Please upload an .epub file.')
-      return
+    if (tab === 'file' && file && (file.name.toLowerCase().endsWith('.epub') || file.name.toLowerCase().endsWith('.pdf') || file.type === 'application/epub+zip' || file.type === 'application/pdf')) {
+      return handleBookUpload(file)
     }
 
     // === EXISTING PATH (text, URL, TXT files) ===
@@ -165,7 +159,7 @@ export function FeedAriaModal() {
    * PDF pipeline which parsed in the browser. This is simpler and more
    * reliable — EPUBs are structured XML, not scanned images.
    */
-  const handleEpubUpload = async (epubFile: File) => {
+  const handleBookUpload = async (bookFile: File) => {
     setEpubUploading(true)
     setState('parsing')
 
@@ -173,7 +167,7 @@ export function FeedAriaModal() {
       // Call the Flask audiobook-maker service via the /api/abm proxy.
       // The Flask app parses the EPUB and returns the chapter list + metadata,
       // stashing the parsed state in-memory keyed by the returned job_id.
-      const data = await analyzeEpub(epubFile)
+      const data = await analyzeEpub(bookFile)
 
       // Also store the full text as Knowledge for chat/RAG
       // (so ARIA can still reference the book in conversations).
@@ -431,7 +425,7 @@ export function FeedAriaModal() {
                 <input
                   ref={fileInputRef}
                   type="file"
-                  accept=".epub,application/epub+zip"
+                  accept=".epub,.pdf,application/epub+zip,application/pdf"
                   className="hidden"
                   onChange={(e) => {
                     const f = e.target.files?.[0]
@@ -439,9 +433,9 @@ export function FeedAriaModal() {
                       // EPUBs are constrained to 50MB by the Flask /api/analyze endpoint.
                       // Reject them client-side to save a round-trip and a confusing 413.
                       // Only accept EPUB files
-                      const isEpub = f.name.toLowerCase().endsWith('.epub') || f.type === 'application/epub+zip'
-                      if (!isEpub) {
-                        toast.error('Only EPUB files are supported. PDF is no longer accepted.')
+                      const isBook = f.name.toLowerCase().endsWith('.epub') || f.name.toLowerCase().endsWith('.pdf') || f.type === 'application/epub+zip' || f.type === 'application/pdf'
+                      if (!isBook) {
+                        toast.error('Please upload an EPUB or PDF file.')
                         return
                       }
                       if (f.size > 50 * 1024 * 1024) {

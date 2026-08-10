@@ -261,7 +261,7 @@ export async function POST(req: NextRequest) {
       if (fileName.endsWith('.epub') || file.type === 'application/epub+zip') {
         return NextResponse.json({ error: 'EPUB files should be uploaded via the audiobook upload endpoint.' }, { status: 400 })
       } else if (fileName.endsWith('.pdf') || file.type === 'application/pdf') {
-        return NextResponse.json({ error: 'PDF files are no longer supported. Please upload an .epub file.' }, { status: 400 })
+        return NextResponse.json({ error: 'PDF files should be uploaded via the audiobook upload endpoint.' }, { status: 400 })
       } else if (fileName.endsWith('.txt') || fileName.endsWith('.md') || file.type.startsWith('text/')) {
         const fileText = await file.text()
         rawFullText = fileText

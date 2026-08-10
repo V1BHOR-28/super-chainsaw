@@ -216,7 +216,7 @@ MIN_REPEAT_FOR_HEADER = 3  # minimo ripetizioni per considerare una riga header/
 # Project Gutenberg) often have front matter, copyright pages, and indexes that
 # aren't captured by heading detection. The 0.95 threshold was discarding valid
 # chapter detection just because it missed 5% of non-narrative text.
-MIN_TITLE_STRATEGY_COVERAGE = 0.50
+MIN_TITLE_STRATEGY_COVERAGE = 0.75
 
 # ── Rilevamento suddivisioni per pattern testuale ──
 # Definito una sola volta in epub_to_tts (modulo base condiviso) per evitare
@@ -1138,6 +1138,15 @@ def parse_pdf(pdf_path: str) -> BookInfo:
     # Ogni strategia produce raw_chapters → pulizia → filtro.
     # Se dopo il filtro restano 0 capitoli, si prova la strategia successiva.
 
+    # ── Cache: extract page text ONCE, reuse across all strategies ──
+    # This is the biggest performance win — previously each strategy re-read
+    # every page from fitz. Now we extract once into a list and pass it around.
+    page_texts = []
+    for page_num in range(doc_page_count):
+        pt = _extract_page_text_filtered(doc[page_num], body_font_size, repeated_headers)
+        page_texts.append(pt)
+    full_text = "\n\n".join(pt for pt in page_texts if pt)
+
     strategies = []
 
     # Strategia 1: outline/bookmarks
@@ -1151,18 +1160,20 @@ def parse_pdf(pdf_path: str) -> BookInfo:
     if raw:
         strategies.append(("titoli (font/grassetto/pattern)", raw))
 
-    # Strategia 3: indice visuale
-    raw = _detect_chapters_from_visual_toc(doc, body_font_size, repeated_headers)
-    if raw:
-        strategies.append(("indice visuale", raw))
+    # Quick check: do we already have a multi-chapter strategy?
+    early_multi = any(len(r) >= 2 for _, r in strategies)
 
-    # Strategia 4: regex fallback — split full text on "Chapter X" / "CHAPTER X"
-    # patterns. This catches PDFs where chapter headings have the same font size
-    # as body text (common in plain-text-derived PDFs from Archive.org / Gutenberg).
-    full_text = _extract_full_text(doc, body_font_size, repeated_headers)
-    raw = _split_by_chapter_regex(full_text)
-    if raw and len(raw) > 1:
-        strategies.append(("regex chapter split", raw))
+    # Strategia 3: indice visuale (only if earlier strategies produced < 2 chapters)
+    if not early_multi:
+        raw = _detect_chapters_from_visual_toc(doc, body_font_size, repeated_headers)
+        if raw:
+            strategies.append(("indice visuale", raw))
+
+    # Strategia 4: regex fallback (only if earlier strategies produced < 2 chapters)
+    if not early_multi or not any(len(r) >= 2 for _, r in strategies):
+        raw = _split_by_chapter_regex(full_text)
+        if raw and len(raw) > 1:
+            strategies.append(("regex chapter split", raw))
 
     # Strategia 5: fallback — tutto il documento come singolo capitolo
     if full_text.strip():
@@ -1171,38 +1182,56 @@ def parse_pdf(pdf_path: str) -> BookInfo:
     doc.close()
 
     # ── Prova ogni strategia in ordine ──
-    # `full_text` è il testo completo del documento (strategia "documento singolo")
-    # e funge da riferimento per la guardia di copertura: una strategia di
-    # riconoscimento titoli che ne cattura troppo poco sta perdendo contenuto.
+    # Key rule: NEVER return 1 chapter if a multi-chapter strategy exists.
+    # We collect all valid strategies and pick the best one.
     full_text_chars = len(full_text.strip())
+    best_candidate = None  # (strategy_name, chapters, chapter_count, coverage)
+    best_single = None     # (strategy_name, chapters) — the "documento singolo" fallback
 
     for strategy_name, raw_chapters in strategies:
         # Guardia di copertura: applicata solo alle strategie di riconoscimento
         # titoli, NON al fallback "documento singolo" (che È il testo completo).
+        coverage = 1.0
         if strategy_name != "documento singolo" and full_text_chars > 0:
             captured = sum(len(t or "") for _, t in raw_chapters)
             coverage = captured / full_text_chars
             if coverage < MIN_TITLE_STRATEGY_COVERAGE:
-                print(f"[pdf] Strategia '{strategy_name}' scarta "
-                      f"{100 * (1 - coverage):.0f}% del testo "
-                      f"(soglia max 5%): ignorata")
+                print(f"[pdf] Strategia '{strategy_name}': coverage {coverage*100:.0f}% "
+                      f"(soglia {MIN_TITLE_STRATEGY_COVERAGE*100:.0f}%) — ignorata")
                 continue
 
         chapters = _build_chapters_from_raw(raw_chapters, pdf_path)
-        if chapters:
-            print(f"[pdf] Capitoli da {strategy_name}: {len(chapters)}")
-            info.chapters = chapters
-            break
+        if not chapters:
+            print(f"[pdf] Strategia '{strategy_name}': 0 capitoli dopo filtro")
+            continue
+
+        ch_count = len(chapters)
+        print(f"[pdf] Strategia '{strategy_name}': {ch_count} capitoli, coverage {coverage*100:.0f}%")
+
+        if strategy_name == "documento singolo":
+            best_single = (strategy_name, chapters)
+        elif ch_count >= 2:
+            # Multi-chapter strategy — always preferred over single-chapter
+            if best_candidate is None or ch_count > best_candidate[2]:
+                best_candidate = (strategy_name, chapters, ch_count, coverage)
+
+    # Choose the best strategy: prefer multi-chapter, fall back to single
+    if best_candidate:
+        info.chapters = best_candidate[1]
+        print(f"[pdf] Scelta strategia: '{best_candidate[0]}' ({best_candidate[2]} capitoli)")
+    elif best_single:
+        info.chapters = best_single[1]
+        print(f"[pdf] Scelta strategia: '{best_single[0]}' (fallback singolo)")
 
     # ── Recovery: page-count fallback ──
     # If all strategies produced only 1 chapter (the whole document), but the
     # document has multiple pages, split by page count so the user gets
     # navigable sections instead of one giant chapter. Target ~20 pages per
     # chapter (a reasonable audiobook chapter length).
-    if len(info.chapters) <= 1 and doc_page_count > 20 and full_text.strip():
-        print(f"[pdf] Page-count fallback: splitting {doc_page_count} pages into ~20-page chapters")
+    if len(info.chapters) <= 1 and doc_page_count > 10 and full_text.strip():
+        print(f"[pdf] Page-count fallback: splitting {doc_page_count} pages into ~15-page chapters")
         page_chapters = _split_by_page_count(doc, body_font_size, repeated_headers,
-                                             pages_per_chapter=20, base_title=info.title)
+                                             pages_per_chapter=15, base_title=info.title)
         if page_chapters and len(page_chapters) > 1:
             info.chapters = page_chapters
             print(f"[pdf] Page-count fallback: {len(info.chapters)} chapters")
