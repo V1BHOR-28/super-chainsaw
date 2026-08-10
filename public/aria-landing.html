@@ -807,43 +807,84 @@
       </div>
     </div>
 
-    <!-- Player widget in hero -->
-    <div class="ab-hero-player">
-      <style>
-        .ab-hero-player {
-          background: var(--bg-soft);
-          border: 1px solid var(--border);
-          border-radius: 20px;
-          padding: 28px;
-          position: relative;
-          overflow: hidden;
-          box-shadow: 0 20px 60px rgba(0,0,0,0.4);
-        }
-        .ab-hero-player::before {
-          content: '';
-          position: absolute;
-          inset: 0;
-          border-radius: 20px;
-          background: radial-gradient(circle at 50% 0%, rgba(245,158,11,0.12), transparent 60%);
-          pointer-events: none;
-        }
-      </style>
-      <div class="ab-now-playing">
-        <div class="ab-eq">
-          <span></span><span></span><span></span><span></span><span></span>
-        </div>
-        Now Playing
+    <!-- Sphere + Player widget in hero -->
+    <div class="sphere-stage">
+      <div class="orbit orbit-1"></div>
+      <div class="orbit orbit-2"></div>
+      <div class="orbit orbit-3"></div>
+
+      <div class="sphere-wrap" id="sphereWrap">
+        <div class="sphere"></div>
+        <div class="sphere-highlight"></div>
       </div>
-      <div class="ab-book-title">Wuthering Heights</div>
-      <div class="ab-chapter">Chapter 1 — by Emily Brontë</div>
-      <div class="ab-progress-row">
-        <div class="ab-progress-bar">
-          <div class="ab-progress-fill"></div>
+
+      <!-- Player card floating over the sphere -->
+      <div class="ab-hero-player">
+        <style>
+          .ab-hero-player {
+            background: var(--bg-soft);
+            border: 1px solid var(--border);
+            border-radius: 20px;
+            padding: 28px;
+            position: relative;
+            overflow: hidden;
+            box-shadow: 0 20px 60px rgba(0,0,0,0.5);
+            z-index: 5;
+            max-width: 380px;
+            margin: 0 auto;
+          }
+          .ab-hero-player::before {
+            content: '';
+            position: absolute;
+            inset: 0;
+            border-radius: 20px;
+            background: radial-gradient(circle at 50% 0%, rgba(245,158,11,0.12), transparent 60%);
+            pointer-events: none;
+          }
+        </style>
+        <div class="ab-now-playing">
+          <div class="ab-eq">
+            <span></span><span></span><span></span><span></span><span></span>
+          </div>
+          Now Playing
         </div>
-        <div class="ab-time">2:31 / 12:04</div>
+        <div class="ab-book-title">Wuthering Heights</div>
+        <div class="ab-chapter">Chapter 1 — by Emily Brontë</div>
+        <div class="ab-progress-row">
+          <div class="ab-progress-bar">
+            <div class="ab-progress-fill"></div>
+          </div>
+          <div class="ab-time">2:31 / 12:04</div>
+        </div>
+        <div class="ab-quote" id="ab-quote-hero">
+          <span class="ab-word">The</span> <span class="ab-word">old</span> <span class="ab-word">house</span> <span class="ab-word">stood</span> <span class="ab-word">at</span> <span class="ab-word">the</span> <span class="ab-word">edge</span> <span class="ab-word">of</span> <span class="ab-word">the</span> <span class="ab-word">lane,</span> <span class="ab-word">its</span> <span class="ab-word">windows</span> <span class="ab-word">dark</span> <span class="ab-word">and</span> <span class="ab-word">empty.</span> <span class="ab-word">Sarah</span> <span class="ab-word">approached</span> <span class="ab-word">cautiously,</span> <span class="ab-word">her</span> <span class="ab-word">footsteps</span> <span class="ab-word">crunching</span> <span class="ab-word">on</span> <span class="ab-word">the</span> <span class="ab-word">gravel</span> <span class="ab-word">path.</span>
+        </div>
       </div>
-      <div class="ab-quote" id="ab-quote-hero">
-        <span class="ab-word">The</span> <span class="ab-word">old</span> <span class="ab-word">house</span> <span class="ab-word">stood</span> <span class="ab-word">at</span> <span class="ab-word">the</span> <span class="ab-word">edge</span> <span class="ab-word">of</span> <span class="ab-word">the</span> <span class="ab-word">lane,</span> <span class="ab-word">its</span> <span class="ab-word">windows</span> <span class="ab-word">dark</span> <span class="ab-word">and</span> <span class="ab-word">empty.</span> <span class="ab-word">Sarah</span> <span class="ab-word">approached</span> <span class="ab-word">cautiously,</span> <span class="ab-word">her</span> <span class="ab-word">footsteps</span> <span class="ab-word">crunching</span> <span class="ab-word">on</span> <span class="ab-word">the</span> <span class="ab-word">gravel</span> <span class="ab-word">path.</span>
+
+      <!-- Chat bubbles floating around -->
+      <div class="bubble" style="top: 5%; left: -2%; animation-delay: 0s;">
+        <div class="bubble-label">ARIA</div>
+        "The old house stood..."
+      </div>
+
+      <div class="bubble accent" style="top: 32%; right: -8%; animation-delay: 1.2s;">
+        <div class="bubble-label">ARIA</div>
+        "Chapter 1, narrated."
+      </div>
+
+      <div class="bubble" style="bottom: 22%; left: -6%; animation-delay: 2.4s;">
+        <div class="bubble-label">ARIA · NARRATING</div>
+        <div class="flex items-center gap-1">
+          Word-by-word sync
+          <span class="typing-dot"></span>
+          <span class="typing-dot"></span>
+          <span class="typing-dot"></span>
+        </div>
+      </div>
+
+      <div class="bubble accent" style="bottom: 2%; right: 4%; animation-delay: 1.8s;">
+        <div class="bubble-label">ARIA</div>
+        "That changes things."
       </div>
     </div>
   </div>
