@@ -240,7 +240,12 @@ export async function analyzeEpub(file: File): Promise<AnalyzeResponse> {
   // If NEXT_PUBLIC_ABM_DIRECT_URL is set, POST directly to the Flask service
   // to bypass Vercel's ~4.5MB request body limit. This is essential for
   // large PDF uploads that exceed the Vercel proxy's buffering capacity.
-  const directUrl = process.env.NEXT_PUBLIC_ABM_DIRECT_URL;
+  const rawDirectUrl = process.env.NEXT_PUBLIC_ABM_DIRECT_URL;
+  // Guard: if the URL doesn't start with http, it's malformed — fall back to proxy.
+  const directUrl = rawDirectUrl && rawDirectUrl.startsWith("http") ? rawDirectUrl.replace(/\/+$/, "") : null;
+  if (rawDirectUrl && !directUrl) {
+    console.error("[abm-api] NEXT_PUBLIC_ABM_DIRECT_URL is set but invalid:", rawDirectUrl, "— falling back to /api/abm proxy");
+  }
   const analyzeUrl = directUrl
     ? `${directUrl}/api/analyze`
     : `${ABM_BASE}/analyze`;
@@ -263,7 +268,11 @@ export async function analyzeEpub(file: File): Promise<AnalyzeResponse> {
     if (err instanceof Error && err.name === 'AbortError') {
       throw new Error('Upload timed out after 5 minutes. The file may be too large or the server is still waking up.');
     }
-    throw new Error('Upload failed — the file may be too large or the server timed out.');
+    console.error('[abm-api] analyze network failure', analyzeUrl, err);
+    throw new Error(
+      `Could not reach the audiobook service at ${analyzeUrl}. ` +
+      `If this persists the server may be asleep or blocking this origin.`
+    );
   }
   clearTimeout(timeoutId);
 

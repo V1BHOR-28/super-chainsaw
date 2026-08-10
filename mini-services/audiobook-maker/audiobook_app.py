@@ -246,18 +246,60 @@ except ImportError:
 # webhook firmato): attualmente nessuno.
 _CSRF_EXEMPT_PATHS: set[str] = set()
 
+# Origins allowed to make cross-origin mutating requests (direct browser
+# uploads from the Next.js frontend, which lives on a different domain).
+# Comma-separated, no trailing slashes. Example:
+#   ABM_ALLOWED_ORIGINS=https://ariaggn.vercel.app,http://localhost:3000
+_ALLOWED_ORIGINS: set[str] = {
+    o.strip().rstrip("/")
+    for o in os.environ.get("ABM_ALLOWED_ORIGINS", "").split(",")
+    if o.strip()
+}
+
+
+def _origin_allowed(origin: str) -> bool:
+    if not origin:
+        return False
+    o = origin.rstrip("/")
+    if o in _ALLOWED_ORIGINS:
+        return True
+    expected = request.host_url.rstrip("/")
+    if o == expected:
+        return True
+    # Allow localhost dev and 127.0.0.1.
+    if o.startswith("http://localhost:") or o.startswith("http://127.0.0.1:"):
+        return True
+    return False
+
+
+@app.before_request
+def _global_cors_preflight():
+    """Global CORS preflight handler — must run BEFORE _csrf_protect so
+    OPTIONS short-circuits before the CSRF check blocks cross-origin requests."""
+    if request.method != "OPTIONS":
+        return None
+    origin = request.headers.get("Origin", "")
+    if not (origin and _origin_allowed(origin)):
+        return None
+    resp = app.make_default_options_response()
+    resp.headers["Access-Control-Allow-Origin"] = origin.rstrip("/")
+    resp.headers["Access-Control-Allow-Credentials"] = "true"
+    resp.headers["Access-Control-Allow-Methods"] = "GET, POST, PUT, DELETE, OPTIONS"
+    resp.headers["Access-Control-Allow-Headers"] = (
+        request.headers.get("Access-Control-Request-Headers")
+        or "Content-Type, X-ABM-Cid, Authorization"
+    )
+    resp.headers["Access-Control-Max-Age"] = "86400"
+    resp.headers["Vary"] = "Origin"
+    return resp
+
 
 @app.before_request
 def _csrf_protect():
     """CSRF protection: verifica Origin/Referer su metodi mutating.
 
-    - GET/HEAD/OPTIONS: nessun check (operazioni read-only).
-    - POST/PUT/PATCH/DELETE: se ``Origin`` presente, deve matchare ``host_url``;
-      altrimenti se ``Referer`` presente, stesso check. Se entrambi assenti
-      (client non-browser come curl/script), passa.
-    - I cookie ``SameSite=Strict`` (admin) e ``SameSite=Lax`` (abm_cid) gia'
-      offrono difesa parziale; questo check chiude il gap residuo per browser
-      vecchi e per ``SameSite=Lax`` su navigazioni top-level.
+    Uses _origin_allowed() so cross-origin requests from allowlisted frontend
+    domains (ABM_ALLOWED_ORIGINS) pass instead of being 403-blocked.
     """
     if request.method not in ("POST", "PUT", "PATCH", "DELETE"):
         return None
@@ -265,12 +307,16 @@ def _csrf_protect():
         return None
     origin = request.headers.get("Origin", "")
     referer = request.headers.get("Referer", "")
-    expected = request.host_url.rstrip("/")
     if origin:
-        if not (origin == expected or origin.startswith(expected + "/")):
+        if not _origin_allowed(origin):
+            app.logger.warning("CSRF block: origin=%s path=%s", origin, request.path)
             return jsonify({"error": "CSRF: origin mismatch"}), 403
-    elif referer:
-        if not referer.startswith(expected + "/") and referer != expected:
+        return None
+    if referer:
+        from urllib.parse import urlparse
+        p = urlparse(referer)
+        ref_origin = f"{p.scheme}://{p.netloc}"
+        if not _origin_allowed(ref_origin):
             return jsonify({"error": "CSRF: referer mismatch"}), 403
     return None
 
@@ -288,12 +334,15 @@ def _handle_request_too_large(e):
 @app.after_request
 def add_security_headers(response):
     """Aggiunge header di sicurezza alle risposte HTTP."""
-    # CORS: allow direct browser uploads to /api/analyze (bypasses Vercel proxy).
-    # Reflect the request Origin (never use * with credentials).
-    if request.path == "/api/analyze" and request.headers.get("Origin"):
-        response.headers["Access-Control-Allow-Origin"] = request.headers["Origin"]
+    # CORS: allow cross-origin requests from allowlisted frontend domains.
+    # Covers ALL endpoints (not just /api/analyze) so covers, audio, BGM cues,
+    # and everything else works when the browser talks directly to Flask.
+    _origin = request.headers.get("Origin", "")
+    if _origin and _origin_allowed(_origin):
+        response.headers["Access-Control-Allow-Origin"] = _origin.rstrip("/")
         response.headers["Access-Control-Allow-Credentials"] = "true"
-        response.headers["Vary"] = "Origin"
+        prev_vary = response.headers.get("Vary", "")
+        response.headers["Vary"] = (prev_vary + ", Origin").lstrip(", ")
     response.headers['X-Content-Type-Options'] = 'nosniff'
     response.headers['X-Frame-Options'] = 'DENY'
     response.headers['X-XSS-Protection'] = '1; mode=block'
@@ -8326,22 +8375,8 @@ def _file_hash(path):
     return h.hexdigest()
 
 
-# ── CORS for direct browser→Flask uploads (bypasses Vercel proxy) ──
-# When NEXT_PUBLIC_ABM_DIRECT_URL is set, the browser POSTs multipart/form-data
-# directly to /api/analyze. This requires CORS with credentials (for the
-# abm_cid cookie). We reflect the request Origin (never use * with credentials).
-@app.route("/api/analyze", methods=["OPTIONS"])
-def api_analyze_cors_preflight():
-    origin = request.headers.get("Origin", "")
-    resp = app.make_default_options_response()
-    if origin:
-        resp.headers["Access-Control-Allow-Origin"] = origin
-        resp.headers["Access-Control-Allow-Credentials"] = "true"
-        resp.headers["Access-Control-Allow-Methods"] = "POST, OPTIONS"
-        resp.headers["Access-Control-Allow-Headers"] = "Content-Type, X-ABM-Cid"
-        resp.headers["Vary"] = "Origin"
-    return resp
-
+# (Old per-route CORS preflight for /api/analyze removed — now handled
+# globally by _global_cors_preflight() in the before_request chain.)
 
 @app.route("/api/analyze", methods=["POST"])
 def api_analyze():
@@ -15504,9 +15539,11 @@ def _set_client_cookie(response):
     if _CLIENT_COOKIE_NAME not in request.cookies:
         cid = str(uuid.uuid4())[:12]
         is_https = (request.scheme == "https") or (request.headers.get("X-Forwarded-Proto", "") == "https")
-        # Check if this is a cross-origin request (direct upload from Vercel)
+        # Cross-origin: if the request has an Origin that's allowlisted (Vercel
+        # frontend), set SameSite=None; Secure so the browser sends the cookie
+        # on subsequent cross-origin XHR (covers, audio, my_jobs).
         origin = request.headers.get("Origin", "")
-        if origin and is_https:
+        if origin and _origin_allowed(origin) and is_https:
             response.set_cookie(
                 _CLIENT_COOKIE_NAME, cid,
                 max_age=_CLIENT_COOKIE_MAX_AGE,
