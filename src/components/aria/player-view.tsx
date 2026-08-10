@@ -31,6 +31,7 @@ import { AmbientGlow, StatusPill, AriaDivider } from "./primitives";
 import { NowPlayingBars } from "./waveform";
 import { BookCover } from "./book-cover";
 import { TranscriptView } from "./transcript-view";
+import { HindiSummaryCard } from "./hindi-summary-card";
 import { getJobChapters, type AnalyzeResponse, type ChapterMp3Info } from "@/lib/abm-api";
 
 /**
@@ -343,12 +344,22 @@ export function PlayerView() {
             <SpeedControl rate={playbackRate} />
             <SleepTimerControl minutes={sleepTimerMinutes} />
             <VolumeControl volume={volume} muted={muted} />
+            <HindiPillButton />
           </div>
 
           {/* ARIA: synced-transcript panel. Word-by-word highlighting
               driven by useWordSync's rAF loop reading audio.currentTime
               directly. Toggle is the AlignLeft icon in the header. */}
-          {showTranscript && <TranscriptView />}
+          {showTranscript && (
+            <>
+              <TranscriptView />
+              <HindiSummaryCard
+                bookId={job?.jobId ?? ""}
+                chapterIndex={job?.chapterMp3s?.[currentChapterIdx]?.index ?? -1}
+                chapterTitle={job?.chapterMp3s?.[currentChapterIdx]?.title ?? ""}
+              />
+            </>
+          )}
         </div>
       </main>
 
@@ -1205,5 +1216,26 @@ function ChaptersPanel({
         </div>
       )}
     </>
+  );
+}
+
+/* ============ Hindi pill button ============ */
+
+function HindiPillButton() {
+  const hindiHelp = usePlayerStore((s) => s.hindiHelp);
+  const toggleHindiHelp = usePlayerStore((s) => s.toggleHindiHelp);
+  return (
+    <button
+      onClick={toggleHindiHelp}
+      className="flex items-center gap-1 px-2.5 py-1 rounded-full text-[11px] font-medium transition-all"
+      style={{
+        background: hindiHelp ? "rgba(168,85,247,0.18)" : "transparent",
+        color: hindiHelp ? "#a855f7" : "var(--aria-fg-muted)",
+        border: `1px solid ${hindiHelp ? "rgba(168,85,247,0.3)" : "var(--aria-border)"}`,
+      }}
+      title="हिंदी सहायता — Hindi chapter summaries, word meanings, paragraph explanations"
+    >
+      हिंदी
+    </button>
   );
 }
