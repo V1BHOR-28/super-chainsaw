@@ -17858,6 +17858,7 @@ if __name__ == "__main__":
     # Render provides $PORT (typically 10000) and requires binding to 0.0.0.0.
     # Other hosts (local dev, sandbox) use ABM_PORT (default 5601) and 127.0.0.1.
     # We detect Render by checking if $PORT is set; if so, bind to 0.0.0.0:$PORT.
+    print(f"[startup] All initialization complete, starting Flask server...", flush=True)
     RENDER_PORT = os.environ.get("PORT")
     if RENDER_PORT:
         PORT = int(RENDER_PORT)
