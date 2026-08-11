@@ -373,6 +373,11 @@ export async function generate(
       msg = body?.error || "Selection too large. Reduce the number of chapters.";
     } else if (errorCode === "invalid_voice") {
       msg = "Invalid voice selected. Pick a different voice.";
+    } else if (errorCode === "chapter_index_mismatch") {
+      msg = "This book was re-parsed on the server and the chapter numbers changed. " +
+            "Close this window, reopen the chapter list, and select again.";
+    } else if (errorCode === "thread_spawn_failed") {
+      msg = "The server accepted the job but couldn't start it. Try again in a minute.";
     } else if (body?.error === "Session expired. Re-upload file.") {
       msg = "This book's session has expired (server restarted). Re-upload the EPUB to convert more chapters.";
     } else {

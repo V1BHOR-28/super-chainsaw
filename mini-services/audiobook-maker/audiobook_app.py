@@ -9497,6 +9497,48 @@ def api_export_abm(job_id):
                                       download_name=download_name))
 
 
+def _resolve_selection(info, selected_chapters, job):
+    """Three-tier chapter selection resolver.
+
+    After a Storj reconstruction, info.chapters can be renumbered, so the
+    frontend's indices (from the durable chapter_catalog) may not match.
+    Tier 1: exact index match.
+    Tier 2: match by catalog title.
+    Tier 3: positional fallback (catalog order == parse order).
+    Returns (filtered_chapters, method) where method is "all"/"index"/"title"/"position"/"none".
+    """
+    all_chs = list(getattr(info, "chapters", []) or [])
+    if not selected_chapters:
+        return all_chs, "all"
+    sel = set(selected_chapters)
+    # tier 1: exact index match
+    hit = [ch for ch in all_chs if ch.index in sel]
+    if hit:
+        return hit, "index"
+    # tier 2: match by catalog title
+    catalog = job.get("chapter_catalog") or []
+    want_titles = {
+        (c.get("title") or "").strip().lower()
+        for c in catalog if c.get("index") in sel
+    }
+    want_titles.discard("")
+    if want_titles:
+        hit = [ch for ch in all_chs
+               if (getattr(ch, "title", "") or "").strip().lower() in want_titles]
+        if hit:
+            _jid = job.get("job_id", "")
+            print(f"[{_jid}] selection resolved by TITLE (index mismatch after reparse)", flush=True)
+            return hit, "title"
+    # tier 3: positional fallback (catalog order == parse order)
+    by_pos = {c.get("index"): i for i, c in enumerate(catalog)}
+    positions = sorted(by_pos[i] for i in sel if i in by_pos)
+    hit = [all_chs[p] for p in positions if 0 <= p < len(all_chs)]
+    if hit:
+        print("selection resolved POSITIONALLY", flush=True)
+        return hit, "position"
+    return [], "none"
+
+
 @app.route("/api/generate", methods=["POST"])
 def api_generate():
     data = request.json
@@ -10015,17 +10057,53 @@ def api_generate():
         if speechify_emotion:
             job["speechify_emotion"] = speechify_emotion
 
-    #  -  -  Atomic concurrency check + status claim  -  -
+    #  -  -  ARIA v9: selection validation BEFORE the atomic status claim  -  -
+    # All selection validation (index mismatch, max_text_chars) happens HERE,
+    # while status is still "analyzed"/"done". This prevents any early return
+    # from leaving the job permanently stuck in "generating" with no thread.
     client_id = job.get("client_id", "")
     client_ip = job.get("client_ip", "")
+    info = job["info"]
+
+    # ── 1.3: Three-tier selection resolver ──
+    job["selected_chapters"] = selected_chapters  # store for ABM export
+    filtered, resolve_method = _resolve_selection(info, selected_chapters, job)
+    if resolve_method == "none":
+        all_chs = list(getattr(info, "chapters", []) or [])
+        print(f"[{job_id}] SELECTION MISMATCH requested={selected_chapters} "
+              f"available={[ch.index for ch in all_chs][:200]}", flush=True)
+        return jsonify({
+            "error": "Chapter selection no longer matches this book's parsed chapters. "
+                     "Reopen the chapter list and pick again.",
+            "error_code": "chapter_index_mismatch",
+            "requested": selected_chapters,
+            "available": [ch.index for ch in all_chs][:200],
+        }), 400
+    if resolve_method in ("index", "title", "position"):
+        # Create a lightweight copy of info with filtered chapters
+        info = copy(info)
+        info.chapters = filtered
+        info.total_words = sum(ch.word_count for ch in filtered)
+        info.estimated_duration_minutes = info.total_words / 150
+
+    # ── 1.1: max_text_chars cap check BEFORE the claim ──
+    max_text_chars = _effective_max_text_chars(voice, job)
+    selected_chars = sum(ch.char_count for ch in info.chapters)
+    if selected_chars > max_text_chars:
+        _refund_payment_on_orphan(job_id, job, "selection_too_large")
+        try: gemini_tts.release_reservation(job_id)
+        except Exception: pass
+        return jsonify({
+            "error": f"Selection too large: {selected_chars:,} characters "
+                     f"(limit {max_text_chars:,}). Please reduce the chapter selection.",
+            "error_code": "selection_too_large",
+            "chars_selected": selected_chars,
+            "chars_limit": max_text_chars,
+        }), 413
+
+    #  -  -  Atomic concurrency check + status claim  -  -
     with _jobs_lock:
         # ARIA: allow re-generation of completed, failed, or interrupted jobs.
-        # The gen_epoch mechanism creates a new output_{epoch}/ directory for
-        # each generation, preserving previous audio. This eliminates the need
-        # for the frontend to call resetToChapters (which destroyed previous
-        # chapter_mp3s data). Including "error" and "interrupted" here makes
-        # the Retry button work — the user can re-generate without re-uploading
-        # the EPUB after a failure or a server-restart interruption.
         if job["status"] not in ("analyzed", "optimized", "done", "error", "interrupted", "cancelled"):
             _refund_payment_on_orphan(job_id, job, "status_conflict")
             try: gemini_tts.release_reservation(job_id)
@@ -10044,9 +10122,19 @@ def api_generate():
                 }), 429
         # Atomically claim the slot
         job["status"] = "generating"
+        job["_thread_started"] = False  # set True after thread.start() succeeds
         # Save voice in job for logging
         job["voice"] = voice
         job["platform"] = _client_platform()
+        job["start_time"] = time.time()
+
+    # ── 1.2: Revert guard for every post-claim return ──
+    def _unclaim(reason):
+        with _jobs_lock:
+            if job.get("status") == "generating" and not job.get("_thread_started"):
+                job["status"] = "optimized" if job.get("ai_optimized") else "analyzed"
+                job["progress_message"] = f"Not started: {reason}"
+        print(f"[{job_id}] generate unclaimed -> {reason}", flush=True)
 
     # Batch mobile: il job sopravvive a schermo bloccato (no auto-cancel per
     # heartbeat, la guardia salta se email_registered) e al COMPLETE crea il
@@ -10061,59 +10149,12 @@ def api_generate():
         job["notify_download_type"] = "podcast"
         job["notify_base_url"] = podcast_base_url
 
-    info = job["info"]
-
-    # Filter chapters if a subset was selected
-    job["selected_chapters"] = selected_chapters  # store for ABM export
-    if selected_chapters:
-        selected_set = set(selected_chapters)
-        filtered = [ch for ch in info.chapters if ch.index in selected_set]
-        if not filtered:
-            return jsonify({"error": "No chapters selected."}), 400
-        # Create a lightweight copy of info with filtered chapters
-        info = copy(info)
-        info.chapters = filtered
-        info.total_words = sum(ch.word_count for ch in filtered)
-        info.estimated_duration_minutes = info.total_words / 150
-
-    # Hard cap on TTS-bound text size for THIS run: applied solo alla selezione.
-    # 1 char ~= 50-100 byte di MP3, quindi il limite mantiene l'output sotto
-    # ~75-150 MB. Per voci PREMIUM (gemini:) usiamo MAX_GEMINI_TEXT_CHARS
-    # (default 800k, piu' restrittivo) data la maggior pressione su cost/RPM.
-    max_text_chars = _effective_max_text_chars(voice, job)
-    selected_chars = sum(ch.char_count for ch in info.chapters)
-    if selected_chars > max_text_chars:
-        with _jobs_lock:
-            if job["status"] == "generating":
-                job["status"] = "optimized" if job.get("ai_optimized") else "analyzed"
-        # Rete di sicurezza: i cap a monte (create_order_gemini + blocco
-        # pre-consume) dovrebbero impedire di arrivare qui con un pagamento gia`
-        # consumato. Resta pero` il caso del testo espanso dall'ottimizzazione
-        # LLM oltre il cap DOPO il consume: in quel caso rimborsa il pagamento e
-        # rilascia la prenotazione budget Gemini, cosi` non si trattiene denaro
-        # per un job non generabile.
-        _refund_payment_on_orphan(job_id, job, "selection_too_large")
-        try: gemini_tts.release_reservation(job_id)
-        except Exception: pass
-        return jsonify({
-            "error": f"Selection too large: {selected_chars:,} characters "
-                     f"(limit {max_text_chars:,}). Please reduce the chapter selection.",
-            "error_code": "selection_too_large",
-            "chars_selected": selected_chars,
-            "chars_limit": max_text_chars,
-        }), 413
-
     #  -  -  Pre-allocazione atomica budget Google Cloud TTS  -  -
-    # Verifica E deduce immediatamente i caratteri richiesti, così conversioni
-    # parallele non possono passare lo stesso check. Il refund della parte
-    # non consumata avviene in run_generation in caso di errore/cancellazione.
     if google_tts is not None and google_tts.is_google_voice(voice):
         total_chars_needed = sum(ch.char_count for ch in info.chapters)
         ok, remaining_after = google_tts.reserve_chars(total_chars_needed)
         if not ok:
-            with _jobs_lock:
-                if job["status"] == "generating":
-                    job["status"] = "optimized" if job.get("ai_optimized") else "analyzed"
+            _unclaim("google_tts_budget")
             return jsonify({
                 "error": f"Google TTS monthly limit: {remaining_after:,} chars remaining, "
                          f"but this book needs {total_chars_needed:,} chars.",
@@ -10121,25 +10162,12 @@ def api_generate():
                 "chars_needed": total_chars_needed,
                 "chars_remaining": remaining_after,
             }), 429
-        # Memorizza i caratteri prenotati nel job per il refund
         job["google_tts_reserved"] = total_chars_needed
         print(f"[{job_id}] Google TTS: reserved {total_chars_needed:,} chars "
               f"(remaining: {remaining_after:,})")
-        # Invalida la cache voci: se il budget si avvicina allo zero, le voci
-        # potrebbero scomparire al prossimo /api/voices
         _invalidate_voices_cache()
 
-    # Consumo quota: qui, non prima. Fra il claim atomico e questo punto ci
-    # sono ancora uscite sincrone che abortiscono il job senza avviarlo
-    # (selezione capitoli vuota, cap selection_too_large con refund pagamento)
-    # e nessuna prevede un rimborso quota equivalente (scelta di progetto:
-    # si consuma tardi, non si restituisce mai). Da qui in poi non resta
-    # alcun `return` prima di thread.start(): il job e' ormai certo di
-    # partire. Idempotente per job_id.
-    # Con quota disattivata (ABM_FREE_QUOTA_EUR_PER_MONTH=0) NON si consuma:
-    # riempire il contatore in silenzio significa che, alzando il limite a mese
-    # in corso, molti client risulterebbero gia' esauriti e verrebbero addebitati
-    # subito. Il client_id e' lo stesso usato dal gate (`_quota_client_id`).
+    # Consumo quota: qui, non prima.
     _fq_charge = job.pop("_free_quota_charge", None)
     if _fq_charge is not None and free_quota.limit_eur() > 0:
         try:
@@ -10151,14 +10179,30 @@ def api_generate():
 
     # Increment generation epoch to invalidate any stale threads
     job["gen_epoch"] = job.get("gen_epoch", 0) + 1
-    thread = threading.Thread(
-        target=run_generation, args=(job_id, info, voice, rate, single_file),
-        kwargs={'output_format': output_format, 'podcast_base_url': podcast_base_url,
-                'gemini_style_instruction': job.get("gemini_style_instruction"),
-                'speechify_emotion': job.get("speechify_emotion")},
-        daemon=True
-    )
-    thread.start()
+
+    # ── 1.2: Wrap thread spawn in try/except with _unclaim ──
+    try:
+        thread = threading.Thread(
+            target=run_generation, args=(job_id, info, voice, rate, single_file),
+            kwargs={'output_format': output_format, 'podcast_base_url': podcast_base_url,
+                    'gemini_style_instruction': job.get("gemini_style_instruction"),
+                    'speechify_emotion': job.get("speechify_emotion")},
+            daemon=True
+        )
+        thread.start()
+        job["_thread_started"] = True  # mark as actually running
+    except Exception as _thread_err:
+        _unclaim("thread_spawn_failed")
+        print(f"[{job_id}] thread spawn failed: {_thread_err}", flush=True)
+        return jsonify({
+            "error": "The server accepted the job but couldn't start it. Try again in a minute.",
+            "error_code": "thread_spawn_failed",
+        }), 500
+
+    # ── 1.4: One-line start log ──
+    print(f"[{job_id}] GENERATION STARTED voice={voice} lang={narration_language} "
+          f"chapters={[ch.index for ch in info.chapters]} bgm={bgm_mode}", flush=True)
+
     _log_activity(job_id, job.get("original_filename", ""), "GENERATE",
                   client_id, client_ip, voice,
                   browser_lang=job.get("browser_lang", ""),
@@ -12585,6 +12629,20 @@ def api_my_jobs():
         # option instead of a frozen progress bar forever. This is a belt-and-
         # suspenders check alongside the cleanup supervisor.
         if status == "generating":
+            # ARIA v9: also treat a job as stuck when it's "generating" with
+            # no _thread_started flag and >60s since start_time — the thread
+            # spawn failed silently. Flip to "analyzed" (not "interrupted") so
+            # the card is immediately clickable again.
+            if not job.get("_thread_started"):
+                _st = job.get("start_time") or 0
+                if _st and (time.time() - _st) > 60:
+                    print(f"[my_jobs] {jid} stuck (generating, no thread, "
+                          f"{int(time.time() - _st)}s) → analyzed")
+                    job["status"] = "analyzed"
+                    job["progress_message"] = (
+                        "Previous start failed — pick chapters and convert again."
+                    )
+                    status = "analyzed"
             _pu = job.get("progress_updated_at") or job.get("start_time", 0)
             if _pu and (time.time() - _pu) > 900:  # 15 min no progress
                 print(f"[my_jobs] {jid} stale (no progress {int(time.time() - _pu)}s) → interrupted")

@@ -592,17 +592,47 @@ export function LibraryView() {
 
   const handleConvertStarted = () => {
     // The user has clicked "Convert" in the chapter selector.
-    // The resetToChapters call happens inside the selector's handleConvert
-    // (before generate()), not here. This callback just flips the UI status
-    // and refreshes the job list.
-    const jobId = analyzeResponse?.job_id ?? wholeBookJob?.jobId;
+    // UPSERT: a just-uploaded book has NO card yet, so we must insert an
+    // optimistic card. Without this, nothing renders, nothing polls, and
+    // the user sees "nothing happens" after Convert.
+    const resp = analyzeResponse;
+    const jobId = resp?.job_id ?? wholeBookJob?.jobId;
     if (jobId) {
-      applyCards((prev) =>
-        prev.map((c) => (c.jobId === jobId ? { ...c, status: "generating" } : c)),
-      );
+      applyCards((prev) => {
+        const existing = prev.find((c) => c.jobId === jobId);
+        if (existing) {
+          return prev.map((c) =>
+            c.jobId === jobId
+              ? { ...c, status: "generating" as JobStatus, progressCurrent: 0,
+                  progressTotal: 0, progressMessage: "Starting…",
+                  progressUpdatedAt: Date.now() / 1000 }
+              : c,
+          );
+        }
+        const title = resp?.title ?? wholeBookJob?.title ?? "Untitled";
+        const optimistic: LibraryCard = {
+          jobId,
+          title,
+          author: resp?.author ?? wholeBookJob?.author ?? null,
+          accent: accentForTitle(title || jobId),
+          status: "generating",
+          createdAt: Date.now() / 1000,
+          progressCurrent: 0,
+          progressTotal: 0,
+          progressMessage: "Starting…",
+          progressUpdatedAt: Date.now() / 1000,
+          totalChapters: resp?.total_chapters,
+          chapterCatalog: resp?.chapters,
+          hasCover: false,
+          coverImgUrl: getCoverUrl(jobId, true) || undefined,
+        };
+        return [optimistic, ...prev];
+      });
     }
     handleCloseSelector();
-    fetchJobs();
+    // Force a refresh that cannot be swallowed by the in-flight guard
+    setTimeout(() => { isFetchingRef.current = false; fetchJobs(); }, 800);
+    setTimeout(() => fetchJobs(), 4000);
   };
 
   // ── Final render-time guard ──

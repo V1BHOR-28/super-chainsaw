@@ -182,6 +182,9 @@ export function ChapterSelector({
       onConvertStarted?.();
     } catch (err) {
       console.error("[chapter-selector] convert failed", err);
+      // Log the full error for debugging — the Error message from abm-api.ts
+      // carries the server's error_code mapping. Keep the modal OPEN so the
+      // user can retry without re-opening the chapter list.
       toast({
         title: "Could not start conversion",
         description: err instanceof Error ? err.message : "Try again",

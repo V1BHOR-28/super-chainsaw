@@ -1498,3 +1498,69 @@ Files modified:
 No git push — implementation + verification only, per the task spec.
 
 The Pass A outline can NEVER reach the client as summary text. When Pass B fails or the quality gate fails twice, the endpoint returns an error code (summary_pass_b_failed / summary_quality_gate_failed) and the UI shows a toast + the "फिर से बनाएँ" retry button. The outline is logged to Render logs for debugging but never displayed.
+
+---
+Task ID: GENERATE-STUCK-FIX
+Agent: main (Fix Convert doing nothing + "Generation already running" on retry)
+Task: Fix the root causes where clicking "Convert" does nothing (no progress card, no audio) and retrying says "Generation already running." Three root causes: (1) selection validation after the atomic status claim leaves the job stuck in "generating", (2) index mismatch after Storj reconstruction, (3) no optimistic card for fresh uploads.
+
+Work Log:
+- Read /api/generate (api_generate) — found the atomic status claim at line ~10046 followed by selection validation (filtered chapters, max_text_chars) that could early-return and leave the job permanently in "generating" with no thread.
+- Read the my_jobs stale-job watchdog — found it only catches 15-min stale jobs, not jobs stuck with no _thread_started flag.
+
+BACKEND (audiobook_app.py):
+
+Part 1.1 — Moved ALL selection validation BEFORE the atomic status claim:
+- _resolve_selection (3-tier resolver) runs BEFORE `with _jobs_lock:`
+- max_text_chars cap check runs BEFORE the claim
+- Both return 400/413 while status is still "analyzed"/"done" — no stuck job
+
+Part 1.2 — Added _unclaim guard for every post-claim return:
+- `def _unclaim(reason)`: reverts status to "analyzed"/"optimized" if _thread_started is False
+- Called before every post-claim return (google_tts_budget, etc.)
+- Thread spawn wrapped in try/except: calls `_unclaim("thread_spawn_failed")` + returns 500
+- `job["_thread_started"] = True` set immediately after `thread.start()` succeeds
+
+Part 1.3 — Three-tier chapter selection resolver (_resolve_selection):
+- Tier 1: exact index match
+- Tier 2: match by catalog title (for index mismatch after reparse)
+- Tier 3: positional fallback (catalog order == parse order)
+- Returns "none" → 400 with error_code="chapter_index_mismatch" (NO claim made, job stays clickable)
+
+Part 1.4 — One-line start log:
+- `[{job_id}] GENERATION STARTED voice={voice} lang={narration_language} chapters={[...]} bgm={bgm_mode}`
+
+Part 1.5 — Startup sweep for already-stuck jobs:
+- In the my_jobs stale-job watchdog: if status=="generating" and not _thread_started and >60s since start_time → flip to "analyzed" with message "Previous start failed — pick chapters and convert again."
+
+FRONTEND:
+
+Part 2.1 — Optimistic card upsert in handleConvertStarted:
+- If the job_id doesn't exist in cards: INSERT an optimistic card at the top with status="generating", progressMessage="Starting…", totalChapters, chapterCatalog, coverImgUrl
+- If it exists: UPDATE to "generating"
+- After close: setTimeout fetchJobs at 800ms (resets isFetchingRef) + 4000ms (catches slow backend)
+
+Part 2.2 — Verified _ACTIVE includes "generating" — the optimistic card survives polling even when the backend hasn't listed it yet.
+
+Part 2.3 — New error codes in abm-api.ts generate():
+- "chapter_index_mismatch": "This book was re-parsed on the server and the chapter numbers changed."
+- "thread_spawn_failed": "The server accepted the job but couldn't start it. Try again in a minute."
+
+Part 2.4 — chapter-selector.tsx: catch block already has console.error + toast + setConverting(false) in finally. The modal stays OPEN on failure (onConvertStarted is only called on success). Added a comment documenting this.
+
+VERIFICATION:
+- python3 -m py_compile audiobook_app.py: PASSES.
+- npx tsc --noEmit: zero errors.
+- bun run lint: 0 errors, 0 warnings.
+- agent-browser: page loads cleanly (HTTP 200), no console errors.
+
+CONSTRAINTS honored:
+- Did not refactor anything beyond the specified changes.
+- Did not touch playback, transcript, BGM, covers, tombstones, or the voice registry.
+
+Stage Summary:
+Files modified:
+- mini-services/audiobook-maker/audiobook_app.py (+100/-50 lines: _resolve_selection helper, selection validation moved before claim, _unclaim guard, _thread_started flag, try/except thread spawn, one-line start log, startup sweep for stuck jobs)
+- src/components/aria/library-view.tsx (+30 lines: optimistic card upsert in handleConvertStarted)
+- src/lib/abm-api.ts (+6 lines: chapter_index_mismatch + thread_spawn_failed error codes)
+- src/components/aria/chapter-selector.tsx (+3 lines: comment documenting modal stays open on failure)
