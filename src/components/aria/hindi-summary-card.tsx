@@ -10,7 +10,7 @@ import { toast } from "sonner";
 // ── ARIA: per-chapter summary cache ──
 // Keyed by a schema version so any change to the summary shape invalidates
 // old entries. Only valid (non-empty) responses are cached.
-const SUMMARY_CACHE_VERSION = "v9";
+const SUMMARY_CACHE_VERSION = "v10";
 const _summaryCache = new Map<string, HindiSummary>();
 
 function _cacheKey(bookId: string, chapterIndex: number) {
@@ -84,7 +84,7 @@ export function HindiSummaryCard({
   const handleSummaryEnded = useCallback(() => setAudioPlaying(false), []);
   const handleSummaryError = useCallback(() => {
     setAudioPlaying(false);
-    toast.error("अभी उपलब्ध नहीं है, बाद में कोशिश करें");
+    toast.error("Summary unavailable, try again");
   }, []);
 
   // ── Unmount audio teardown ──
@@ -133,7 +133,7 @@ export function HindiSummaryCard({
   // ── Load the summary for the current chapter ──
   const handleLoad = useCallback(async (force?: boolean) => {
     const key = _cacheKey(bookId, chapterIndex);
-    // Check cache first (skip when force=true — user clicked "फिर से बनाएँ")
+    // Check cache first (skip when force=true — user clicked "Regenerate")
     if (!force) {
       const cached = _summaryCache.get(key);
       if (_isValidSummary(cached)) {
@@ -168,7 +168,7 @@ export function HindiSummaryCard({
       }
       if (!_isValidSummary(result)) {
         console.error("[summary] invalid response", result);
-        toast.error("अभी उपलब्ध नहीं है, बाद में कोशिश करें");
+        toast.error("Summary unavailable, try again");
         setState("collapsed");
         return;
       }
@@ -189,9 +189,9 @@ export function HindiSummaryCard({
       const code = (err as HindiApiError)?.code;
       const msg = err instanceof Error ? err.message : "";
       if (code === "rate_limited" || code === "groq_rate_limited") {
-        toast.error("थोड़ी देर रुकें — बहुत सारे अनुरोध");
+        toast.error("Rate limited — retrying");
       } else {
-        toast.error(msg || "अभी उपलब्ध नहीं है, बाद में कोशिश करें");
+        toast.error(msg || "Summary unavailable, try again");
       }
       setState("collapsed");
     }
@@ -253,7 +253,7 @@ export function HindiSummaryCard({
           className="font-mono text-[10px] tracking-[0.18em] uppercase"
           style={{ color: "var(--aria-accent-glow)" }}
         >
-          इस अध्याय का सारांश
+          Chapter Summary
         </span>
       </div>
 
@@ -267,7 +267,7 @@ export function HindiSummaryCard({
             fontWeight: 500,
           }}
         >
-          सारांश पढ़ें
+          Read summary
         </button>
       )}
 
@@ -277,7 +277,7 @@ export function HindiSummaryCard({
           style={{ color: "var(--aria-fg-muted)" }}
         >
           <Loader2 className="w-4 h-4 animate-spin" />
-          सारांश तैयार हो रहा है…
+          Generating summary…
         </div>
       )}
 
@@ -303,7 +303,7 @@ export function HindiSummaryCard({
           </div>
           {/* Partial-quality badge: the summary failed the gates twice and
               flagged sentences were stripped. Show a muted warning + a
-              "फिर से बनाएँ" button that re-calls the endpoint with force=1
+              "Regenerate" button that re-calls the endpoint with force=1
               (bypasses cache). */}
           {summary.quality === "partial" && (
             <div
@@ -315,7 +315,7 @@ export function HindiSummaryCard({
               }}
             >
               <AlertCircle className="w-3 h-3 flex-shrink-0" style={{ color: "rgba(245,158,11,0.7)" }} />
-              <span className="flex-1">यह सारांश अधूरा हो सकता है</span>
+              <span className="flex-1">This summary may be incomplete</span>
               <button
                 onClick={handleRegenerate}
                 className="flex items-center gap-1 text-[10px] px-2 py-0.5 rounded transition-opacity hover:opacity-80"
@@ -326,13 +326,13 @@ export function HindiSummaryCard({
                 }}
               >
                 <RefreshCw className="w-2.5 h-2.5" />
-                फिर से बनाएँ
+                Regenerate
               </button>
             </div>
           )}
           {/* Degraded badge: all regenerations failed, the outline was rendered
               as a Hindi bulleted list. A correct outline beats a fluent-but-wrong
-              paragraph. Show a "संक्षिप्त रूप" badge + regenerate button. */}
+              paragraph. Show a "Condensed form" badge + regenerate button. */}
           {(summary.degraded || summary.quality === "degraded") && (
             <div
               className="flex items-center gap-2 mt-3 mb-1 px-3 py-2 rounded-lg text-xs"
@@ -343,7 +343,7 @@ export function HindiSummaryCard({
               }}
             >
               <AlertCircle className="w-3 h-3 flex-shrink-0" style={{ color: "rgba(168,85,247,0.7)" }} />
-              <span className="flex-1">संक्षिप्त रूप</span>
+              <span className="flex-1">Condensed form</span>
               <button
                 onClick={handleRegenerate}
                 className="flex items-center gap-1 text-[10px] px-2 py-0.5 rounded transition-opacity hover:opacity-80"
@@ -354,7 +354,7 @@ export function HindiSummaryCard({
                 }}
               >
                 <RefreshCw className="w-2.5 h-2.5" />
-                फिर से बनाएँ
+                Regenerate
               </button>
             </div>
           )}
@@ -371,12 +371,12 @@ export function HindiSummaryCard({
               {audioPlaying ? (
                 <>
                   <Pause className="w-3 h-3" />
-                  रोकें
+                  Stop
                 </>
               ) : (
                 <>
                   <Volume2 className="w-3 h-3" />
-                  सारांश सुनें
+                  Listen to summary
                 </>
               )}
             </button>

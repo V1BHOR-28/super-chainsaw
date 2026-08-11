@@ -10637,7 +10637,7 @@ def _purge_job_completely(job_id):
                 f"summaries/v3/{job_id}/", f"summaries/v4/{job_id}/",
                 f"summaries/v5/{job_id}/", f"summaries/v6/{job_id}/",
                 f"summaries/v7/{job_id}/", f"summaries/v8/{job_id}/",
-                f"summaries/v9/{job_id}/",
+                f"summaries/v9/{job_id}/", f"summaries/v10/{job_id}/",
                 f"glossary/{job_id}/", f"glossary/v2/{job_id}/",
             ):
                 try:
@@ -11222,23 +11222,17 @@ def api_ai_health():
         return jsonify({"groq_key_present": False, "models_tried": [],
                         "working_model": None, "error": "internal"}), 500
 
-# ── Hindi summary helpers (v9: hard pass separation, no outline fallback) ──
+# ── Chapter summary helpers (v10: English prose, retuned gates) ──
 # Reject any character from CJK / Hangul / Hiragana / Katakana / Arabic / Cyrillic.
 _NON_INDIC_SCRIPT_RE = re.compile(
     r"[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af\u0600-\u06ff\u0400-\u04ff]"
 )
 
-# Regex for bare English verb enumerations (the Canto V failure mode).
-_BARE_VERB_RE = re.compile(r'\b(Went|Girds|Examining|Confess|Hear|Gazing|Falling|Weeping'
-                           r'|Calling|Reading|Speaking|Turning|Rising|Sinking|Flying'
-                           r'|Sinning|Burning|Crying|Dying|Living|Loving|hating)\b',
-                           re.IGNORECASE)
+# Regex: numbered list lines or bullet chars or meta headings (format gate).
+_OUTLINE_LEAK_RE = re.compile(r'(^\s*\d+\.\s|^\s*[-•·]\s|कथन:|रूपक:)', re.MULTILINE)
 
-# Regex: "ने " immediately followed by an ASCII [a-z] word (Hindi-English splice).
-_NE_ASCII_RE = re.compile(r'ने\s+[a-z]')
-
-# Regex: numbered list lines or "कथन:" / "रूपक:" headings (outline leak detection).
-_OUTLINE_LEAK_RE = re.compile(r'(^\s*\d+\.\s|कथन:|रूपक:)', re.MULTILINE)
+# Regex: meta-commentary opening phrases.
+_META_PHRASE_RE = re.compile(r'^(This chapter|This passage|Summary of|Overview of)', re.IGNORECASE | re.MULTILINE)
 
 # ── Pass A: Event extraction prompt (returns STRICT JSON, English only) ──
 _SUMMARY_PASS_A_SYSTEM = (
@@ -11266,18 +11260,21 @@ _SUMMARY_PASS_A_SYSTEM = (
     "8. ALL fields in English. NEVER use Hindi/Devanagari in Pass A output."
 )
 
-# ── Pass B: Hindi prose narration (verbatim from spec) ──
+# ── Pass B: English prose narration ──
 _SUMMARY_PASS_B_SYSTEM = (
-    "तुम एक साहित्यिक अनुवादक और व्याख्याकार हो। नीचे दिए गए outline और मूल अध्याय-पाठ "
-    "के आधार पर हिंदी गद्य में सारांश लिखो।\n"
-    "नियम:\n"
-    "- पूरा सारांश हिंदी में लिखो। अंग्रेज़ी वाक्य या अंग्रेज़ी क्रिया मत लिखो। "
-    "केवल proper nouns के लिए कोष्ठक में मूल वर्तनी दे सकते हो, जैसे फ्रांचेस्का (Francesca)।\n"
-    "- क्रमांकित सूची, bullet, 'कथन:', 'रूपक:' जैसे शीर्षक मत बनाओ। केवल 3-5 अनुच्छेद गद्य।\n"
-    "- outline के हर event को कवर करो, उसी क्रम में। कोई event मत छोड़ो।\n"
-    "- named_entities की हर entity का नाम सारांश में आना चाहिए।\n"
-    "- कोई वाक्य या वाक्यांश दोहराओ मत।\n"
-    "- अपनी तरफ़ से घटना मत जोड़ो।"
+    "You are a literary summarizer. Given an event outline and the chapter text, "
+    "write a summary in plain modern English prose.\n"
+    "Rules:\n"
+    "- Output ONLY English prose. No bullets, no numbered lists, no headings, "
+    "no glossary, no meta-commentary like 'This passage describes...'.\n"
+    "- Cover every event in the outline, in order. Do not skip any.\n"
+    "- Use plain modern English, not archaic or poetic register.\n"
+    "- Preserve all proper nouns exactly as spelled in the source "
+    "(Beatrice, Lucia, Rachel, Virgil, Ciacco, Plutus, Cerberus).\n"
+    "- Never begin two consecutive sentences with the same subject.\n"
+    "- Do not invent names, dialogue, or relationships absent from the event list.\n"
+    "- Target 250-450 words for a typical canto; scale up for longer chapters.\n"
+    "- Output only the summary, nothing else."
 )
 
 # Repair instruction for Pass A JSON failures.
@@ -11493,19 +11490,16 @@ def _extract_named_entities(parsed):
     return set()
 
 
-def _validate_summary_v9(summary, parsed_outline):
-    """Validate the final Hindi summary against the Pass A JSON.
+def _validate_summary_v10(summary, parsed_outline):
+    """Validate the final English summary against the Pass A JSON.
 
-    v9.1 gates (relaxed to avoid false rejections of valid Hindi summaries):
-    a) Devanagari character ratio < 0.40 of all letter characters (outside parentheses).
-    b) Contains "ने " immediately followed by an ASCII [a-z] word.
-    c) Matches numbered list lines or "कथन:" / "रूपक:" headings.
-    d) Fewer than 50% of named_entities appear in the text (was 80% — too strict
-       for chapters with 15+ entities; a 3-5 paragraph summary can't naturally
-       fit every minor name).
-    e) Any 8-word shingle repeats more than 2 times (was "more than twice" = 3+).
-    f) Bare-verb regex: ONLY checks outside parentheses (proper noun glosses
-       like "(Francesca)" should not trigger the bare-verb gate).
+    v10 gates (English, retuned):
+    a) Format gate: reject if numbered list, bullet chars, or meta-commentary opening.
+    b) Degeneracy gate: reject if any 6-word shingle appears 3+ times, or if 3+
+       sentences share the same first 3 tokens.
+    c) Entity gate: reject if < 80% of named_entities appear in the summary.
+    d) Tail gate: reject if < 70% of the final 15% of Pass A events are
+       represented (checked via key_quotes from the tail events).
 
     Returns (ok, reason, coverage, missing).
     """
@@ -11514,42 +11508,39 @@ def _validate_summary_v9(summary, parsed_outline):
 
     if _NON_INDIC_SCRIPT_RE.search(summary):
         return (False, "non_indic_script", 0.0, set())
-    if not re.search(r"[\u0900-\u097F]", summary):
-        return (False, "no_devanagari", 0.0, set())
 
-    # a) Devanagari character ratio (outside parentheses)
-    text_outside_parens = re.sub(r'\([^)]*\)', '', summary)
-    devanagari_chars = len(re.findall(r'[\u0900-\u097F]', text_outside_parens))
-    all_letter_chars = len(re.findall(r'[\u0900-\u097Fa-zA-Z]', text_outside_parens))
-    if all_letter_chars > 0:
-        ratio = devanagari_chars / all_letter_chars
-        if ratio < 0.40:
-            return (False, f"low_devanagari_ratio({ratio:.2f})", 0.0, set())
-
-    # b) "ने " followed by ASCII [a-z] (Hindi-English splice)
-    if _NE_ASCII_RE.search(summary):
-        return (False, "ne_ascii_splice", 0.0, set())
-
-    # c) Numbered list lines or "कथन:" / "रूपक:" headings (outline leak)
+    # a) Format gate
     if _OUTLINE_LEAK_RE.search(summary):
-        return (False, "outline_leak", 0.0, set())
+        return (False, "format_leak", 0.0, set())
+    if _META_PHRASE_RE.search(summary.strip().split('\n')[0]):
+        return (False, "meta_opening", 0.0, set())
 
-    # f) Bare-verb regex: ONLY check outside parentheses
-    # Proper nouns in parentheses like "(Francesca)" should not trigger this.
-    if _BARE_VERB_RE.search(text_outside_parens):
-        matches = _BARE_VERB_RE.findall(text_outside_parens)
-        return (False, f"bare_verbs({','.join(set(matches))})", 0.0, set())
-
-    # e) 8-word shingle repetition (max 2 occurrences = 3+ fails)
+    # b) Degeneracy gate: 6-word shingle 3+ times
     words = summary.split()
-    if len(words) >= 8:
+    shingle_count = 0
+    if len(words) >= 6:
         shingles = {}
-        for i in range(len(words) - 7):
-            sh = " ".join(words[i:i+8])
+        for i in range(len(words) - 5):
+            sh = " ".join(words[i:i+6]).lower()
             shingles[sh] = shingles.get(sh, 0) + 1
         for sh, count in shingles.items():
-            if count > 2:
+            if count >= 3:
                 return (False, f"shingle_repeat({sh[:30]}...)", 0.0, set())
+            if count >= 2:
+                shingle_count += 1
+
+    # b2) 3+ sentences share same first 3 tokens
+    sentences = re.findall(r'[^.!?]+[.!?]*', summary)
+    sentences = [s.strip() for s in sentences if s.strip()]
+    first_3 = {}
+    for s in sentences:
+        toks = s.lower().split()[:3]
+        if len(toks) == 3:
+            key = " ".join(toks)
+            first_3[key] = first_3.get(key, 0) + 1
+    for key, count in first_3.items():
+        if count >= 3:
+            return (False, f"sentence_start_repeat({key[:30]}...)", 0.0, set())
 
     # Paragraph similarity (>85% → FAIL)
     paragraphs = [p.strip() for p in summary.split("\n\n") if p.strip()]
@@ -11560,10 +11551,7 @@ def _validate_summary_v9(summary, parsed_outline):
             if sim > 0.85:
                 return (False, f"para_similarity({sim:.2f})", 0.0, set())
 
-    # d) Coverage: >=50% of named_entities from Pass A (was 80%)
-    # A 3-5 paragraph Hindi summary can't naturally fit 15+ entity names.
-    # 50% ensures the summary covers the MAJOR entities (Dante, Virgil, Minos,
-    # Francesca) without failing on minor ones (Galeotto, Caïna).
+    # c) Entity gate: >=80% of named_entities
     entities = _extract_named_entities(parsed_outline)
     missing = set()
     if entities:
@@ -11575,10 +11563,29 @@ def _validate_summary_v9(summary, parsed_outline):
             else:
                 missing.add(n)
         coverage = round(len(present) / len(entities) * 100, 1) if entities else 100.0
-        if coverage < 50.0:
+        if coverage < 80.0:
             return (False, f"low_coverage({coverage:.0f}%)", coverage, missing)
     else:
         coverage = 100.0
+
+    # d) Tail gate: >=70% of final 15% of events represented
+    events = parsed_outline.get("events", []) if parsed_outline else []
+    if events:
+        tail_start = int(0.85 * len(events))
+        tail_events = events[tail_start:]
+        if tail_events:
+            tail_represented = 0
+            for ev in tail_events:
+                actor = (ev.get("actor") or "").strip()
+                action = (ev.get("action") or "").strip()
+                # Check if any key word from the event appears in the summary
+                check_words = [w.lower() for w in (actor + " " + action).split()
+                               if len(w) > 3 and w.lower() not in {"the", "and", "but", "with", "from"}]
+                if any(w in summary_lower for w in check_words):
+                    tail_represented += 1
+            tail_pct = round(tail_represented / len(tail_events) * 100, 1)
+            if tail_pct < 70.0:
+                return (False, f"low_tail({tail_pct:.0f}%)", coverage, set())
 
     return (True, "ok", coverage, set())
 
@@ -11845,7 +11852,7 @@ def _generate_hindi_summary_inner(groq_client, chapter_text: str, chapter_title:
 
     raw_summary, code_b = _groq_summary_call(
         groq_client, _SUMMARY_PASS_B_SYSTEM, pass_b_user,
-        temperature=0.4, max_tokens=2048,
+        temperature=0.3, max_tokens=2048,
         frequency_penalty=0.5, presence_penalty=0.3)
 
     if not raw_summary:
@@ -11865,8 +11872,8 @@ def _generate_hindi_summary_inner(groq_client, chapter_text: str, chapter_title:
     # ═══════════════════════════════════════════════════════════════
     # VALIDATION GATE on the final summary
     # ═══════════════════════════════════════════════════════════════
-    ok, reason, coverage, missing = _validate_summary_v9(summary, master_parsed)
-    print(f"summary_gate chapter={chap_id} ok={ok} reason={reason} coverage={coverage:.1f}%")
+    ok, reason, coverage, missing = _validate_summary_v10(summary, master_parsed)
+    print(f"summary_gate chapter={chap_id} ok={ok} reason={reason} coverage={coverage:.1f}% tail=...")
 
     if not ok:
         # Retry Pass B ONCE with the failure reason appended.
@@ -11886,7 +11893,7 @@ def _generate_hindi_summary_inner(groq_client, chapter_text: str, chapter_title:
         if raw_retry:
             retry_summary = _clean_summary_llm_output(raw_retry)
             if retry_summary:
-                ok2, reason2, cov2, missing2 = _validate_summary_v9(retry_summary, master_parsed)
+                ok2, reason2, cov2, missing2 = _validate_summary_v10(retry_summary, master_parsed)
                 print(f"summary_gate chapter={chap_id} retry ok={ok2} reason={reason2} coverage={cov2:.1f}%")
                 if ok2:
                     summary = retry_summary
@@ -11900,9 +11907,7 @@ def _generate_hindi_summary_inner(groq_client, chapter_text: str, chapter_title:
         # Only error on structural failures (outline leak, bare verbs,
         # ne_ascii splice, low devanagari ratio) which indicate the
         # output is fundamentally broken.
-        _STRUCTURAL_FAILURES = {"outline_leak", "ne_ascii_splice",
-                                "low_devanagari_ratio", "bare_verbs",
-                                "non_indic_script", "no_devanagari", "empty"}
+        _STRUCTURAL_FAILURES = {"format_leak", "meta_opening", "non_indic_script", "empty"}
         if any(sf in reason for sf in _STRUCTURAL_FAILURES):
             print(f"[summary] structural gate failed ({reason}) → returning error")
             print(f"summary_returned_from=quality_gate_failed chapter={chap_id}")
@@ -12039,8 +12044,8 @@ def api_chapter_summary():
     # Check R2 cache (skip when force=true)
     # ARIA: v9 cache namespace — invalidates all v8 summaries (which may contain
     # the Pass A outline leak) + their Swara audio.
-    summary_cache_key = f"summaries/v9/{book_id}/{chapter_index}.hi.json"
-    audio_cache_key = f"summaries/v9/{book_id}/{chapter_index}.hi.mp3"
+    summary_cache_key = f"summaries/v10/{book_id}/{chapter_index}.en.json"
+    audio_cache_key = f"summaries/v10/{book_id}/{chapter_index}.en.mp3"
 
     if not force:
         try:
@@ -12100,15 +12105,44 @@ def api_chapter_summary():
 
         missing_list = sorted(missing_set) if missing_set else []
 
-        # Synthesize audio (fail-soft — empty audio_url is fine).
+        # Synthesize audio using the book's narration voice (English, not Hindi).
+        # Fail-soft — empty audio_url is fine, the text summary is still returned.
         audio_url = ""
         try:
-            import hindi_tts
             import tempfile as _tf
+            import edge_tts, asyncio
+            # Use the book's narration voice, or fall back to a default English voice.
+            _summary_voice = job.get("voice") or "en-US-AriaNeural"
             work_dir = UPLOAD_DIR / book_id
             work_dir.mkdir(parents=True, exist_ok=True)
-            audio_path = str(work_dir / f"summary_{chapter_index}.hi.mp3")
-            if hindi_tts.synthesize_hindi(summary, audio_path):
+            audio_path = str(work_dir / f"summary_{chapter_index}.en.mp3")
+            # Strip any SSML/markdown before synthesis
+            _clean_text = re.sub(r'<[^>]+>', ' ', summary)
+            _clean_text = re.sub(r'https?://\S+', ' ', _clean_text)
+            _clean_text = re.sub(r'\s+', ' ', _clean_text).strip()
+            async def _synth():
+                communicate = edge_tts.Communicate(_clean_text, _summary_voice, rate="-5%")
+                await communicate.save(audio_path)
+            loop = asyncio.new_event_loop()
+            try:
+                loop.run_until_complete(_synth())
+            finally:
+                loop.close()
+            if os.path.exists(audio_path) and os.path.getsize(audio_path) > 1000:
+                try:
+                    from audio_postprocess import post_process_audio
+                    post_process_audio(audio_path)
+                except Exception:
+                    pass
+                try:
+                    import storage_backend
+                    if storage_backend.is_enabled():
+                        storage_backend.upload_file(audio_path, audio_cache_key)
+                        audio_url = storage_backend.presigned_get_url(audio_cache_key)
+                except Exception as e:
+                    print(f"[summary] R2 audio upload failed: {e}")
+            else:
+                print(f"[summary] English TTS produced empty file")
                 try:
                     import storage_backend
                     if storage_backend.is_enabled():
@@ -12117,7 +12151,7 @@ def api_chapter_summary():
                 except Exception as e:
                     print(f"[summary] R2 audio upload failed: {e}")
         except Exception as e:
-            print(f"[summary] Hindi TTS failed: {e}")
+            print(f"[summary] English TTS failed: {e}")
 
         # Cache summary text + quality + missing to R2
         try:
