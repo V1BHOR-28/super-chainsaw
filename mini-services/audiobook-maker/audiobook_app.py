@@ -10513,7 +10513,7 @@ def _purge_job_completely(job_id):
         if storage_backend.is_enabled():
             for prefix in (
                 f"summaries/{job_id}/", f"summaries/v2/{job_id}/",
-                f"summaries/v3/{job_id}/",
+                f"summaries/v3/{job_id}/", f"summaries/v4/{job_id}/",
                 f"glossary/{job_id}/", f"glossary/v2/{job_id}/",
             ):
                 try:
@@ -11077,10 +11077,17 @@ def api_bgm_debug(job_id, chapter_index):
 # ARIA: Hindi comprehension endpoints (summary, glossary, explain)
 # ═══════════════════════════════════════════════════════════════════
 
-# ── Hindi summary helpers (v3: full-coverage, no input truncation) ──
+# ── Hindi summary helpers (v4: anti-repetition, extractive merge) ──
 # Reject any character from CJK / Hangul / Hiragana / Katakana / Arabic / Cyrillic.
 _NON_INDIC_SCRIPT_RE = re.compile(
     r"[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af\u0600-\u06ff\u0400-\u04ff]"
+)
+
+# No-repetition instruction appended to every summary prompt so the model
+# never pads by repeating the same sentence/thought.
+_SUMMARY_NO_REPEAT_INSTRUCTION = (
+    "\nकिसी भी वाक्य या विचार को दोहराएँ नहीं। हर वाक्य में नई जानकारी होनी चाहिए। "
+    "यदि कहने को कुछ नया न बचे तो वहीं रुक जाएँ।"
 )
 
 # Full-coverage system prompt (Devanagari) — used for single-pass generation.
@@ -11096,6 +11103,7 @@ _SUMMARY_SYSTEM_PROMPT_V3 = (
     "7. चीनी, जापानी, कोरियाई, अरबी या किसी अन्य लिपि का एक भी अक्षर प्रयोग न करें।\n"
     "8. अपनी राय, व्याख्या या टिप्पणी न जोड़ें — केवल जो पाठ में है।\n"
     "9. केवल सारांश लौटाएँ, कोई भूमिका या शीर्षक नहीं।"
+    + _SUMMARY_NO_REPEAT_INSTRUCTION
 )
 
 # Retry nudge appended as a user message when the first attempt fails validation.
@@ -11112,9 +11120,11 @@ _SUMMARY_CHUNK_PROMPT = (
     "3. पात्रों और स्थानों के नाम पहली बार आने पर कोष्ठक में रोमन लिपि दें।\n"
     "4. केवल देवनागरी लिपि; चीनी, जापानी, कोरियाई, अरबी या किसी अन्य लिपि का एक भी अक्षर न लिखें।\n"
     "5. केवल सारांश लौटाएँ, कोई भूमिका या शीर्षक नहीं।"
+    + _SUMMARY_NO_REPEAT_INSTRUCTION
 )
 
 # Reduce-phase prompt: merge per-chunk summaries into one cohesive summary.
+# Only used when there are >6 chunks (otherwise the merge is extractive).
 _SUMMARY_MERGE_PROMPT = (
     "निम्नलिखित एक अध्याय के विभिन्न क्रमिक हिस्सों के हिंदी सारांश हैं। "
     "इन सभी को मिलाकर एक ही सुसंबद्ध अध्याय-सारांश बनाएँ जो पूरे अध्याय के "
@@ -11127,11 +11137,86 @@ _SUMMARY_MERGE_PROMPT = (
     "5. केवल देवनागरी लिपि में लिखें; पात्रों और स्थानों के नाम पहली बार आने पर कोष्ठक में रोमन लिपि दें।\n"
     "6. चीनी, जापानी, कोरियाई, अरबी या किसी अन्य लिपि का एक भी अक्षर प्रयोग न करें।\n"
     "7. केवल सारांश लौटाएँ, कोई भूमिका या शीर्षक नहीं।"
+    + _SUMMARY_NO_REPEAT_INSTRUCTION
 )
 
 
+def _normalize_sentence(s: str) -> str:
+    """Normalize a Hindi sentence for de-dup comparison.
+
+    Strips whitespace, Devanagari + Latin punctuation, and collapses spaces
+    so that "वर्जिल ने कहा।" and "वर्जिल ने कहा " compare equal.
+    """
+    if not s:
+        return ""
+    # Strip Devanagari danda + Latin punctuation + quotes + brackets
+    s = re.sub(r'[।.!?;:,"\'`\u0964\u0965()\[\]{}]', '', s)
+    s = re.sub(r'\s+', ' ', s)
+    return s.strip().lower()
+
+
+def _token_jaccard(a: str, b: str) -> float:
+    """Token-level Jaccard similarity between two normalized sentences."""
+    ta = set(a.split())
+    tb = set(b.split())
+    if not ta or not tb:
+        return 0.0
+    return len(ta & tb) / len(ta | tb)
+
+
+def _dedupe_summary(text: str) -> str:
+    """Remove repeated sentences/paragraphs from a generated summary.
+
+    Splits on \\n\\n into paragraphs, then each paragraph into sentences on
+    दंड (।) / . / ! / ?. Normalizes each sentence, drops exact duplicates,
+    drops near-duplicates (token Jaccard >= 0.8). Reassembles paragraphs
+    (dropping any left empty). If the last sentence doesn't end with ।/?/!,
+    drops it (removes mid-sentence truncation).
+    """
+    if not text:
+        return ""
+    seen_normalized: set = set()
+    kept_sentences: list = []  # list of (original_sentence)
+    paragraphs = re.split(r'\n{2,}', text)
+    out_paragraphs = []
+    for para in paragraphs:
+        para = para.strip()
+        if not para:
+            continue
+        # Split into sentences on danda/.!? followed by space or end.
+        # Keep the delimiter attached to the sentence.
+        sentences = re.findall(r'[^।.!?]+[।.!?]*', para)
+        sentences = [s.strip() for s in sentences if s.strip()]
+        kept = []
+        for sent in sentences:
+            norm = _normalize_sentence(sent)
+            if not norm:
+                continue
+            # Exact duplicate check
+            if norm in seen_normalized:
+                continue
+            # Near-duplicate check (Jaccard >= 0.8 with any kept sentence)
+            is_dup = False
+            for prev_norm in seen_normalized:
+                if _token_jaccard(norm, prev_norm) >= 0.8:
+                    is_dup = True
+                    break
+            if is_dup:
+                continue
+            seen_normalized.add(norm)
+            kept.append(sent)
+        # Drop trailing incomplete sentence (no terminal punctuation)
+        if kept:
+            last = kept[-1].rstrip()
+            if last and last[-1] not in '।.!?':
+                kept = kept[:-1]
+        if kept:
+            out_paragraphs.append(' '.join(kept))
+    return '\n\n'.join(out_paragraphs).strip()
+
+
 def _clean_summary_llm_output(text: str) -> str:
-    """Strip markdown, drop non-Devanagari leading lines, collapse newlines."""
+    """Strip markdown, drop non-Devanagari leading lines, dedupe, collapse newlines."""
     if not text:
         return ""
     # Strip markdown: **bold**, *italic*, # headings, [text](url), `code`
@@ -11156,6 +11241,9 @@ def _clean_summary_llm_output(text: str) -> str:
     text = "\n".join(kept).strip()
     # Collapse 3+ newlines to double
     text = re.sub(r'\n{3,}', '\n\n', text)
+    # ARIA: de-duplicate sentences/paragraphs BEFORE validation. This catches
+    # the degenerate loop where the model repeats the same sentence 15x.
+    text = _dedupe_summary(text)
     return text
 
 
@@ -11173,7 +11261,9 @@ def _validate_summary(summary: str, chapter_text: str):
 
     Checks:
     1. Script — reject if any CJK/Hangul/Hiragana/Katakana/Arabic/Cyrillic chars present.
-    2. Length — reject if too short relative to chapter size (floor 250, 400 for normal chapters).
+    2. Length — reject if too short (min(max(250, 4% of chapter), 900)). The old
+       8% rule rewarded padding; the new cap at 900 means a long chapter never
+       demands a huge summary.
     3. Tail coverage — reject if proper nouns from the last 15% of the chapter are absent.
     """
     if not summary or not summary.strip():
@@ -11183,14 +11273,11 @@ def _validate_summary(summary: str, chapter_text: str):
     if _NON_INDIC_SCRIPT_RE.search(summary):
         return (False, "non_indic_script")
 
-    # 2. Length check: under 400 chars OR under 8% of chapter length,
-    #    whichever threshold is larger; 250-char floor for genuinely short chapters.
+    # 2. Length check: min(max(250, 4% of chapter), 900). The old 8% rule with
+    #    no upper cap pushed the model to pad (and loop). 4% + a 900 cap lets
+    #    short chapters demand ~250 chars while long chapters never demand >900.
     chapter_len = max(1, len(chapter_text))
-    relative_threshold = int(0.08 * chapter_len)
-    if chapter_len < 5000:  # genuinely short chapter → 250-char floor
-        threshold = max(250, relative_threshold)
-    else:
-        threshold = max(400, relative_threshold)
+    threshold = min(max(250, int(0.04 * chapter_len)), 900)
     if len(summary) < threshold:
         return (False, f"too_short({len(summary)}<{threshold})")
 
@@ -11229,7 +11316,16 @@ def _split_chapter_chunks(text: str, chunk_words: int = 3000, overlap_words: int
 
 def _groq_summary_call(groq_client, system_prompt: str, user_content: str,
                        temperature: float, max_tokens: int) -> str:
-    """Single Groq chat call. Returns content string or '' on failure."""
+    """Single Groq chat call with anti-repetition sampling. Returns content or ''.
+
+    Uses frequency_penalty=0.6 + presence_penalty=0.3 + top_p=0.9 + a minimum
+    temperature of 0.35 to break the degenerate-loop failure mode where
+    llama-3.3-70b repeats the same sentence 15x. If the Groq SDK rejects any
+    of the penalty params (TypeError / 400), retries once without them —
+    never lets a sampling-param incompatibility fail the request.
+    """
+    effective_temp = max(temperature, 0.35)
+    # First attempt: full anti-repetition sampling.
     try:
         resp = groq_client.chat.completions.create(
             model="llama-3.3-70b-versatile",
@@ -11237,11 +11333,35 @@ def _groq_summary_call(groq_client, system_prompt: str, user_content: str,
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_content},
             ],
-            temperature=temperature,
+            temperature=effective_temp,
             max_tokens=max_tokens,
+            frequency_penalty=0.6,
+            presence_penalty=0.3,
+            top_p=0.9,
         )
         return (resp.choices[0].message.content or "").strip()
-    except Exception as e:
+    except (TypeError, Exception) as e:
+        msg = str(e)
+        # If the SDK rejected the penalty/top_p params, retry plain.
+        if any(k in msg.lower() for k in ("frequency_penalty", "presence_penalty",
+                                          "top_p", "unexpected keyword",
+                                          "400", "invalid")):
+            print(f"[summary] anti-repetition params rejected ({type(e).__name__}), "
+                  f"retrying plain: {e}")
+            try:
+                resp = groq_client.chat.completions.create(
+                    model="llama-3.3-70b-versatile",
+                    messages=[
+                        {"role": "system", "content": system_prompt},
+                        {"role": "user", "content": user_content},
+                    ],
+                    temperature=effective_temp,
+                    max_tokens=max_tokens,
+                )
+                return (resp.choices[0].message.content or "").strip()
+            except Exception as e2:
+                print(f"[summary] Groq call (plain retry) failed: {e2}")
+                return ""
         print(f"[summary] Groq call failed: {e}")
         return ""
 
@@ -11266,7 +11386,19 @@ def _generate_hindi_summary(groq_client, chapter_text: str) -> str:
     use_mapreduce = word_count > 4000
 
     def _attempt(temperature, extra_user_msg=None):
-        """One generation attempt. Returns (summary, path_label)."""
+        """One generation attempt. Returns (summary, path_label, dedupe_pct).
+
+        Map-reduce path is EXTRACTIVE (not generative) for <=6 chunks: the
+        per-chunk summaries are already good distinct paragraphs, so we just
+        concatenate + dedupe them. Only >6 chunks triggers a generative
+        merge LLM call (capped at 1200 tokens with anti-repetition penalties),
+        because that's where the loop historically originated.
+
+        dedupe_pct = percentage of characters removed by the final
+        _dedupe_summary pass (0.0 if nothing was removed). Used by the caller
+        to decide whether to retry: if dedupe removed >40%, the model was
+        looping, so retrying would reproduce the loop — return as-is.
+        """
         if use_mapreduce:
             chunks = _split_chapter_chunks(chapter_text)
             chunk_summaries = []
@@ -11278,14 +11410,25 @@ def _generate_hindi_summary(groq_client, chapter_text: str) -> str:
                 if cs:
                     chunk_summaries.append(cs)
             if not chunk_summaries:
-                return ("", "mapreduce(empty)")
-            merged_input = "\n\n---\n\n".join(chunk_summaries)
-            if extra_user_msg:
-                merged_input = extra_user_msg + "\n\n" + merged_input
-            raw = _groq_summary_call(
-                groq_client, _SUMMARY_MERGE_PROMPT, merged_input,
-                temperature=temperature, max_tokens=1600)
-            path = f"mapreduce({len(chunks)} chunks)"
+                return ("", "mapreduce(empty)", 0.0)
+            if len(chunks) > 6:
+                # Generative merge only for very long chapters (>6 chunks).
+                merged_input = "\n\n---\n\n".join(chunk_summaries)
+                if extra_user_msg:
+                    merged_input = extra_user_msg + "\n\n" + merged_input
+                raw = _groq_summary_call(
+                    groq_client, _SUMMARY_MERGE_PROMPT, merged_input,
+                    temperature=temperature, max_tokens=1200)
+                pre_dedupe = raw
+                summary = _clean_summary_llm_output(raw)
+                path = f"mapreduce-merge({len(chunks)} chunks)"
+            else:
+                # Extractive merge: concatenate + dedupe. No LLM call — the
+                # per-chunk summaries are already distinct paragraphs.
+                concatenated = "\n\n".join(chunk_summaries)
+                pre_dedupe = concatenated
+                summary = _dedupe_summary(concatenated)
+                path = f"mapreduce-extractive({len(chunks)} chunks)"
         else:
             user_content = chapter_text
             if extra_user_msg:
@@ -11293,23 +11436,35 @@ def _generate_hindi_summary(groq_client, chapter_text: str) -> str:
             raw = _groq_summary_call(
                 groq_client, _SUMMARY_SYSTEM_PROMPT_V3, user_content,
                 temperature=temperature, max_tokens=1600)
+            pre_dedupe = raw
+            summary = _clean_summary_llm_output(raw)
             path = "single-pass"
-        summary = _clean_summary_llm_output(raw)
-        return (summary, path)
+        # Measure how much the final dedupe pass removed.
+        pre_len = len((pre_dedupe or "").strip())
+        post_len = len((summary or "").strip())
+        dedupe_pct = round((1 - post_len / pre_len) * 100, 1) if pre_len > 0 else 0.0
+        return (summary, path, dedupe_pct)
 
     # First attempt
-    summary1, path1 = _attempt(0.3)
+    summary1, path1, dedupe_pct1 = _attempt(0.3)
     ok1, reason1 = _validate_summary(summary1, chapter_text)
     print(f"[summary] attempt 1: path={path1} words_in={word_count} "
-          f"len={len(summary1)} ok={ok1} reason={reason1}")
+          f"len={len(summary1)} dedupe_removed={dedupe_pct1}% ok={ok1} reason={reason1}")
     if ok1:
+        return summary1
+    # ARIA: if dedupe removed >40% of the text, the model was looping.
+    # Retrying reproduces the loop, so return the deduped version as-is
+    # (do NOT retry) — it's the best we can get.
+    if dedupe_pct1 > 40.0:
+        print(f"[summary] dedupe_removed={dedupe_pct1}% > 40% — skipping retry "
+              f"(retrying would reproduce the loop), returning deduped result")
         return summary1
 
     # Retry once with lower temperature + nudge
-    summary2, path2 = _attempt(0.2, extra_user_msg=_SUMMARY_RETRY_USER_MSG)
+    summary2, path2, dedupe_pct2 = _attempt(0.2, extra_user_msg=_SUMMARY_RETRY_USER_MSG)
     ok2, reason2 = _validate_summary(summary2, chapter_text)
     print(f"[summary] attempt 2 (retry): path={path2} len={len(summary2)} "
-          f"ok={ok2} reason={reason2}")
+          f"dedupe_removed={dedupe_pct2}% ok={ok2} reason={reason2}")
     if ok2:
         return summary2
 
@@ -11359,8 +11514,10 @@ def api_chapter_summary():
     chapter_text = " ".join(str(c[2]) for c in _tc_list if len(c) >= 3)
 
     # Check R2 cache
-    summary_cache_key = f"summaries/v3/{book_id}/{chapter_index}.hi.json"
-    audio_cache_key = f"summaries/v3/{book_id}/{chapter_index}.hi.mp3"
+    # ARIA: v4 cache namespace — invalidates all v3 summaries (which contain
+    # the repetition loop) + their Swara audio so they're regenerated fresh.
+    summary_cache_key = f"summaries/v4/{book_id}/{chapter_index}.hi.json"
+    audio_cache_key = f"summaries/v4/{book_id}/{chapter_index}.hi.mp3"
 
     try:
         import storage_backend
@@ -11401,6 +11558,28 @@ def api_chapter_summary():
         summary = _sanitize_summary(summary)
         if not summary:
             return jsonify({"error": "अभी उपलब्ध नहीं है, बाद में कोशिश करें"}), 503
+
+        # ARIA: TTS guard — log the final summary shape + warn if a sentence
+        # still repeats 3+ times (makes a surviving loop visible in Render logs
+        # instead of silent). Reuses the normalizer from _dedupe_summary.
+        try:
+            _paras = [p for p in summary.split("\n\n") if p.strip()]
+            _all_sents = []
+            for _p in _paras:
+                _all_sents.extend(re.findall(r'[^।.!?]+[।.!?]*', _p))
+            _norm_counts = {}
+            for _s in _all_sents:
+                _n = _normalize_sentence(_s)
+                if _n:
+                    _norm_counts[_n] = _norm_counts.get(_n, 0) + 1
+            _max_repeat = max(_norm_counts.values()) if _norm_counts else 0
+            print(f"[summary] final len={len(summary)} paras={len(_paras)} "
+                  f"max_sentence_repeat={_max_repeat}")
+            if _max_repeat >= 3:
+                print(f"[summary] WARN repetition survived (max_repeat={_max_repeat}) "
+                      f"— first 200 chars: {summary[:200]!r}")
+        except Exception:
+            pass
 
         # Synthesize audio
         audio_url = ""

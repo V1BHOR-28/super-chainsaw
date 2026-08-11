@@ -1,7 +1,7 @@
 "use client";
 
 import { useEffect, useRef, useState, useSyncExternalStore, useCallback } from "react";
-import { Loader2, FileQuestion, Minus, Plus, Locate, Volume2, X } from "lucide-react";
+import { Loader2, FileQuestion, Minus, Plus, Locate, Volume2, X, Sparkles } from "lucide-react";
 import { usePlayerStore } from "@/lib/player-store";
 import {
   useTranscriptStore,
@@ -361,16 +361,30 @@ export function TranscriptView() {
   }
 
   // Ready — render the word grid.
-  // Split words into paragraphs at sentence boundaries for the explain button.
+  // ── ARIA: paragraph breaks for the "हिंदी में समझाओ" explain button ──
+  // The Hinglish/edge-tts word cues contain NO sentence punctuation (bare
+  // tokens like "karta", "hai", "Phir"), so the old punctuation-only strategy
+  // produced zero breaks and the explain button was unreachable dead code.
+  // This punctuation-first + length-fallback strategy yields a break every
+  // 55–110 words regardless of punctuation, preferring real sentence ends
+  // when the source has them. A trailing sentinel (words.length) ensures the
+  // final segment also gets a button.
   const paragraphBreaks: number[] = [];
-  if (hindiHelp && words) {
-    for (let i = 0; i < words.length; i++) {
+  if (hindiHelp && words && words.length > 0) {
+    const PARA_MIN = 55;  // don't break sooner than this
+    const PARA_MAX = 110; // force a break by this
+    let sinceBreak = 0;
+    for (let i = 0; i < words.length - 1; i++) {
+      sinceBreak++;
       const w = words[i];
-      if (w.endsWith(".") || w.endsWith("!") || w.endsWith("?")) {
-        // Start a new paragraph at the next word
-        if (i + 1 < words.length) paragraphBreaks.push(i + 1);
+      const punctuated = /[.!?।]$/.test(w);
+      if ((punctuated && sinceBreak >= PARA_MIN) || sinceBreak >= PARA_MAX) {
+        paragraphBreaks.push(i + 1);
+        sinceBreak = 0;
       }
     }
+    // Trailing sentinel so the final segment gets an explain button too.
+    paragraphBreaks.push(words.length);
   }
 
   return (
@@ -393,7 +407,7 @@ export function TranscriptView() {
               }
               return (
                 <span key={i}>
-                  {hindiHelp && paragraphBreaks.includes(i) && (
+                  {hindiHelp && paragraphBreaks.includes(i) && i < words.length && (
                     <span className="block mt-3">
                       {/* Explain button for previous paragraph */}
                       {explainState && explainState.paragraphIdx === paraIdx - 1 && (
@@ -442,14 +456,15 @@ export function TranscriptView() {
                             const thisBreak = paragraphBreaks[paraIdx] ?? words.length;
                             handleExplain(words.slice(prevBreak, thisBreak).join(" "), paraIdx - 1);
                           }}
-                          className="text-[10px] px-2 py-0.5 rounded mb-1 transition-colors hover:opacity-80"
+                          className="flex items-center gap-1 text-[10px] px-2 py-0.5 rounded mb-1 transition-opacity opacity-70 hover:opacity-100"
                           style={{
-                            color: "rgba(168,85,247,0.7)",
-                            border: "1px solid rgba(168,85,247,0.2)",
+                            color: "rgba(168,85,247,0.8)",
+                            border: "1px solid rgba(168,85,247,0.25)",
                             background: "transparent",
                           }}
                         >
-                          इसे समझाएँ
+                          <Sparkles className="w-2.5 h-2.5" />
+                          हिंदी में समझाओ
                         </button>
                       )}
                     </span>
@@ -475,6 +490,81 @@ export function TranscriptView() {
                 </span>
               );
             })}
+            {/* ARIA: trailing explain button for the FINAL paragraph segment.
+                paragraphBreaks always ends with a words.length sentinel, so the
+                last segment (from the last real break to the end) gets a button
+                too. Without this, the final paragraph could never be explained. */}
+            {hindiHelp && words.length > 0 && paragraphBreaks.length > 0 && (() => {
+              const lastBreak = paragraphBreaks[paragraphBreaks.length - 1];
+              if (lastBreak !== words.length) return null;
+              const prevBreak = paragraphBreaks.length > 1
+                ? paragraphBreaks[paragraphBreaks.length - 2]
+                : 0;
+              const trailingParaIdx = paragraphBreaks.length - 1;
+              const isShowing = explainState && explainState.paragraphIdx === trailingParaIdx;
+              return (
+                <span className="block mt-3">
+                  {isShowing && (
+                    <span
+                      className="block mt-2 mb-2 p-3 rounded-lg text-xs leading-relaxed"
+                      style={{
+                        background: "rgba(168,85,247,0.06)",
+                        borderLeft: "2px solid rgba(168,85,247,0.4)",
+                        color: "var(--aria-fg-muted)",
+                      }}
+                    >
+                      {explainState!.loading ? (
+                        <span className="flex items-center gap-1.5">
+                          <Loader2 className="w-3 h-3 animate-spin" />
+                          समझाया जा रहा है…
+                        </span>
+                      ) : (
+                        <>
+                          <span className="font-serif text-sm">{explainState!.result?.explanation}</span>
+                          <div className="flex items-center gap-2 mt-2">
+                            {explainState!.result?.audio_url && (
+                              <button
+                                onClick={playExplainAudio}
+                                className="flex items-center gap-1 text-[10px] hover:opacity-80"
+                                style={{ color: "rgba(168,85,247,0.8)" }}
+                              >
+                                <Volume2 className="w-3 h-3" /> सुनें
+                              </button>
+                            )}
+                            <button
+                              onClick={() => setExplainState(null)}
+                              className="flex items-center gap-1 text-[10px] hover:opacity-80"
+                              style={{ color: "var(--aria-fg-dim)" }}
+                            >
+                              <X className="w-3 h-3" /> बंद करें
+                            </button>
+                          </div>
+                        </>
+                      )}
+                    </span>
+                  )}
+                  {!isShowing && (
+                    <button
+                      onClick={() => {
+                        handleExplain(
+                          words.slice(prevBreak, words.length).join(" "),
+                          trailingParaIdx,
+                        );
+                      }}
+                      className="flex items-center gap-1 text-[10px] px-2 py-0.5 rounded mb-1 transition-opacity opacity-70 hover:opacity-100"
+                      style={{
+                        color: "rgba(168,85,247,0.8)",
+                        border: "1px solid rgba(168,85,247,0.25)",
+                        background: "transparent",
+                      }}
+                    >
+                      <Sparkles className="w-2.5 h-2.5" />
+                      हिंदी में समझाओ
+                    </button>
+                  )}
+                </span>
+              );
+            })()}
           </p>
           {/* Bottom spacer so the final lines can be centred */}
           <div style={{ height: "28vh" }} />

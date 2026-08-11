@@ -971,3 +971,84 @@ Files modified:
 No git push — implementation + verification only, per the task spec.
 
 The fix is complete: Chapter 3 will always play Chapter 3's Hindi summary (key-based remount destroys the old audio element), and the Chapters drawer will always show the full book catalog with green ticks only on generated chapters — even after a later English TTS generation (chapterRevision invalidates the stale snapshot) and a backend restart (chapter_catalog persisted in token + registry + reconstructed from info.chapters).
+
+---
+Task ID: REPETITION-FIX
+Agent: main (Fix Hindi summary repetition loop + restore explain button in transcript)
+Task: Fix (1) Hindi chapter summary degenerating into the same sentence repeated ~15x (Canto VII), cached to R2 + spoken by Swara; (2) "इसे समझाएँ" explain button disappeared from the transcript because paragraphBreaks required sentence punctuation that Hinglish/edge-tts word cues don't contain.
+
+Work Log:
+- Read prior worklog (HINDI-SUMMARY-FIX, REGRESSION-FIX-2) for architecture context.
+- Read current state: audiobook_app.py summary helpers (_groq_summary_call, _clean_summary_llm_output, _validate_summary, _generate_hindi_summary, prompts, cache keys), transcript-view.tsx paragraphBreaks construction + explain button JSX.
+
+BACKEND (audiobook_app.py) — Bug 1 fix (7 changes, A-G):
+
+A. _groq_summary_call — anti-repetition sampling:
+- Added frequency_penalty=0.6, presence_penalty=0.3, top_p=0.9, effective_temp=max(temperature, 0.35).
+- Fallback: if the Groq SDK rejects any penalty param (TypeError/400/invalid), retries once plain (temperature + max_tokens only). Never lets a sampling-param incompatibility fail the request.
+
+B. _dedupe_summary(text) — new helper, called inside _clean_summary_llm_output BEFORE validation:
+- _normalize_sentence(s): strips Devanagari danda (।) + Latin punctuation + quotes + brackets, collapses spaces, lowercases.
+- _token_jaccard(a, b): token-set Jaccard similarity between two normalized sentences.
+- _dedupe_summary: splits on \n\n into paragraphs, splits each paragraph into sentences on ।.!? via regex, normalizes each, drops exact duplicates, drops near-duplicates (Jaccard >= 0.8 with any kept sentence). Drops trailing incomplete sentence (no terminal ।.!?). Reassembles paragraphs (dropping empties), rejoins with \n\n.
+
+C. _validate_summary — loosened length rule:
+- Old: max(250, 0.08*chapter_len) for short chapters, max(400, 0.08*chapter_len) for long — no upper cap, rewarding padding.
+- New: min(max(250, int(0.04 * chapter_len)), 900). 4% + 900 cap means a 9000-char chapter demands 360 chars (not 720), a 50000-char chapter demands 900 (not 4000).
+- Script check + tail-coverage check unchanged.
+- New hard-fail: if dedupe removed >40% of the text, logs dedupe_removed=<pct>% and returns the deduped result WITHOUT retrying (retrying reproduces the loop).
+
+D. _generate_hindi_summary — extractive merge:
+- _attempt now returns (summary, path, dedupe_pct) tracking how much the final dedupe pass removed.
+- Map-reduce path: for <=6 chunks, the merge is EXTRACTIVE (concatenate chunk summaries + _dedupe_summary, no LLM call). Only >6 chunks triggers a generative merge LLM call (capped at max_tokens=1200 with anti-repetition penalties). The per-chunk summaries are already good distinct paragraphs; the generative merge was where the loop originated.
+- Flow: attempt 1 (temp 0.3) → if ok, return. If dedupe_removed >40%, return as-is (no retry). Otherwise retry once (temp 0.2 + nudge). If both fail, return best-effort.
+
+E. No-repetition instruction appended to all three prompts:
+- _SUMMARY_NO_REPEAT_INSTRUCTION = "किसी भी वाक्य या विचार को दोहराएँ नहीं। हर वाक्य में नई जानकारी होनी चाहिए। यदि कहने को कुछ नया न बचे तो वहीं रुक जाएँ।"
+- Appended to _SUMMARY_SYSTEM_PROMPT_V3, _SUMMARY_CHUNK_PROMPT, _SUMMARY_MERGE_PROMPT.
+
+F. Cache namespace bump summaries/v3/ → summaries/v4/:
+- summary_cache_key + audio_cache_key in api_chapter_summary. Invalidates all v3 summaries (which contain the repetition loop) + their Swara audio so they're regenerated fresh.
+- Deletion cleanup: added f"summaries/v4/{job_id}/" to the prefix list.
+
+G. TTS guard in api_chapter_summary:
+- Before hindi_tts.synthesize_hindi: logs [summary] final len=<n> paras=<n> max_sentence_repeat=<n>. If max_repeat >= 3, logs [summary] WARN repetition survived (max_repeat=<n>) — first 200 chars. Makes a surviving loop visible in Render logs instead of silent.
+
+FRONTEND (transcript-view.tsx) — Bug 2 fix:
+
+paragraphBreaks construction (FULL REWRITE):
+- Old: only broke on words ending in . ! ? — Hinglish/edge-tts word cues have NO punctuation (bare tokens like "karta", "hai", "Phir"), so paragraphBreaks was always empty and the explain button was unreachable dead code.
+- New: punctuation-first + length-fallback. PARA_MIN=55, PARA_MAX=110. Breaks at a punctuated word ([.!?।]$) only if sinceBreak >= 55, OR forces a break at sinceBreak >= 110 regardless. Yields a button every 55-110 words. Trailing sentinel (words.length) ensures the final segment gets a button too.
+
+Explain button JSX (UPDATED):
+- Label changed from "इसे समझाएँ" to "हिंदी में समझाओ".
+- Added Sparkles icon (w-2.5 h-2.5) before the label.
+- Added opacity-70 hover:opacity-100 transition for visual findability.
+- Border opacity bumped 0.2 → 0.25, color 0.7 → 0.8.
+- Added `i < words.length` guard to the inline break block so the trailing sentinel (words.length) doesn't render a duplicate inline block.
+- NEW: trailing explain block after the word loop — renders a button for the FINAL paragraph segment (from the last real break to words.length). Without this, the final paragraph could never be explained. Includes its own explanation panel (loading/result/audio/close) mirroring the inline block.
+
+Mobile हिंदी toggle visibility:
+- Confirmed HindiPillButton (player-view.tsx:1289) is in a flex-wrap container with no hidden/sm: breakpoint — visible at 458px width. No change needed.
+
+VERIFICATION:
+- python3 -m py_compile audiobook_app.py: PASSES.
+- npx tsc --noEmit: zero errors in transcript-view.tsx.
+- bun run lint: 0 errors, 0 warnings.
+- Inline logic tests (5 cases): T1 15x repeat loop → collapses to 1 occurrence (len 1346→267); T2 near-duplicate (Jaccard>=0.8) dropped; T3 trailing incomplete sentence dropped; T4 clean summary passes through; T5 loosened validation threshold (9000-char→360, 50000-char→900 cap, 3000-char→250 floor). All passed.
+- agent-browser: page loads cleanly (HTTP 200, title "ARIA"), no console errors, no hydration crashes. Dev log shows all-200 responses, clean compilation.
+
+CONSTRAINTS honored:
+- Did NOT touch transcript sync offset, manual-scroll override, or timing logic.
+- Did NOT touch chapter catalog, BGM mixing, cover persistence, or the voice registry.
+- Did NOT change the active voice count or Hindi voice selection.
+- Did NOT touch playback, deletion tombstones, or auth.
+
+Stage Summary:
+Files modified:
+- mini-services/audiobook-maker/audiobook_app.py (+180 lines: _normalize_sentence + _token_jaccard + _dedupe_summary helpers, _clean_summary_llm_output calls dedupe, _validate_summary loosened threshold, _groq_summary_call anti-repetition sampling + fallback, _generate_hindi_summary extractive merge + dedupe_pct tracking + >40% no-retry, _SUMMARY_NO_REPEAT_INSTRUCTION appended to 3 prompts, v4 cache keys, TTS guard log, v4 in deletion cleanup)
+- src/components/aria/transcript-view.tsx (+85 lines: paragraphBreaks punctuation-first + length-fallback + trailing sentinel, explain button label/icon/hover, trailing explain block for final segment, Sparkles import)
+
+No git push — implementation + verification only, per the task spec.
+
+Regenerating Canto VII will now: (1) use anti-repetition sampling (freq_penalty=0.6 + presence_penalty=0.3 + top_p=0.9 + min temp 0.35), (2) dedupe the output (exact + Jaccard>=0.8), (3) use extractive merge for <=6 chunks (no generative merge loop), (4) cache under v4 (invalidating the looping v3), (5) log the final shape + warn if repetition survived. The transcript will show "हिंदी में समझाओ" buttons every 55-110 words including the first and last segments.
