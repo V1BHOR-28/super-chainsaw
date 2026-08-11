@@ -1269,3 +1269,97 @@ Files modified:
 - src/components/aria/transcript-view.tsx (+15 lines: handleExplain console.error + specific toast, playExplainAudio destroy+rebuild on URL change, audio play catch logs)
 
 No git push — implementation + verification only, per the task spec.
+
+---
+Task ID: COVERAGE-FIX-V7
+Agent: main (Fix Hindi summary truncation + degenerate filler + hard gates)
+Task: Fix the root cause of Hindi chapter summaries covering only ~35% of the chapter then degenerating into repeated filler sentences. The root cause was truncated input to the LLM (the old v6 flow sent outline + chapter text to Pass B, and the LLM internally truncated the chapter text). Also add hard gates so a degenerate summary can never be shown to the user.
+
+Work Log:
+- Read prior worklog (GOD-PROMPT-HINDI-FIX, COVERAGE-FIX) for architecture context.
+- Read current state: _generate_hindi_summary (v6 degradation ladder with 6000-word cap on Pass B input), _validate_summary (only script + tail-coverage), prompts, api_chapter_summary, hindi-summary-card, transcript-view.
+- Confirmed the root cause: the v6 flow sent outline + capped_chapter (6000 words) to Pass B. The LLM internally truncated this to ~35%, producing the "यहाँ पर मैंने एक बड़ा X देखा" degenerate filler with X = Blood/Envy/Heaven/Help/Delights scraped from the transcript.
+
+BACKEND (audiobook_app.py) — Part 1: Stop truncating the chapter
+
+_generate_hindi_summary (v7 FULL REWRITE):
+- Logs the TRUE input size before any LLM call: `summary_input chapter=<title> chars=<n> words=<n>`. This is the critical diagnostic.
+- NEVER truncates the chapter text. The old `PASS_B_INPUT_CAP = 6000` and `words[:3000]` degradation step C are GONE.
+- Chunk-then-reduce: if word_count > 1200, splits into ~900-word chunks with 100-word overlap (was 3000/200). Runs Pass A on each chunk, concatenates outlines IN ORDER into one master outline.
+- Pass B sees ONLY the master outline — NEVER the raw chapter text. This is the key fix: the old flow sent outline + chapter text, and the LLM truncated the chapter text internally.
+- Returns (summary, error_code, quality, missing, outline, coverage, diversity).
+
+_split_chapter_chunks: chunk_words default 900, overlap_words 100 (was 3000/200).
+
+BACKEND — Part 2+3: New Pass A + Pass B prompts
+
+_SUMMARY_PASS_A_SYSTEM: "You are an extraction engine. You output only a numbered list of facts that literally appear in the supplied text. You never infer, never generalize, never repeat a fact. If the text ends mid-scene, stop — do not invent an ending." Pass A user includes "Text (chapter chunk {i} of {n}): <<<{chunk}>>>" + extraction instructions. Groq params: temperature=0.1, top_p=0.9, frequency_penalty=0.4, presence_penalty=0.3, max_tokens=700.
+
+_SUMMARY_PASS_B_SYSTEM: Hindi coverage-contracted prompt. "सूची की हर पंक्ति का सार आपके सारांश में आना चाहिए — कोई घटना छोड़ें नहीं।" + no repetition + no filler + Devanagari names with Roman in parentheses. Pass B user: "अध्याय: {title}\n\nघटना-सूची:\n{master_outline}\n\nइस सूची के आधार पर 4–7 अनुच्छेदों में सारांश लिखें।" Groq params: temperature=0.35, top_p=0.9, frequency_penalty=0.6, presence_penalty=0.5, max_tokens=1400. NO minimum-length requirement anywhere.
+
+BACKEND — Part 4: Server-side gates (_validate_summary FULL REWRITE)
+
+_validate_summary(summary, outline) → (ok, reason, coverage, diversity, missing):
+
+A. DEGENERACY GATE:
+   - A1: most common trailing 6-word clause across sentences (>=3 → FAIL "degenerate_tail").
+   - A2: duplicate sentences (>=2 → FAIL "duplicate_sentence").
+   - A3: distinct-trigram ratio over the whole summary (<0.55 → FAIL "low_diversity").
+
+B. COVERAGE GATE:
+   - Extract proper nouns from the master outline (capitalized tokens, len>=3, excluding sentence-initial common words).
+   - Require >= 70% to appear in the summary (match Latin-script name).
+   - Below 70% → FAIL "low_coverage", include missing names in the log.
+
+C. TAIL GATE:
+   - The last outline bullet's key entity must appear in the final third of the summary.
+   - If not → FAIL "truncated_coverage". (This catches a summary missing Plutus/Judgment material.)
+
+On FAIL: retry Pass B ONCE with the failure reason appended as an explicit instruction ("पिछला प्रयास असफल: {reason}. दोहराव हटाएँ और छूटी हुई घटनाएँ शामिल करें: {missing}").
+If it fails twice: strip every sentence flagged by gate A via _strip_flagged_sentences, and set quality="partial" + missing=[...] in the JSON response.
+
+Logs: `summary_gate chapter=<chap_id> ok=<bool> reason=<reason> coverage=<float> diversity=<float>`
+
+BACKEND — api_chapter_summary route:
+- ?force=1 (or force:true in body) bypasses the R2 cache — used by the "फिर से बनाएँ" button.
+- Cache namespace bumped v6 → v7 (both JSON + MP3 keys).
+- Passes chapter_title to _generate_hindi_summary.
+- Returns { summary, audio_url, quality, missing } on success.
+- Caches quality + missing alongside the summary text.
+- Deletion cleanup updated to include v7.
+
+FRONTEND — Part 5:
+
+abm-api.ts:
+- HindiSummary type: added quality?: string + missing?: string[].
+- getChapterSummary: added optional `force` param → sends ?force=1 + force:true in body.
+
+hindi-summary-card.tsx:
+- SUMMARY_CACHE_VERSION bumped v6 → v7.
+- handleLoad now accepts optional `force` param (skips cache when true).
+- handleRegenerate: calls handleLoad(true) — used by the "फिर से बनाएँ" button.
+- Partial-quality badge: when summary.quality === "partial", renders a muted amber warning "यह सारांश अधूरा हो सकता है" + a "फिर से बनाएँ" button with RefreshCw icon. The button calls handleRegenerate which bypasses cache.
+- Added AlertCircle + RefreshCw icon imports.
+
+transcript-view.tsx: Already correct from the COVERAGE-FIX task — the explain control is rendered as a sibling <div> AFTER each paragraph's closing </p>, never inside the words array. The words array contains ONLY transcript words. No changes needed.
+
+VERIFICATION:
+- python3 -m py_compile audiobook_app.py: PASSES.
+- npx tsc --noEmit: zero errors in any modified file (hindi-summary-card, abm-api).
+- bun run lint: 0 errors, 0 warnings.
+- Inline logic tests (7 cases): T1 degenerate_tail caught (3x repeated trailing 6-word clause); T2 duplicate_sentence caught; T3 low_diversity caught; T4 good summary passes all gates (cov=100%, div=1.0); T5 low_coverage caught (50% < 70%, missing Virgil/Plutus); T6 truncated_coverage caught (Plutus missing from tail); T7 chunk splitting 2500 words → 3 chunks [900,900,900] with verified 100-word overlap. All passed.
+- agent-browser: page loads cleanly (HTTP 200, title "ARIA"), no console errors, no hydration crashes. Dev log shows all-200 responses, clean compilation.
+
+CONSTRAINTS honored:
+- Did NOT touch transcript sync offset, manual-scroll override, chapter catalog builder, analyze/chaptering, BGM mixing, cover persistence, deletion tombstones, or the voice registry.
+- transcript-view.tsx explain-control structure was already correct (sibling div after </p>) — no changes needed there.
+
+Stage Summary:
+Files modified:
+- mini-services/audiobook-maker/audiobook_app.py (+180/-120 lines: v7 prompts, _validate_summary full rewrite with degeneracy/coverage/tail gates, _split_chapter_chunks 900/100, _generate_hindi_summary full rewrite chunk-then-reduce + no truncation + Pass B sees outline only + retry-once + partial quality + _strip_flagged_sentences, api_chapter_summary force param + v7 cache + chapter_title + quality/missing in response + v7 deletion cleanup)
+- src/lib/abm-api.ts (+15 lines: quality/missing on HindiSummary, force param on getChapterSummary)
+- src/components/aria/hindi-summary-card.tsx (+45 lines: SUMMARY_CACHE_VERSION v7, handleLoad force param, handleRegenerate, partial-quality badge + "फिर से बनाएँ" button, AlertCircle + RefreshCw imports)
+
+No git push — implementation + verification only, per the task spec.
+
+Regenerating Canto VI will now: (1) log `summary_input chapter=Canto VI chars=<full> words=<1100+>`, (2) chunk into ~900-word segments with 100-word overlap, (3) extract a master outline covering the ENTIRE chapter (Cerberus through Plutus), (4) generate Hindi from the outline only (no truncated chapter text), (5) pass the degeneracy/coverage/tail gates (or retry once, or return partial quality with the badge). The master outline + `summary_gate` log lines are visible in Render logs for debugging.

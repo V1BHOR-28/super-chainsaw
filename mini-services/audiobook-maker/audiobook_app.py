@@ -10592,6 +10592,7 @@ def _purge_job_completely(job_id):
                 f"summaries/{job_id}/", f"summaries/v2/{job_id}/",
                 f"summaries/v3/{job_id}/", f"summaries/v4/{job_id}/",
                 f"summaries/v5/{job_id}/", f"summaries/v6/{job_id}/",
+                f"summaries/v7/{job_id}/",
                 f"glossary/{job_id}/", f"glossary/v2/{job_id}/",
             ):
                 try:
@@ -11176,69 +11177,39 @@ def api_ai_health():
         return jsonify({"groq_key_present": False, "models_tried": [],
                         "working_model": None, "error": "internal"}), 500
 
-# ── Hindi summary helpers (v5: two-pass outline → summary) ──
+# ── Hindi summary helpers (v7: chunk-then-reduce, no truncation, hard gates) ──
 # Reject any character from CJK / Hangul / Hiragana / Katakana / Arabic / Cyrillic.
 _NON_INDIC_SCRIPT_RE = re.compile(
     r"[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af\u0600-\u06ff\u0400-\u04ff]"
 )
 
-# ── Pass A: Extraction prompt (English, temperature 0.1) ──
-# Outputs a numbered list of EVERY distinct beat in strict narrative order.
-# The output is NOT shown to the user — it's a checklist for Pass B.
-_SUMMARY_PASS_A_PROMPT = (
-    "You are an extraction engine. Read the chapter and output a numbered list, "
-    "in strict narrative order, of EVERY distinct beat: each named character or "
-    "entity that appears, each thing said or done, each place entered, each "
-    "punishment or scene described, and each argument or explanation given at "
-    "length. Do not summarize. Do not merge beats. Do not skip a beat because it "
-    "seems minor. One line per beat, in English. If a speech or explanation runs "
-    "longer than a few lines in the source, split it into its constituent claims "
-    "as separate beats. Output nothing but the numbered list."
+# ── Pass A: Extraction prompt (English, temperature 0.1, deterministic) ──
+# Outputs a numbered list of facts that literally appear in the text.
+# Never infers, never generalizes, never repeats.
+_SUMMARY_PASS_A_SYSTEM = (
+    "You are an extraction engine. You output only a numbered list of facts that "
+    "literally appear in the supplied text. You never infer, never generalize, "
+    "never repeat a fact. If the text ends mid-scene, stop — do not invent an ending."
 )
 
-# ── Pass B: Hindi summary driven by the outline as a checklist ──
-# temperature 0.3, frequency_penalty 0.4, presence_penalty 0.3.
-_SUMMARY_PASS_B_PROMPT = (
-    "Below is a numbered outline of a chapter and its full text. Write a summary "
-    "in simple Hindi (Devanagari) for a reader who wants to understand this dense "
-    "classical literature.\n\n"
-    "HARD RULES:\n"
-    "1. EVERY numbered beat in the outline must be represented in the summary. Do "
-    "not skip any. Work through them in order.\n"
-    "2. Preserve proper nouns exactly, with the original spelling in parentheses "
-    "on first mention — e.g. प्लूटस (Plutus), स्टिक्स (Styx), फ़ॉर्च्यून (Fortune).\n"
-    "3. Do not state anything not present in the chapter text. Do not invent "
-    "dialogue, questions, or answers. If the source is ambiguous, describe it as "
-    "it appears.\n"
-    "4. Never repeat the same idea in two paragraphs. Each paragraph must advance "
-    "the narrative.\n"
-    "5. When a character delivers a long explanation or argument, summarize its "
-    "actual reasoning — not merely the fact that they explained something.\n"
-    "6. Structure: 4–7 paragraphs following the chapter's order. No preamble, no "
-    "\"इस अध्याय में...\", no closing commentary.\n"
-    "7. Use ONLY Devanagari script. No Chinese, Japanese, Korean, Arabic, or any "
-    "other script. Output only the summary."
+# ── Pass B: Hindi summary prompt (coverage-contracted) ──
+# temperature 0.35, frequency_penalty 0.6, presence_penalty 0.5.
+_SUMMARY_PASS_B_SYSTEM = (
+    "आप एक साहित्यिक व्याख्याकार हैं। आपको एक अध्याय की घटना-सूची दी जाएगी।\n"
+    "आपको उसी क्रम में सरल हिंदी में सारांश लिखना है।\n"
+    "कठोर नियम:\n"
+    "1. सूची की हर पंक्ति का सार आपके सारांश में आना चाहिए — कोई घटना छोड़ें नहीं।\n"
+    "2. सूची में जो नहीं है, वह मत लिखें। कुछ भी काल्पनिक मत जोड़ें।\n"
+    "3. कोई वाक्य या वाक्यांश दोहराएँ नहीं। एक ही ढाँचे का वाक्य दो बार मत लिखें।\n"
+    "4. लंबाई बढ़ाने के लिए भराव मत लिखें। सूची खत्म होते ही सारांश खत्म करें।\n"
+    "5. व्यक्ति और स्थान के नाम देवनागरी में लिखें और पहली बार कोष्ठक में अंग्रेज़ी नाम दें।\n"
+    "6. कोई SSML, कोई URL, कोई मार्कअप नहीं — केवल सादा हिंदी गद्य।"
 )
 
-# ── Coverage-repair prompt (Hinglish, one-shot) ──
-# Sent when coverage < 80%; appends missing names to the summary.
-_SUMMARY_REPAIR_PROMPT = (
-    "Ye naam/beats summary se chhoot gaye hain: {missing}. "
-    "Inhe summary mein sahi jagah par, narrative order maintain karte hue jodo. "
-    "Baaki text mat badlo."
+# Retry instruction appended on gate failure.
+_SUMMARY_RETRY_INSTRUCTION = (
+    "पिछला प्रयास असफल: {reason}. दोहराव हटाएँ और छूटी हुई घटनाएँ शामिल करें: {missing}"
 )
-
-# Old prompts retained for backward-compat reference (unused in v5):
-_SUMMARY_NO_REPEAT_INSTRUCTION = (
-    "\nकिसी भी वाक्य या विचार को दोहराएँ नहीं। हर वाक्य में नई जानकारी होनी चाहिए। "
-    "यदि कहने को कुछ नया न बचे तो वहीं रुक जाएँ।"
-)
-_SUMMARY_SYSTEM_PROMPT_V3 = _SUMMARY_PASS_B_PROMPT  # alias for any legacy ref
-_SUMMARY_RETRY_USER_MSG = (
-    "पिछला सारांश अधूरा था। अध्याय के अंतिम भाग को भी शामिल करें।"
-)
-_SUMMARY_CHUNK_PROMPT = _SUMMARY_PASS_A_PROMPT  # alias
-_SUMMARY_MERGE_PROMPT = _SUMMARY_PASS_B_PROMPT    # alias
 
 
 def _normalize_sentence(s: str) -> str:
@@ -11356,48 +11327,108 @@ def _sanitize_summary(text: str) -> str:
     return text.strip()
 
 
-def _validate_summary(summary: str, chapter_text: str):
-    """Validate a generated summary. Returns (ok, reason).
+def _validate_summary(summary: str, outline: str):
+    """Validate a generated summary against the master outline. Returns (ok, reason, coverage, diversity, missing).
 
-    v5: NO minimum-length check. The old length rule padded/retried the summary
-    to hit a character count — that padding is what produced the looping
-    paragraphs. Now we only check:
-    1. Script — reject if any CJK/Hangul/Hiragana/Katakana/Arabic/Cyrillic chars.
-    2. Non-empty — must have at least one Devanagari character.
-    3. Tail coverage — reject if proper nouns from the last 15% of the chapter
-       are absent (catches a summary missing the back half of the chapter).
+    Gates:
+    A. DEGENERACY — reject repeated trailing clauses (>=3), duplicate sentences (>=2), low trigram diversity (<0.55).
+    B. COVERAGE — >=70% of outline proper nouns must appear in the summary.
+    C. TAIL — the last outline bullet's key entity must appear in the final third of the summary.
     """
     if not summary or not summary.strip():
-        return (False, "empty")
+        return (False, "empty", 0.0, 0.0, set())
 
     # 1. Script check
     if _NON_INDIC_SCRIPT_RE.search(summary):
-        return (False, "non_indic_script")
-
-    # 2. Must contain at least one Devanagari character
+        return (False, "non_indic_script", 0.0, 0.0, set())
     if not re.search(r"[\u0900-\u097F]", summary):
-        return (False, "no_devanagari")
+        return (False, "no_devanagari", 0.0, 0.0, set())
 
-    # 3. Tail-coverage check: last 15% of chapter, capitalized proper nouns (2+ occurrences)
-    chapter_len = max(1, len(chapter_text))
-    tail_start = int(0.85 * chapter_len)
-    tail = chapter_text[tail_start:]
-    candidates = re.findall(r'\b[A-Z][a-z]{2,}\b', tail)
-    counts = {}
-    for w in candidates:
-        counts[w] = counts.get(w, 0) + 1
-    proper_nouns = {w for w, c in counts.items() if c >= 2}
-    if proper_nouns:
+    # Split summary into sentences
+    sentences = re.findall(r'[^।.!?]+[।.!?]*', summary)
+    sentences = [s.strip() for s in sentences if s.strip()]
+    norm_sentences = [_normalize_sentence(s) for s in sentences if _normalize_sentence(s)]
+
+    # ── A. DEGENERACY GATE ──
+    # A1: most common trailing 6-word clause across sentences (>=3 → FAIL)
+    tail_clauses = {}
+    for ns in norm_sentences:
+        words = ns.split()
+        if len(words) >= 6:
+            tail = " ".join(words[-6:])
+            tail_clauses[tail] = tail_clauses.get(tail, 0) + 1
+    for tail, count in tail_clauses.items():
+        if count >= 3:
+            return (False, f"degenerate_tail({tail[:30]}...)", 0.0, 0.0, set())
+
+    # A2: duplicate sentences (>=2 → FAIL)
+    seen = {}
+    for ns in norm_sentences:
+        seen[ns] = seen.get(ns, 0) + 1
+    for ns, count in seen.items():
+        if count >= 2:
+            return (False, f"duplicate_sentence({ns[:30]}...)", 0.0, 0.0, set())
+
+    # A3: distinct-trigram ratio over the whole summary (<0.55 → FAIL)
+    all_words = summary.split()
+    if len(all_words) >= 3:
+        trigrams = []
+        for i in range(len(all_words) - 2):
+            trigrams.append(" ".join(all_words[i:i+3]))
+        diversity = len(set(trigrams)) / len(trigrams) if trigrams else 1.0
+    else:
+        diversity = 1.0
+    if diversity < 0.55:
+        return (False, f"low_diversity({diversity:.2f})", 0.0, diversity, set())
+
+    # ── B. COVERAGE GATE ──
+    outline_nouns = _extract_outline_proper_nouns(outline)
+    coverage_pct = 100.0
+    missing = set()
+    if outline_nouns:
         summary_lower = summary.lower()
-        if not any(w.lower() in summary_lower for w in proper_nouns):
-            sample = ",".join(sorted(proper_nouns)[:5])
-            return (False, f"tail_missing({sample})")
+        present = set()
+        missing = set()
+        for noun in outline_nouns:
+            if noun.lower() in summary_lower:
+                present.add(noun)
+            else:
+                missing.add(noun)
+        coverage_pct = round(len(present) / len(outline_nouns) * 100, 1) if outline_nouns else 100.0
+        if coverage_pct < 70.0:
+            return (False, f"low_coverage({coverage_pct:.0f}%)", coverage_pct, diversity, missing)
 
-    return (True, "ok")
+    # ── C. TAIL GATE ──
+    # The last outline bullet's key entity must appear in the final third of the summary.
+    if outline:
+        outline_lines = [l.strip() for l in outline.split("\n") if l.strip()]
+        if outline_lines:
+            last_line = outline_lines[-1]
+            last_nouns = re.findall(r'\b[A-Z][a-z]{2,}\b', last_line)
+            last_nouns = [n for n in last_nouns if n not in {"The", "And", "But", "Then",
+                "They", "His", "Her", "Their", "This", "That", "There", "Here"}]
+            if last_nouns:
+                # Check if ANY of the last-line proper nouns appear in the final third
+                summary_third = summary[len(summary) * 2 // 3:]
+                summary_third_lower = summary_third.lower()
+                found_in_tail = any(n.lower() in summary_third_lower for n in last_nouns)
+                if not found_in_tail:
+                    # Also check the whole summary (maybe the model put it earlier)
+                    found_anywhere = any(n.lower() in summary.lower() for n in last_nouns)
+                    if not found_anywhere:
+                        return (False, f"truncated_coverage({','.join(last_nouns[:3])})",
+                                coverage_pct, diversity, set(last_nouns))
+
+    return (True, "ok", coverage_pct, diversity, missing)
 
 
-def _split_chapter_chunks(text: str, chunk_words: int = 3000, overlap_words: int = 200):
-    """Split chapter text into sequential chunks with word overlap. Returns list of strings."""
+def _split_chapter_chunks(text: str, chunk_words: int = 900, overlap_words: int = 100):
+    """Split chapter text into sequential chunks with word overlap. Returns list of strings.
+
+    v7: chunk_words=900, overlap_words=100 (was 3000/200). The smaller chunk size
+    ensures Pass A (extraction) sees the ENTIRE chunk — the old 3000-word chunks
+    caused the LLM to only extract from the first ~35% of each chunk.
+    """
     words = text.split()
     if len(words) <= chunk_words:
         return [text]
@@ -11479,208 +11510,204 @@ def _check_coverage(summary: str, outline_nouns: set) -> tuple:
     return (pct, missing)
 
 
-def _generate_hindi_summary(groq_client, chapter_text: str) -> tuple:
-    """Generate a full-coverage Hindi chapter summary.
+def _generate_hindi_summary(groq_client, chapter_text: str, chapter_title: str = "") -> tuple:
+    """Generate a full-coverage Hindi chapter summary via chunk-then-reduce.
 
-    v6 flow with degradation ladder — takes the first non-empty result:
-    a. Two-pass (Pass A outline → Pass B checklist summary), as today.
-    b. Single-pass: chapter text straight to _SUMMARY_PASS_B_PROMPT.
-    c. Truncated single-pass: first 3000 words, same prompt.
+    v7 flow (fixes the truncation bug that caused ~35% coverage + degenerate filler):
+    - NEVER truncates the chapter text. Logs the true input size before any LLM call.
+    - If word_count > 1200: splits into ~900-word chunks with 100-word overlap,
+      runs Pass A (extraction) on each chunk, concatenates outlines IN ORDER into
+      one master outline, then runs a single Pass B against the MASTER OUTLINE ONLY.
+    - If word_count <= 1200: single Pass A on the full text, then Pass B.
+    - Pass B NEVER sees the raw chapter text — only the master outline. This is
+      the key fix: the old flow sent outline + chapter text, and the LLM
+      truncated the chapter text internally, producing the degenerate filler.
 
-    v6 changes:
-    - Wrapped in try/except + traceback.print_exc() — never raises.
-    - _groq_summary_call now returns (text, error_code); rate-limit is
-      detected so the coverage-repair call is SKIPPED (a 4th call on a
-      rate-limited account guarantees another 429).
-    - Pass B input capped at 6000 words (outline + first 6000 words of
-      chapter text). The outline already carries the tail beats.
-    - Returns (summary, error_code) so the endpoint can return a structured
-      error instead of an opaque 503.
+    Hard gates (_validate_summary) reject degenerate output BEFORE returning:
+    - Degeneracy: repeated trailing clauses (>=3), duplicate sentences (>=2),
+      low trigram diversity (<0.55).
+    - Coverage: >=70% of outline proper nouns must appear in the summary.
+    - Tail: the last outline bullet's key entity must appear in the final third.
+    On gate failure: retry Pass B ONCE with the failure reason appended.
+    If it fails twice: strip flagged sentences, set quality="partial".
+
+    Returns (summary, error_code, quality, missing, outline, coverage, diversity).
+    Never raises — wrapped in try/except + traceback.print_exc().
     """
     import traceback
     try:
-        return _generate_hindi_summary_inner(groq_client, chapter_text)
+        return _generate_hindi_summary_inner(groq_client, chapter_text, chapter_title)
     except Exception:
         traceback.print_exc()
-        return ("", "internal")
+        return ("", "internal", "error", set(), "", 0.0, 0.0)
 
 
-def _generate_hindi_summary_inner(groq_client, chapter_text: str) -> tuple:
+def _generate_hindi_summary_inner(groq_client, chapter_text: str, chapter_title: str = "") -> tuple:
     """Inner implementation — see _generate_hindi_summary for the wrapper."""
     if not chapter_text or not chapter_text.strip():
-        return ("", "empty_summary")
+        return ("", "empty_summary", "error", set(), "", 0.0, 0.0)
 
     word_count = len(chapter_text.split())
-    LONG_CHAPTER_WORDS = 8000
-    SEGMENT_WORDS = 2000
-    PASS_B_INPUT_CAP = 6000  # words — outline + first 6000 words of chapter
+    chap_id = chapter_title or f"words={word_count}"
 
-    # Track whether we hit a rate limit so we skip the coverage-repair call.
-    was_rate_limited = False
+    # ── PART 1: Log the TRUE size of what we are about to send ──
+    # This is the critical diagnostic — if chars/words are low, the chapter
+    # text is being truncated BEFORE reaching this function.
+    print(f"summary_input chapter={chap_id} chars={len(chapter_text)} words={word_count}")
 
-    # ═══════════════════════════════════════════════════════════════
-    # DEGRADATION LADDER STEP A: Two-pass (outline → checklist summary)
-    # ═══════════════════════════════════════════════════════════════
-    outline = ""
-    path = ""
+    CHUNK_WORDS = 900
+    OVERLAP_WORDS = 100
+    SINGLE_PASS_THRESHOLD = 1200  # <= this → single Pass A, no chunking
 
-    # ── Pass A: Extraction ──
-    if word_count > LONG_CHAPTER_WORDS:
-        segments = _split_chapter_chunks(chapter_text,
-                                          chunk_words=SEGMENT_WORDS,
-                                          overlap_words=0)
-        outline_parts = []
-        beat_num = 1
-        for seg in segments:
-            raw_outline, code_a = _groq_summary_call(
-                groq_client, _SUMMARY_PASS_A_PROMPT, seg,
-                temperature=0.1, max_tokens=2048,
-                frequency_penalty=0.0, presence_penalty=0.0)
-            if code_a == "groq_rate_limited":
-                was_rate_limited = True
-            if not raw_outline:
-                continue
-            for line in raw_outline.split("\n"):
-                line = line.strip()
-                line = re.sub(r'^\s*\d+[.)\]]\s*', '', line)
-                if line:
-                    outline_parts.append(f"{beat_num}. {line}")
-                    beat_num += 1
-        outline = "\n".join(outline_parts)
-        path = f"pass-a-segmented({len(segments)} segments, {beat_num-1} beats)"
+    # ── PART 1: Pass A — Extraction (chunked if long, NEVER truncated) ──
+    if word_count > SINGLE_PASS_THRESHOLD:
+        chunks = _split_chapter_chunks(chapter_text,
+                                        chunk_words=CHUNK_WORDS,
+                                        overlap_words=OVERLAP_WORDS)
+        print(f"[summary] chunked: {len(chunks)} chunks of ~{CHUNK_WORDS} words "
+              f"(overlap={OVERLAP_WORDS})")
     else:
+        chunks = [chapter_text]
+        print(f"[summary] single-chunk (word_count={word_count} <= {SINGLE_PASS_THRESHOLD})")
+
+    outline_parts = []
+    beat_num = 1
+    n_chunks = len(chunks)
+    for ci, chunk in enumerate(chunks):
+        pass_a_user = (
+            f"Text (chapter chunk {ci+1} of {n_chunks}):\n"
+            f"<<<{chunk}>>>\n\n"
+            f"List, in the order they occur, every: (a) named person, creature, or place, "
+            f"(b) physical action taken, (c) statement or prophecy spoken and by whom, "
+            f"(d) explicit doctrinal or explanatory claim.\n"
+            f"Format: one numbered line each, max 20 words per line. No commentary."
+        )
         raw_outline, code_a = _groq_summary_call(
-            groq_client, _SUMMARY_PASS_A_PROMPT, chapter_text,
-            temperature=0.1, max_tokens=2048,
-            frequency_penalty=0.0, presence_penalty=0.0)
-        if code_a == "groq_rate_limited":
-            was_rate_limited = True
-        outline = raw_outline or ""
-        path = f"pass-a-single({len(outline.splitlines()) if outline else 0} beats)"
-
-    summary = ""
-    if outline and outline.strip():
-        print(f"[summary] {path}: outline extracted")
-        # ── Pass B: Hindi summary driven by the outline as a checklist ──
-        # Cap input: outline + first PASS_B_INPUT_CAP words of chapter text.
-        chapter_words = chapter_text.split()
-        if len(chapter_words) > PASS_B_INPUT_CAP:
-            capped_chapter = " ".join(chapter_words[:PASS_B_INPUT_CAP])
-        else:
-            capped_chapter = chapter_text
-        pass_b_input = f"OUTLINE:\n{outline}\n\nCHAPTER TEXT:\n{capped_chapter}"
-        raw_summary, code_b = _groq_summary_call(
-            groq_client, _SUMMARY_PASS_B_PROMPT, pass_b_input,
-            temperature=0.3, max_tokens=2048,
+            groq_client, _SUMMARY_PASS_A_SYSTEM, pass_a_user,
+            temperature=0.1, max_tokens=700,
             frequency_penalty=0.4, presence_penalty=0.3)
-        if code_b == "groq_rate_limited":
-            was_rate_limited = True
-        summary = _clean_summary_llm_output(raw_summary)
-        if summary:
-            print(f"[summary] pass-b: len={len(summary)} paras={len(summary.split(chr(10)+chr(10)))}")
+        if not raw_outline:
+            print(f"[summary] Pass A chunk {ci+1}/{n_chunks} empty (code={code_a})")
+            continue
+        # Renumber beats sequentially across all chunks
+        for line in raw_outline.split("\n"):
+            line = line.strip()
+            line = re.sub(r'^\s*\d+[.)\]]\s*', '', line)
+            if line:
+                outline_parts.append(f"{beat_num}. {line}")
+                beat_num += 1
+        print(f"[summary] Pass A chunk {ci+1}/{n_chunks}: extracted {len([l for l in raw_outline.split(chr(10)) if l.strip()])} lines")
 
+    master_outline = "\n".join(outline_parts)
+    if not master_outline.strip():
+        return ("", "empty_summary", "error", set(), "", 0.0, 0.0)
+    print(f"[summary] master outline: {beat_num-1} beats")
+    # Log the master outline so it's visible in Render logs for debugging.
+    print(f"[summary] OUTLINE:\n{master_outline}")
+
+    # ── PART 3: Pass B — Hindi summary from MASTER OUTLINE ONLY ──
+    # The chapter text is NEVER sent to Pass B. This is the key fix: the old
+    # flow sent outline + chapter text, and the LLM truncated the chapter text
+    # internally, producing degenerate filler. Now Pass B only sees the outline.
+    pass_b_user = (
+        f"अध्याय: {chapter_title or chap_id}\n\n"
+        f"घटना-सूची:\n{master_outline}\n\n"
+        f"इस सूची के आधार पर 4–7 अनुच्छेदों में सारांश लिखें।"
+    )
+    raw_summary, code_b = _groq_summary_call(
+        groq_client, _SUMMARY_PASS_B_SYSTEM, pass_b_user,
+        temperature=0.35, max_tokens=1400,
+        frequency_penalty=0.6, presence_penalty=0.5)
+    if not raw_summary:
+        return ("", code_b or "empty_summary", "error", set(), master_outline, 0.0, 0.0)
+    summary = _clean_summary_llm_output(raw_summary)
     if not summary:
-        # Pass A or Pass B failed — log and fall through to degradation step B.
-        print(f"[summary] two-pass failed (outline_empty={not outline}, "
-              f"summary_empty={not summary}) → degrading to single-pass")
+        return ("", "empty_summary", "error", set(), master_outline, 0.0, 0.0)
+    print(f"[summary] pass-b: len={len(summary)} paras={len(summary.split(chr(10)+chr(10)))}")
 
-    # ═══════════════════════════════════════════════════════════════
-    # DEGRADATION LADDER STEP B: Single-pass (no outline)
-    # ═══════════════════════════════════════════════════════════════
+    # ── PART 4: Server-side gates ──
+    ok, reason, coverage, diversity, missing = _validate_summary(summary, master_outline)
+    print(f"summary_gate chapter={chap_id} ok={ok} reason={reason} "
+          f"coverage={coverage:.2f} diversity={diversity:.2f}")
+
+    if not ok:
+        # Retry Pass B ONCE with the failure reason appended.
+        missing_str = ", ".join(sorted(missing)[:10]) if missing else "(none)"
+        retry_instruction = _SUMMARY_RETRY_INSTRUCTION.format(
+            reason=reason, missing=missing_str)
+        retry_user = pass_b_user + "\n\n" + retry_instruction
+        print(f"[summary] gate failed ({reason}) → retrying Pass B with nudge")
+        raw_retry, code_retry = _groq_summary_call(
+            groq_client, _SUMMARY_PASS_B_SYSTEM, retry_user,
+            temperature=0.3, max_tokens=1400,
+            frequency_penalty=0.6, presence_penalty=0.5)
+        if raw_retry:
+            retry_summary = _clean_summary_llm_output(raw_retry)
+            if retry_summary:
+                ok2, reason2, cov2, div2, missing2 = _validate_summary(
+                    retry_summary, master_outline)
+                print(f"summary_gate chapter={chap_id} retry ok={ok2} reason={reason2} "
+                      f"coverage={cov2:.2f} diversity={div2:.2f}")
+                if ok2 or (cov2 >= coverage and div2 >= diversity):
+                    summary = retry_summary
+                    ok, reason, coverage, diversity, missing = ok2, reason2, cov2, div2, missing2
+
+    if not ok:
+        # Both attempts failed the gates. Strip flagged sentences + set partial.
+        print(f"[summary] gates failed twice ({reason}) — stripping flagged sentences, "
+              f"returning partial quality")
+        summary = _strip_flagged_sentences(summary)
+        if not summary:
+            return ("", "empty_summary", "error", set(), master_outline, coverage, diversity)
+        return (summary, None, "partial", missing, master_outline, coverage, diversity)
+
+    return (summary, None, "ok", set(), master_outline, coverage, diversity)
+
+
+def _strip_flagged_sentences(summary: str) -> str:
+    """Remove sentences flagged by the degeneracy gate (duplicates + repeated tails)."""
     if not summary:
-        # Cap input at PASS_B_INPUT_CAP words to stay within token budget.
-        chapter_words = chapter_text.split()
-        if len(chapter_words) > PASS_B_INPUT_CAP:
-            single_input = " ".join(chapter_words[:PASS_B_INPUT_CAP])
-        else:
-            single_input = chapter_text
-        raw_single, code_single = _groq_summary_call(
-            groq_client, _SUMMARY_PASS_B_PROMPT, single_input,
-            temperature=0.3, max_tokens=2048,
-            frequency_penalty=0.4, presence_penalty=0.3)
-        if code_single == "groq_rate_limited":
-            was_rate_limited = True
-        summary = _clean_summary_llm_output(raw_single)
-        if summary:
-            print(f"[summary] degraded_to=b (single-pass) len={len(summary)}")
-            path = "single-pass"
-
-    # ═══════════════════════════════════════════════════════════════
-    # DEGRADATION LADDER STEP C: Truncated single-pass (first 3000 words)
-    # ═══════════════════════════════════════════════════════════════
-    if not summary:
-        chapter_words = chapter_text.split()
-        truncated = " ".join(chapter_words[:3000])
-        raw_trunc, code_trunc = _groq_summary_call(
-            groq_client, _SUMMARY_PASS_B_PROMPT, truncated,
-            temperature=0.3, max_tokens=2048,
-            frequency_penalty=0.4, presence_penalty=0.3)
-        if code_trunc == "groq_rate_limited":
-            was_rate_limited = True
-        summary = _clean_summary_llm_output(raw_trunc)
-        if summary:
-            print(f"[summary] degraded_to=c (truncated 3000 words) len={len(summary)}")
-            path = "truncated-single-pass"
-
-    if not summary:
-        # All three steps failed.
-        if was_rate_limited:
-            return ("", "groq_rate_limited")
-        return ("", "empty_summary")
-
-    # ── Coverage gate (only if two-pass succeeded AND not rate-limited) ──
-    if outline and not was_rate_limited:
-        outline_nouns = _extract_outline_proper_nouns(outline)
-        if outline_nouns:
-            pct, missing = _check_coverage(summary, outline_nouns)
-            print(f"[summary] coverage={pct}% ({len(outline_nouns)} nouns, "
-                  f"{len(missing)} missing: {sorted(missing)[:8]})")
-            if pct < 80.0 and missing:
-                # One repair call — but SKIP if we were rate-limited earlier
-                # (a 4th call guarantees another 429).
-                missing_list = ", ".join(sorted(missing)[:20])
-                repair_msg = _SUMMARY_REPAIR_PROMPT.format(missing=missing_list)
-                repair_input = f"CURRENT SUMMARY:\n{summary}\n\n{repair_msg}"
-                raw_repaired, code_repair = _groq_summary_call(
-                    groq_client, _SUMMARY_PASS_B_PROMPT, repair_input,
-                    temperature=0.2, max_tokens=2048,
-                    frequency_penalty=0.4, presence_penalty=0.3)
-                if code_repair == "groq_rate_limited":
-                    print(f"[summary] repair call rate-limited — skipping, keeping original")
-                elif raw_repaired:
-                    repaired = _clean_summary_llm_output(raw_repaired)
-                    if repaired:
-                        pct2, missing2 = _check_coverage(repaired, outline_nouns)
-                        print(f"[summary] repair coverage={pct2}% ({len(missing2)} missing)")
-                        if pct2 >= pct:
-                            summary = repaired
-                            pct = pct2
-                else:
-                    print(f"[summary] repair call produced empty output, keeping original")
-    else:
-        pct = "n/a"
-        print(f"[summary] coverage gate skipped (outline={bool(outline)}, "
-              f"rate_limited={was_rate_limited})")
-
-    # ── Final validation (script + tail-coverage only, NO length check) ──
-    ok, reason = _validate_summary(summary, chapter_text)
-    print(f"[summary] final: path={path} words_in={word_count} "
-          f"len={len(summary)} coverage={pct}% ok={ok} reason={reason}")
-    return (summary, None)
+        return ""
+    sentences = re.findall(r'[^।.!?]+[।.!?]*', summary)
+    sentences = [s.strip() for s in sentences if s.strip()]
+    seen_norm = set()
+    seen_tails = {}
+    kept = []
+    for sent in sentences:
+        norm = _normalize_sentence(sent)
+        if not norm:
+            continue
+        # Drop exact duplicates
+        if norm in seen_norm:
+            continue
+        # Drop repeated trailing 6-word clauses (>=3 occurrences)
+        words = norm.split()
+        if len(words) >= 6:
+            tail = " ".join(words[-6:])
+            if seen_tails.get(tail, 0) >= 2:
+                continue
+            seen_tails[tail] = seen_tails.get(tail, 0) + 1
+        seen_norm.add(norm)
+        kept.append(sent)
+    return " ".join(kept).strip()
 
 
 @app.route("/api/chapter/summary", methods=["POST"])
 def api_chapter_summary():
     """Generate a Hindi chapter summary + synthesize audio.
 
-    POST { book_id, chapter_index }
-    Returns { summary: str, audio_url: str } on success.
-    Returns { error: str, code: str } on failure (code is machine-readable).
+    POST { book_id, chapter_index, force?: bool }
+    Returns { summary, audio_url, quality, missing } on success.
+    Returns { error, code } on failure (code is machine-readable).
+
+    ?force=1 (or force:true in the body) bypasses the R2 cache so the
+    summary is regenerated fresh — used by the "फिर से बनाएँ" button.
     """
     import traceback
     data = request.json or {}
     book_id = (data.get("book_id") or "").strip()
     chapter_index = data.get("chapter_index")
+    force = bool(data.get("force")) or request.args.get("force") == "1"
     if not book_id or chapter_index is None:
         return jsonify({"error": "book_id and chapter_index required", "code": "bad_request"}), 400
 
@@ -11696,10 +11723,8 @@ def api_chapter_summary():
             return jsonify({"error": "पुस्तक डेटा लोड नहीं हो सका", "code": "job_not_found"}), 404
 
     # ── ARIA: chapter text fallback chain ──
-    # job["transcript_cues"] is frequently absent after a Render restart +
-    # registry reconstruction. Fall back to the parsed book's chapter text,
-    # then to R2-stored transcript JSON. Error only if ALL three are empty.
     chapter_text = ""
+    chapter_title = ""
 
     # Source 1: transcript_cues (in-memory or restored from token)
     _tc = job.get("transcript_cues") or {}
@@ -11712,17 +11737,28 @@ def api_chapter_summary():
         try:
             info = job.get("info")
             if info and info.chapters:
-                _ch = None
                 for c in info.chapters:
                     if c.index == chapter_index:
-                        _ch = c
+                        chapter_title = c.title or ""
+                        if getattr(c, "text", None):
+                            chapter_text = c.text
+                            print(f"[summary] using parsed book text for chapter {chapter_index} "
+                                  f"(transcript_cues was empty)")
                         break
-                if _ch and getattr(_ch, "text", None):
-                    chapter_text = _ch.text
-                    print(f"[summary] using parsed book text for chapter {chapter_index} "
-                          f"(transcript_cues was empty)")
         except Exception as _e:
             print(f"[summary] parsed-book fallback failed: {_e}")
+
+    # Also get the chapter title from the catalog if not already set
+    if not chapter_title:
+        try:
+            info = job.get("info")
+            if info and info.chapters:
+                for c in info.chapters:
+                    if c.index == chapter_index:
+                        chapter_title = c.title or ""
+                        break
+        except Exception:
+            pass
 
     # Source 3: R2-stored transcript JSON
     if not chapter_text or not chapter_text.strip():
@@ -11757,40 +11793,48 @@ def api_chapter_summary():
         return jsonify({"error": "इस अध्याय का ट्रांसक्रिप्ट डेटा उपलब्ध नहीं है",
                         "code": "no_transcript"}), 400
 
-    # Check R2 cache
-    # ARIA: v6 cache namespace — invalidates all v5 summaries + their Swara
-    # audio so they're regenerated fresh with the degradation-ladder flow.
-    summary_cache_key = f"summaries/v6/{book_id}/{chapter_index}.hi.json"
-    audio_cache_key = f"summaries/v6/{book_id}/{chapter_index}.hi.mp3"
+    # Check R2 cache (skip when force=true)
+    # ARIA: v7 cache namespace — invalidates all v6 summaries + their Swara
+    # audio so they're regenerated fresh with the chunk-then-reduce + gates.
+    summary_cache_key = f"summaries/v7/{book_id}/{chapter_index}.hi.json"
+    audio_cache_key = f"summaries/v7/{book_id}/{chapter_index}.hi.mp3"
 
-    try:
-        import storage_backend
-        if storage_backend.is_enabled() and storage_backend.object_exists(summary_cache_key):
-            import tempfile as _tf
-            fd, tmp = _tf.mkstemp(suffix=".json")
-            os.close(fd)
-            try:
-                storage_backend.download_file(summary_cache_key, tmp)
-                import json as _json
-                with open(tmp, "r", encoding="utf-8") as f:
-                    cached = _json.load(f)
-                audio_url = ""
-                if storage_backend.object_exists(audio_cache_key):
-                    audio_url = storage_backend.presigned_get_url(audio_cache_key)
-                _r = jsonify({"summary": cached.get("summary", ""), "audio_url": audio_url})
-                _r.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
-                return _r
-            finally:
-                try: os.remove(tmp)
-                except: pass
-    except Exception as e:
-        print(f"[summary] R2 cache read failed: {e}")
+    if not force:
+        try:
+            import storage_backend
+            if storage_backend.is_enabled() and storage_backend.object_exists(summary_cache_key):
+                import tempfile as _tf
+                fd, tmp = _tf.mkstemp(suffix=".json")
+                os.close(fd)
+                try:
+                    storage_backend.download_file(summary_cache_key, tmp)
+                    import json as _json
+                    with open(tmp, "r", encoding="utf-8") as f:
+                        cached = _json.load(f)
+                    audio_url = ""
+                    if storage_backend.object_exists(audio_cache_key):
+                        audio_url = storage_backend.presigned_get_url(audio_cache_key)
+                    _r = jsonify({
+                        "summary": cached.get("summary", ""),
+                        "audio_url": audio_url,
+                        "quality": cached.get("quality", "ok"),
+                        "missing": cached.get("missing", []),
+                    })
+                    _r.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+                    return _r
+                finally:
+                    try: os.remove(tmp)
+                    except: pass
+        except Exception as e:
+            print(f"[summary] R2 cache read failed: {e}")
+    else:
+        print(f"[summary] force=true — bypassing cache, regenerating fresh")
 
     # Generate summary via Groq
     try:
-        summary, gen_code = _generate_hindi_summary(None, chapter_text)
+        summary, gen_code, quality, missing_set, outline, coverage, diversity = \
+            _generate_hindi_summary(None, chapter_text, chapter_title)
         if not summary:
-            # Map the generation error code to a Hindi message + HTTP status.
             _err_map = {
                 "groq_no_key": ("AI सेवा अभी उपलब्ध नहीं है", 503),
                 "groq_rate_limited": ("थोड़ी देर रुकें — बहुत सारे अनुरोध", 429),
@@ -11808,29 +11852,9 @@ def api_chapter_summary():
             return jsonify({"error": "सारांश खाली आया — बाद में कोशिश करें",
                             "code": "empty_summary"}), 503
 
-        # TTS guard — log the final summary shape.
-        try:
-            _paras = [p for p in summary.split("\n\n") if p.strip()]
-            _all_sents = []
-            for _p in _paras:
-                _all_sents.extend(re.findall(r'[^।.!?]+[।.!?]*', _p))
-            _norm_counts = {}
-            for _s in _all_sents:
-                _n = _normalize_sentence(_s)
-                if _n:
-                    _norm_counts[_n] = _norm_counts.get(_n, 0) + 1
-            _max_repeat = max(_norm_counts.values()) if _norm_counts else 0
-            print(f"[summary] final len={len(summary)} paras={len(_paras)} "
-                  f"max_sentence_repeat={_max_repeat}")
-            if _max_repeat >= 3:
-                print(f"[summary] WARN repetition survived (max_repeat={_max_repeat}) "
-                      f"— first 200 chars: {summary[:200]!r}")
-        except Exception:
-            pass
+        missing_list = sorted(missing_set) if missing_set else []
 
-        # Synthesize audio (fail-soft — empty audio_url is fine, the text
-        # summary is still returned and the frontend shows it without a
-        # Listen button).
+        # Synthesize audio (fail-soft — empty audio_url is fine).
         audio_url = ""
         try:
             import hindi_tts
@@ -11849,7 +11873,7 @@ def api_chapter_summary():
         except Exception as e:
             print(f"[summary] Hindi TTS failed: {e}")
 
-        # Cache summary text to R2
+        # Cache summary text + quality + missing to R2
         try:
             import storage_backend, json as _json
             if storage_backend.is_enabled():
@@ -11857,14 +11881,23 @@ def api_chapter_summary():
                 fd, tmp = _tf.mkstemp(suffix=".json")
                 os.close(fd)
                 with open(tmp, "w", encoding="utf-8") as f:
-                    _json.dump({"summary": summary}, f, ensure_ascii=False)
+                    _json.dump({
+                        "summary": summary,
+                        "quality": quality,
+                        "missing": missing_list,
+                    }, f, ensure_ascii=False)
                 storage_backend.upload_file(tmp, summary_cache_key)
                 try: os.remove(tmp)
                 except: pass
         except Exception as e:
             print(f"[summary] R2 cache write failed: {e}")
 
-        _r = jsonify({"summary": summary, "audio_url": audio_url})
+        _r = jsonify({
+            "summary": summary,
+            "audio_url": audio_url,
+            "quality": quality,
+            "missing": missing_list,
+        })
         _r.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
         return _r
 

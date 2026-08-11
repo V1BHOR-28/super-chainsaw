@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useRef, useCallback, useEffect } from "react";
-import { Loader2, Pause, BookOpen, Volume2 } from "lucide-react";
+import { Loader2, Pause, BookOpen, Volume2, RefreshCw, AlertCircle } from "lucide-react";
 import { usePlayerStore } from "@/lib/player-store";
 import { getChapterSummary, type HindiSummary, type HindiApiError } from "@/lib/abm-api";
 import { getAudioElement } from "@/lib/audio-element-registry";
@@ -10,7 +10,7 @@ import { toast } from "sonner";
 // ── ARIA: per-chapter summary cache ──
 // Keyed by a schema version so any change to the summary shape invalidates
 // old entries. Only valid (non-empty) responses are cached.
-const SUMMARY_CACHE_VERSION = "v6";
+const SUMMARY_CACHE_VERSION = "v7";
 const _summaryCache = new Map<string, HindiSummary>();
 
 function _cacheKey(bookId: string, chapterIndex: number) {
@@ -131,13 +131,16 @@ export function HindiSummaryCard({
   );
 
   // ── Load the summary for the current chapter ──
-  const handleLoad = useCallback(async () => {
+  const handleLoad = useCallback(async (force?: boolean) => {
     const key = _cacheKey(bookId, chapterIndex);
-    const cached = _summaryCache.get(key);
-    if (_isValidSummary(cached)) {
-      setSummary(cached);
-      setState("loaded");
-      return;
+    // Check cache first (skip when force=true — user clicked "फिर से बनाएँ")
+    if (!force) {
+      const cached = _summaryCache.get(key);
+      if (_isValidSummary(cached)) {
+        setSummary(cached);
+        setState("loaded");
+        return;
+      }
     }
 
     // Capture identity at request time so a stale response can't overwrite
@@ -151,6 +154,7 @@ export function HindiSummaryCard({
       const result = await getChapterSummary(
         requestedBookId,
         requestedChapterIndex,
+        force,
       );
       // Stale-response guard: drop the response if the user has already
       // moved to a different chapter (or re-clicked load) since this
@@ -192,6 +196,11 @@ export function HindiSummaryCard({
       setState("collapsed");
     }
   }, [bookId, chapterIndex]);
+
+  // ── Regenerate (force=true, bypasses cache) — for partial-quality summaries ──
+  const handleRegenerate = useCallback(() => {
+    handleLoad(true);
+  }, [handleLoad]);
 
   // ── Play / stop the summary audio ──
   const handlePlayAudio = useCallback(() => {
@@ -250,7 +259,7 @@ export function HindiSummaryCard({
 
       {state === "collapsed" && (
         <button
-          onClick={handleLoad}
+          onClick={() => handleLoad()}
           className="text-sm px-4 py-2 rounded-lg transition-all hover:scale-[1.02]"
           style={{
             background: "var(--aria-accent-glow)",
@@ -292,6 +301,35 @@ export function HindiSummaryCard({
                 </p>
               ))}
           </div>
+          {/* Partial-quality badge: the summary failed the gates twice and
+              flagged sentences were stripped. Show a muted warning + a
+              "फिर से बनाएँ" button that re-calls the endpoint with force=1
+              (bypasses cache). */}
+          {summary.quality === "partial" && (
+            <div
+              className="flex items-center gap-2 mt-3 mb-1 px-3 py-2 rounded-lg text-xs"
+              style={{
+                background: "rgba(245,158,11,0.06)",
+                borderLeft: "2px solid rgba(245,158,11,0.4)",
+                color: "var(--aria-fg-muted)",
+              }}
+            >
+              <AlertCircle className="w-3 h-3 flex-shrink-0" style={{ color: "rgba(245,158,11,0.7)" }} />
+              <span className="flex-1">यह सारांश अधूरा हो सकता है</span>
+              <button
+                onClick={handleRegenerate}
+                className="flex items-center gap-1 text-[10px] px-2 py-0.5 rounded transition-opacity hover:opacity-80"
+                style={{
+                  color: "var(--aria-accent-glow)",
+                  border: "1px solid var(--aria-border)",
+                  background: "transparent",
+                }}
+              >
+                <RefreshCw className="w-2.5 h-2.5" />
+                फिर से बनाएँ
+              </button>
+            </div>
+          )}
           {summary.audio_url && (
             <button
               onClick={audioPlaying ? handleStopAudio : handlePlayAudio}

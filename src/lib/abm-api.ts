@@ -562,6 +562,13 @@ export function getCoverUrl(jobId: string, hasCover: boolean): string {
 export interface HindiSummary {
   summary: string;
   audio_url?: string;
+  /** "ok" | "partial" — partial means the gates failed twice and flagged
+   *  sentences were stripped. The frontend shows a "यह सारांश अधूरा हो सकता है"
+   *  badge + a "फिर से बनाएँ" button when quality === "partial". */
+  quality?: string;
+  /** Proper nouns from the outline that are missing from the summary
+   *  (only present when quality === "partial"). */
+  missing?: string[];
 }
 
 export interface HindiGlossary {
@@ -583,11 +590,18 @@ export class HindiApiError extends Error {
   }
 }
 
-export async function getChapterSummary(bookId: string, chapterIndex: number): Promise<HindiSummary> {
-  const res = await fetch(`${ABM_BASE}/chapter/summary`, {
+export async function getChapterSummary(
+  bookId: string,
+  chapterIndex: number,
+  force?: boolean,
+): Promise<HindiSummary> {
+  const url = force
+    ? `${ABM_BASE}/chapter/summary?force=1`
+    : `${ABM_BASE}/chapter/summary`;
+  const res = await fetch(url, {
     method: "POST",
     headers: cidHeaders({ "Content-Type": "application/json" }),
-    body: JSON.stringify({ book_id: bookId, chapter_index: chapterIndex }),
+    body: JSON.stringify({ book_id: bookId, chapter_index: chapterIndex, force }),
     credentials: "include",
     cache: "no-store",
   });
