@@ -10,7 +10,7 @@ import { toast } from "sonner";
 // ── ARIA: per-chapter summary cache ──
 // Keyed by a schema version so any change to the summary shape invalidates
 // old entries. Only valid (non-empty) responses are cached.
-const SUMMARY_CACHE_VERSION = "v8";
+const SUMMARY_CACHE_VERSION = "v9";
 const _summaryCache = new Map<string, HindiSummary>();
 
 function _cacheKey(bookId: string, chapterIndex: number) {

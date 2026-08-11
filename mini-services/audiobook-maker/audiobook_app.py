@@ -10593,6 +10593,7 @@ def _purge_job_completely(job_id):
                 f"summaries/v3/{job_id}/", f"summaries/v4/{job_id}/",
                 f"summaries/v5/{job_id}/", f"summaries/v6/{job_id}/",
                 f"summaries/v7/{job_id}/", f"summaries/v8/{job_id}/",
+                f"summaries/v9/{job_id}/",
                 f"glossary/{job_id}/", f"glossary/v2/{job_id}/",
             ):
                 try:
@@ -11177,7 +11178,7 @@ def api_ai_health():
         return jsonify({"groq_key_present": False, "models_tried": [],
                         "working_model": None, "error": "internal"}), 500
 
-# ── Hindi summary helpers (v8: JSON event extractor + narration contract) ──
+# ── Hindi summary helpers (v9: hard pass separation, no outline fallback) ──
 # Reject any character from CJK / Hangul / Hiragana / Katakana / Arabic / Cyrillic.
 _NON_INDIC_SCRIPT_RE = re.compile(
     r"[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af\u0600-\u06ff\u0400-\u04ff]"
@@ -11189,74 +11190,69 @@ _BARE_VERB_RE = re.compile(r'\b(Went|Girds|Examining|Confess|Hear|Gazing|Falling
                            r'|Sinning|Burning|Crying|Dying|Living|Loving|hating)\b',
                            re.IGNORECASE)
 
-# ── Pass A: Event extraction prompt (returns STRICT JSON) ──
-# The old free-text outline produced proper-noun lists and bare verb
-# enumerations. The JSON schema forces structured events with quote anchors.
+# Regex: "ने " immediately followed by an ASCII [a-z] word (Hindi-English splice).
+_NE_ASCII_RE = re.compile(r'ने\s+[a-z]')
+
+# Regex: numbered list lines or "कथन:" / "रूपक:" headings (outline leak detection).
+_OUTLINE_LEAK_RE = re.compile(r'(^\s*\d+\.\s|कथन:|रूपक:)', re.MULTILINE)
+
+# ── Pass A: Event extraction prompt (returns STRICT JSON, English only) ──
 _SUMMARY_PASS_A_SYSTEM = (
     "You are an event extraction engine for classical literature. "
-    "You output ONLY valid JSON — no prose, no commentary, no markdown fences.\n\n"
+    "You output ONLY valid JSON — no prose, no commentary, no markdown fences, no Hindi.\n\n"
     "The JSON schema:\n"
     '{\n'
     '  "events": [\n'
-    '    {"actor": "who performs the action", "action": "verb-based description of what happens", '
-    '"outcome": "what results", "quote_anchor": "<=8 words copied VERBATIM from the chapter"}\n'
+    '    {"actor": "who performs the action (English)", "action": "verb-based description (English)", '
+    '"outcome": "what results (English)"}\n'
     '  ],\n'
-    '  "speakers": [\n'
-    '    {"name": "speaker name", "says": "one-line gist of what they actually said"}\n'
-    '  ],\n'
-    '  "images": ["similes or metaphors that carry meaning, e.g. \'starlings in winter\'"]\n'
+    '  "named_entities": ["Minos", "Semiramis", "Dido", ...],\n'
+    '  "key_quotes": ["<=8 words verbatim from the chapter", ...],\n'
+    '  "similes": ["starlings in winter", "cranes in long-drawn company", ...]\n'
     '}\n\n'
     "HARD RULES:\n"
     "1. An event MUST have a verb describing something that HAPPENS. "
-    "'X was seen', 'X appeared', 'X was named' are FORBIDDEN as standalone events. "
-    "If a character is only named in a list, they belong in ONE event whose action "
-    "explains WHY the list exists (e.g. 'Virgil names the famous lustful — Semiramis, "
-    "Dido, Cleopatra — all destroyed by desire'), never as separate events.\n"
-    "2. Never emit bare English verbs, tags, or vocabulary. If the output contains "
-    "a list of infinitives/gerunds with no subject, the pass has FAILED.\n"
-    "3. The narrator/protagonist (Dante) is the default actor UNLESS the text clearly "
-    "says otherwise. Do NOT carry the first-named character forward as the subject of "
-    "later events.\n"
-    "4. Every event needs quote_anchor: <=8 words copied VERBATIM from the chapter. "
-    "If you cannot anchor it, DROP the event.\n"
-    "5. Cover the chapter END TO END. The final event must come from the last ~10% "
-    "of the text."
+    "'X was seen', 'X appeared', 'X was named' are FORBIDDEN as standalone events.\n"
+    "2. Never emit bare English verbs, tags, or vocabulary.\n"
+    "3. The narrator/protagonist (Dante) is the default actor UNLESS the text clearly says otherwise.\n"
+    "4. 10-18 events, covering the chapter END TO END. The final event must come from the last ~10%.\n"
+    "5. named_entities: every named person, creature, place, or concept that appears.\n"
+    "6. key_quotes: 3-6 short verbatim phrases that anchor the chapter's key moments.\n"
+    "7. similes: all similes/metaphors that carry meaning.\n"
+    "8. ALL fields in English. NEVER use Hindi/Devanagari in Pass A output."
 )
 
-# ── Pass B: Hindi narration contract ──
-# Receives ONLY the validated Pass A JSON. Must produce Hindi prose, not lists.
+# ── Pass B: Hindi prose narration (verbatim from spec) ──
 _SUMMARY_PASS_B_SYSTEM = (
-    "आप एक साहित्यिक व्याख्याकार हैं। आपको एक अध्याय की घटनाओं की संरचित सूची दी जाएगी।\n"
-    "आपको उसी क्रम में सरल हिंदी में सारांश लिखना है।\n\n"
-    "कठोर नियम:\n"
-    "1. 250–450 शब्द, 4–6 अनुच्छेदों में। सरल हिंदी; व्यक्तियों/स्थानों के नाम अंग्रेज़ी में रखें।\n"
-    "2. हर event का सार आना चाहिए। हर speaker के कथन को reported speech में प्रस्तुत करें। "
-    "कम से कम 2 images की व्याख्या करें, केवल नाम न लें।\n"
-    "3. अध्याय की तर्कशक्ति समझाएँ: ये आत्माएँ यहाँ क्यों हैं, दंड पाप को कैसे प्रतिबिंबित करता है।\n"
-    "4. वर्जित संरचनाएँ: 'X को देखा' 2 से अधिक बार नहीं; कोई ऐसा वाक्य नहीं जो केवल नाम गिनाए "
-    "बिना क्रिया या परिणाम के; कोई अंग्रेज़ी क्रिया-सूची नहीं; कोई वाक्य दो पैराग्राफ में नहीं।\n"
-    "5. अध्याय के अंतिम बीट के साथ समाप्त करें।\n"
-    "6. केवल सादा हिंदी गद्य। कोई SSML, URL, मार्कअप, या कोष्ठक-नाम (common words के लिए) नहीं।"
+    "तुम एक साहित्यिक अनुवादक और व्याख्याकार हो। नीचे दिए गए outline और मूल अध्याय-पाठ "
+    "के आधार पर हिंदी गद्य में सारांश लिखो।\n"
+    "नियम:\n"
+    "- पूरा सारांश हिंदी में लिखो। अंग्रेज़ी वाक्य या अंग्रेज़ी क्रिया मत लिखो। "
+    "केवल proper nouns के लिए कोष्ठक में मूल वर्तनी दे सकते हो, जैसे फ्रांचेस्का (Francesca)।\n"
+    "- क्रमांकित सूची, bullet, 'कथन:', 'रूपक:' जैसे शीर्षक मत बनाओ। केवल 3-5 अनुच्छेद गद्य।\n"
+    "- outline के हर event को कवर करो, उसी क्रम में। कोई event मत छोड़ो।\n"
+    "- named_entities की हर entity का नाम सारांश में आना चाहिए।\n"
+    "- कोई वाक्य या वाक्यांश दोहराओ मत।\n"
+    "- अपनी तरफ़ से घटना मत जोड़ो।"
 )
 
 # Repair instruction for Pass A JSON failures.
 _PASS_A_REPAIR = (
-    "Your previous output was not valid JSON or violated the rules. "
-    "Output ONLY a JSON object with keys: events, speakers, images. "
-    "Each event must have actor, action, outcome, quote_anchor (<=8 verbatim words). "
-    "Do not repeat the same actor for unrelated events. Do not emit bare verb lists."
+    "Your previous output was not valid JSON or contained Hindi. "
+    "Output ONLY a JSON object with keys: events, named_entities, key_quotes, similes. "
+    "ALL fields in English. No Hindi. No Devanagari."
 )
 
 # Subject-misattribution repair.
 _PASS_A_SUBJECT_REPAIR = (
     "You mis-attributed the subject. Re-read the text: identify who performs EACH action. "
-    "Do not carry one character forward as the default actor. Output the corrected JSON."
+    "Do not carry one character forward as the default actor. Output the corrected JSON (English only)."
 )
 
 # Tail repair — append the last chunk explicitly.
 _PASS_A_TAIL_REPAIR = (
-    "Your last event's quote_anchor was from the first 70% of the text — you did not "
-    "reach the end. Re-read the FINAL portion and add events from it. Output the corrected JSON."
+    "Your last event was from the first 70% of the text — you did not reach the end. "
+    "Re-read the FINAL portion and add events from it. Output the corrected JSON (English only)."
 )
 
 
@@ -11378,17 +11374,15 @@ def _sanitize_summary(text: str) -> str:
 def _validate_pass_a_json(raw_json, chapter_text):
     """Validate the Pass A JSON output. Returns (parsed, errors_list).
 
-    Checks:
+    v9 checks:
     - JSON parses
     - >= 8 events for a chapter over 400 words
-    - quote_anchor found in chapter text (case/whitespace-insensitive)
     - no single actor owns >60% of events
-    - last event's quote_anchor appears in the last 30% of chapter (tail coverage)
+    - named_entities present and non-empty
     """
     import json as _json
     errors = []
 
-    # Strip markdown code fences if present
     raw = raw_json.strip()
     if raw.startswith("```"):
         raw = re.sub(r'^```(?:json)?\s*', '', raw)
@@ -11406,126 +11400,99 @@ def _validate_pass_a_json(raw_json, chapter_text):
         errors.append("events_not_list")
         events = []
 
-    # Check event count
     chapter_words = len(chapter_text.split())
     if chapter_words > 400 and len(events) < 8:
         errors.append(f"too_few_events({len(events)}<8)")
 
-    # Validate quote anchors + check actor distribution
-    chapter_lower = re.sub(r'\s+', ' ', chapter_text.lower())
-    valid_events = []
-    dropped = 0
+    # Check actor distribution
     actor_counts = {}
     for ev in events:
         if not isinstance(ev, dict):
-            dropped += 1
             continue
-        anchor = (ev.get("quote_anchor") or "").strip()
-        if not anchor:
-            dropped += 1
-            continue
-        anchor_norm = re.sub(r'\s+', ' ', anchor.lower())
-        if anchor_norm not in chapter_lower:
-            dropped += 1
-            continue
-        valid_events.append(ev)
         actor = (ev.get("actor") or "").strip()
         if actor:
             actor_counts[actor] = actor_counts.get(actor, 0) + 1
 
-    if events and dropped / len(events) > 0.3:
-        errors.append(f"too_many_dropped_anchors({dropped}/{len(events)})")
-
-    parsed["events"] = valid_events
-
-    # Check actor distribution
-    if valid_events and actor_counts:
+    if events and actor_counts:
         max_actor = max(actor_counts.values())
-        if max_actor / len(valid_events) > 0.6:
+        if max_actor / len(events) > 0.6:
             dominant = max(actor_counts, key=actor_counts.get)
-            errors.append(f"actor_dominance({dominant}:{max_actor}/{len(valid_events)})")
+            errors.append(f"actor_dominance({dominant}:{max_actor}/{len(events)})")
 
-    # Check tail coverage: last event's quote_anchor in last 30% of chapter
-    if valid_events:
-        last_anchor = (valid_events[-1].get("quote_anchor") or "").strip()
-        if last_anchor:
-            last_anchor_norm = re.sub(r'\s+', ' ', last_anchor.lower())
-            chapter_30 = chapter_lower[int(0.7 * len(chapter_lower)):]
-            if last_anchor_norm not in chapter_30:
-                errors.append(f"tail_not_reached(last_anchor_in_first_70%)")
+    # Check named_entities present
+    named_entities = parsed.get("named_entities", [])
+    if not isinstance(named_entities, list) or len(named_entities) == 0:
+        errors.append("no_named_entities")
 
     return (parsed, errors)
 
 
-def _build_outline_from_events(parsed):
-    """Build a text outline string from the validated Pass A JSON for Pass B."""
+def _build_outline_for_pass_b(parsed):
+    """Build a text outline string from the validated Pass A JSON for Pass B.
+
+    This is INTERNAL — it's input to Pass B, never returned to the client.
+    """
     if not parsed:
         return ""
-    lines = []
-    events = parsed.get("events", [])
-    for i, ev in enumerate(events, 1):
-        actor = ev.get("actor", "?")
-        action = ev.get("action", "")
-        outcome = ev.get("outcome", "")
-        anchor = ev.get("quote_anchor", "")
-        lines.append(f"{i}. {actor} — {action}. {outcome}. [\"{anchor}\"]")
-    speakers = parsed.get("speakers", [])
-    for sp in speakers:
-        name = sp.get("name", "?")
-        says = sp.get("says", "")
-        lines.append(f"  {name} कहते हैं: {says}")
-    images = parsed.get("images", [])
-    if images:
-        lines.append("  Images: " + "; ".join(images))
-    return "\n".join(lines)
+    import json as _json
+    # Pass the raw JSON to Pass B so it has structured data to work with.
+    return _json.dumps(parsed, ensure_ascii=False, indent=2)
 
 
-def _extract_proper_nouns_from_parsed(parsed):
-    """Extract proper nouns from the validated Pass A JSON (actors + speakers)."""
-    nouns = set()
+def _extract_named_entities(parsed):
+    """Extract the named_entities list from the validated Pass A JSON."""
     if not parsed:
-        return nouns
-    for ev in parsed.get("events", []):
-        actor = (ev.get("actor") or "").strip()
-        if actor:
-            # Extract capitalized tokens from the actor field
-            for w in re.findall(r'\b[A-Z][a-z]{2,}\b', actor):
-                if w not in {"The", "And", "But", "Then", "They", "His", "Her",
-                             "This", "That", "There", "Here"}:
-                    nouns.add(w)
-    for sp in parsed.get("speakers", []):
-        name = (sp.get("name") or "").strip()
-        for w in re.findall(r'\b[A-Z][a-z]{2,}\b', name):
-            if w not in {"The", "And", "But", "Then", "They", "His", "Her",
-                         "This", "That", "There", "Here"}:
-                nouns.add(w)
-    return nouns
+        return set()
+    entities = parsed.get("named_entities", [])
+    if isinstance(entities, list):
+        return set(str(e) for e in entities if e)
+    return set()
 
 
-def _validate_summary_v8(summary, parsed_outline):
+def _validate_summary_v9(summary, parsed_outline):
     """Validate the final Hindi summary against the Pass A JSON.
 
-    Returns (ok, reason, coverage, missing, degraded).
+    v9 gates (reject and retry once, then error):
+    a) Devanagari character ratio < 0.55 of all letter characters (outside parentheses).
+    b) Contains "ने " immediately followed by an ASCII [a-z] word.
+    c) Matches numbered list lines or "कथन:" / "रूपक:" headings.
+    d) Fewer than 80% of named_entities appear in the text.
+    e) Any 8-word shingle repeats more than twice.
+
+    Returns (ok, reason, coverage, missing).
     """
     if not summary or not summary.strip():
-        return (False, "empty", 0.0, set(), False)
+        return (False, "empty", 0.0, set())
 
     if _NON_INDIC_SCRIPT_RE.search(summary):
-        return (False, "non_indic_script", 0.0, set(), False)
+        return (False, "non_indic_script", 0.0, set())
     if not re.search(r"[\u0900-\u097F]", summary):
-        return (False, "no_devanagari", 0.0, set(), False)
+        return (False, "no_devanagari", 0.0, set())
 
-    # ── Bare-verb regex reject ──
+    # a) Devanagari character ratio (outside parentheses)
+    # Strip parenthesized content (proper noun glosses)
+    text_outside_parens = re.sub(r'\([^)]*\)', '', summary)
+    devanagari_chars = len(re.findall(r'[\u0900-\u097F]', text_outside_parens))
+    all_letter_chars = len(re.findall(r'[\u0900-\u097Fa-zA-Z]', text_outside_parens))
+    if all_letter_chars > 0:
+        ratio = devanagari_chars / all_letter_chars
+        if ratio < 0.55:
+            return (False, f"low_devanagari_ratio({ratio:.2f})", 0.0, set())
+
+    # b) "ने " followed by ASCII [a-z] (Hindi-English splice)
+    if _NE_ASCII_RE.search(summary):
+        return (False, "ne_ascii_splice", 0.0, set())
+
+    # c) Numbered list lines or "कथन:" / "रूपक:" headings (outline leak)
+    if _OUTLINE_LEAK_RE.search(summary):
+        return (False, "outline_leak", 0.0, set())
+
+    # Bare-verb regex reject (keep from v8)
     if _BARE_VERB_RE.search(summary):
         matches = _BARE_VERB_RE.findall(summary)
-        return (False, f"bare_verbs({','.join(set(matches))})", 0.0, set(), False)
+        return (False, f"bare_verbs({','.join(set(matches))})", 0.0, set())
 
-    # ── "X को देखा" chain check (max 2 different entities) ──
-    dekha_matches = re.findall(r'(\S+)\s+को\s+देखा', summary)
-    if len(set(dekha_matches)) > 2:
-        return (False, f"dekha_chain({len(set(dekha_matches))})", 0.0, set(), False)
-
-    # ── n-gram repetition: 8-word shingle occurring 2+ times ──
+    # e) 8-word shingle repetition (max 2 occurrences)
     words = summary.split()
     if len(words) >= 8:
         shingles = {}
@@ -11533,66 +11500,36 @@ def _validate_summary_v8(summary, parsed_outline):
             sh = " ".join(words[i:i+8])
             shingles[sh] = shingles.get(sh, 0) + 1
         for sh, count in shingles.items():
-            if count >= 2:
-                return (False, f"shingle_repeat({sh[:30]}...)", 0.0, set(), False)
+            if count > 2:
+                return (False, f"shingle_repeat({sh[:30]}...)", 0.0, set())
 
-    # ── Paragraph similarity (>85% → FAIL) ──
+    # Paragraph similarity (>85% → FAIL, keep from v8)
     paragraphs = [p.strip() for p in summary.split("\n\n") if p.strip()]
     for i in range(len(paragraphs)):
         for j in range(i + 1, len(paragraphs)):
             sim = _token_jaccard(_normalize_sentence(paragraphs[i]),
                                  _normalize_sentence(paragraphs[j]))
             if sim > 0.85:
-                return (False, f"para_similarity({sim:.2f})", 0.0, set(), False)
+                return (False, f"para_similarity({sim:.2f})", 0.0, set())
 
-    # ── Coverage: >=80% of proper nouns from Pass A ──
-    nouns = _extract_proper_nouns_from_parsed(parsed_outline)
+    # d) Coverage: >=80% of named_entities from Pass A
+    entities = _extract_named_entities(parsed_outline)
     missing = set()
-    if nouns:
+    if entities:
         summary_lower = summary.lower()
         present = set()
-        for n in nouns:
+        for n in entities:
             if n.lower() in summary_lower:
                 present.add(n)
             else:
                 missing.add(n)
-        coverage = round(len(present) / len(nouns) * 100, 1) if nouns else 100.0
+        coverage = round(len(present) / len(entities) * 100, 1) if entities else 100.0
         if coverage < 80.0:
-            return (False, f"low_coverage({coverage:.0f}%)", coverage, missing, False)
+            return (False, f"low_coverage({coverage:.0f}%)", coverage, missing)
     else:
         coverage = 100.0
 
-    return (True, "ok", coverage, set(), False)
-
-
-def _render_degraded_outline(parsed, chapter_title=""):
-    """Render the Pass A JSON as a Hindi bulleted list (degraded fallback)."""
-    if not parsed:
-        return ""
-    lines = []
-    if chapter_title:
-        lines.append(f"📖 {chapter_title}")
-        lines.append("")
-    events = parsed.get("events", [])
-    for i, ev in enumerate(events, 1):
-        actor = ev.get("actor", "?")
-        action = ev.get("action", "")
-        outcome = ev.get("outcome", "")
-        if outcome:
-            lines.append(f"{i}. {actor} ने {action} — {outcome}")
-        else:
-            lines.append(f"{i}. {actor} ने {action}")
-    speakers = parsed.get("speakers", [])
-    if speakers:
-        lines.append("")
-        lines.append("कथन:")
-        for sp in speakers:
-            lines.append(f"  • {sp.get('name', '?')}: {sp.get('says', '')}")
-    images = parsed.get("images", [])
-    if images:
-        lines.append("")
-        lines.append("रूपक: " + ", ".join(images))
-    return "\n".join(lines)
+    return (True, "ok", coverage, set())
 
 
 def _split_chapter_chunks(text: str, chunk_words: int = 900, overlap_words: int = 135):
@@ -11683,23 +11620,24 @@ def _check_coverage(summary: str, outline_nouns: set) -> tuple:
 
 
 def _generate_hindi_summary(groq_client, chapter_text: str, chapter_title: str = "") -> tuple:
-    """Generate a full-coverage Hindi chapter summary via JSON event extraction + narration.
+    """Generate a Hindi chapter summary via JSON event extraction + Hindi narration.
 
-    v8 flow (fixes the proper-noun-list + bare-verb-enum failure mode):
-    - Pass A: extract STRUCTURED JSON (events/speakers/images) with quote anchors.
-      Server-side validation: JSON parse, >=8 events, quote_anchor verification,
-      actor dominance, tail coverage. Re-runs Pass A on failure (max 2 retries).
-    - Pass B: narrate the validated JSON as Hindi prose (250-450 words, 4-6 paras).
-      Explains the LOGIC of the chapter, not just the sequence.
-    - Coverage gate: >=80% of proper nouns from Pass A must appear. Bare-verb
-      regex reject. 8-word shingle repetition reject. Paragraph similarity reject.
-    - Degraded fallback: if 2 regenerations fail, render the outline as a Hindi
-      bulleted list with {"degraded": true}.
+    v9 flow (HARD PASS SEPARATION — Pass A output NEVER returned as summary):
+    - Pass A: extract STRUCTURED JSON (events/named_entities/key_quotes/similes).
+      ALL English. Server-side validation: JSON parse, >=8 events, actor dominance.
+    - Pass B: narrate the outline + FULL chapter text as Hindi prose.
+      Uses the verbatim spec prompt. Groq params: temp 0.4, freq_penalty 0.5,
+      presence_penalty 0.3, max_tokens for ~450-700 Hindi words.
+    - Validation gate (_validate_summary_v9): Devanagari ratio >=0.55, no ने+ASCII
+      splice, no numbered list/कथन/रूपक headings, >=80% named_entities coverage,
+      no 8-word shingle repeat >2. On failure: retry once. On second failure:
+      return error_code "summary_quality_gate_failed" — NEVER return the outline.
+    - Input integrity: logs chars for Pass A and Pass B separately.
 
-    Input integrity: logs chars_sent_to_model vs chars_in_full_chapter for every
-    request. If chars_sent < 0.95 * chars_in_full_chapter, that's a BUG.
-
-    Returns (summary, error_code, quality, missing, outline_str, coverage, degraded).
+    Returns (summary, error_code, quality, missing, outline_json, coverage, degraded).
+    - summary is ALWAYS Hindi prose from Pass B, or empty string on failure.
+    - error_code is None on success, or a machine code on failure.
+    - degraded is ALWAYS False in v9 (no outline fallback).
     Never raises — wrapped in try/except + traceback.print_exc().
     """
     import traceback
@@ -11720,7 +11658,7 @@ def _generate_hindi_summary_inner(groq_client, chapter_text: str, chapter_title:
     chap_id = chapter_title or f"words={word_count}"
 
     # ═══════════════════════════════════════════════════════════════
-    # PART 4: INPUT INTEGRITY — log the true size before any LLM call.
+    # INPUT INTEGRITY — log the true size before any LLM call.
     # ═══════════════════════════════════════════════════════════════
     print(f"summary_input chapter={chap_id} chars_in_full_chapter={full_chars} "
           f"words={word_count}")
@@ -11730,7 +11668,7 @@ def _generate_hindi_summary_inner(groq_client, chapter_text: str, chapter_title:
     SINGLE_PASS_THRESHOLD = 1200
     regeneration_count = 0
 
-    # ── Chunking ──
+    # ── Chunking for Pass A ──
     if word_count > SINGLE_PASS_THRESHOLD:
         chunks = _split_chapter_chunks(chapter_text,
                                         chunk_words=CHUNK_WORDS,
@@ -11742,11 +11680,12 @@ def _generate_hindi_summary_inner(groq_client, chapter_text: str, chapter_title:
         print(f"[summary] single-chunk (word_count={word_count} <= {SINGLE_PASS_THRESHOLD})")
 
     # ═══════════════════════════════════════════════════════════════
-    # PART 1: PASS A — JSON Event Extraction + validation
+    # PASS A — JSON Event Extraction (English only, INTERNAL)
     # ═══════════════════════════════════════════════════════════════
     all_events = []
-    all_speakers = []
-    all_images = []
+    all_named_entities = []
+    all_key_quotes = []
+    all_similes = []
     n_chunks = len(chunks)
     chars_sent_to_pass_a = 0
 
@@ -11755,7 +11694,7 @@ def _generate_hindi_summary_inner(groq_client, chapter_text: str, chapter_title:
         pass_a_user = (
             f"Text (chapter chunk {ci+1} of {n_chunks}):\n"
             f"<<<{chunk}>>>\n\n"
-            f"Extract events, speakers, and images as JSON per the schema."
+            f"Extract events, named_entities, key_quotes, and similes as JSON per the schema."
         )
         raw_a, code_a = _groq_summary_call(
             groq_client, _SUMMARY_PASS_A_SYSTEM, pass_a_user,
@@ -11766,13 +11705,11 @@ def _generate_hindi_summary_inner(groq_client, chapter_text: str, chapter_title:
             print(f"[summary] Pass A chunk {ci+1}/{n_chunks} empty (code={code_a})")
             continue
 
-        # Validate the JSON
         parsed, errors = _validate_pass_a_json(raw_a, chunk)
         if parsed is None:
-            # JSON parse failed — retry once with repair instruction
             print(f"[summary] Pass A chunk {ci+1} JSON parse failed → retrying with repair")
             regeneration_count += 1
-            raw_a2, code_a2 = _groq_summary_call(
+            raw_a2, _ = _groq_summary_call(
                 groq_client, _SUMMARY_PASS_A_SYSTEM + "\n" + _PASS_A_REPAIR,
                 pass_a_user,
                 temperature=0.3, max_tokens=2048,
@@ -11784,7 +11721,6 @@ def _generate_hindi_summary_inner(groq_client, chapter_text: str, chapter_title:
             print(f"[summary] Pass A chunk {ci+1} still failed after retry — skipping")
             continue
 
-        # Handle specific error types with targeted retries
         if errors:
             error_str = "; ".join(errors)
             print(f"[summary] Pass A chunk {ci+1} errors: {error_str}")
@@ -11799,155 +11735,138 @@ def _generate_hindi_summary_inner(groq_client, chapter_text: str, chapter_title:
                     parsed3, errors3 = _validate_pass_a_json(raw_a3, chunk)
                     if parsed3 and not any("actor_dominance" in e for e in errors3):
                         parsed = parsed3
-                        errors = errors3
-            if any("tail_not_reached" in e for e in errors) and ci == n_chunks - 1:
-                regeneration_count += 1
-                tail_text = chunk[int(0.7 * len(chunk)):]
-                raw_a4, _ = _groq_summary_call(
-                    groq_client, _SUMMARY_PASS_A_SYSTEM + "\n" + _PASS_A_TAIL_REPAIR,
-                    f"Text (FINAL chunk {ci+1} of {n_chunks}):\n<<<{chunk}>>>\n\n"
-                    f"The last portion of this chunk:\n<<<{tail_text}>>>\n\n"
-                    f"Extract events from the ENTIRE chunk, especially the end.",
-                    temperature=0.3, max_tokens=2048,
-                    frequency_penalty=0.6, presence_penalty=0.4)
-                if raw_a4:
-                    parsed4, errors4 = _validate_pass_a_json(raw_a4, chunk)
-                    if parsed4:
-                        parsed = parsed4
 
-        # Merge events/speakers/images into the master lists
         all_events.extend(parsed.get("events", []))
-        all_speakers.extend(parsed.get("speakers", []))
-        all_images.extend(parsed.get("images", []))
+        all_named_entities.extend(parsed.get("named_entities", []))
+        all_key_quotes.extend(parsed.get("key_quotes", []))
+        all_similes.extend(parsed.get("similes", []))
         print(f"[summary] Pass A chunk {ci+1}/{n_chunks}: "
               f"{len(parsed.get('events', []))} events, "
-              f"{len(parsed.get('speakers', []))} speakers, "
-              f"{len(parsed.get('images', []))} images")
+              f"{len(parsed.get('named_entities', []))} entities")
 
-    # De-duplicate events by quote_anchor
-    seen_anchors = set()
-    deduped_events = []
-    for ev in all_events:
-        anchor = (ev.get("quote_anchor") or "").strip().lower()
-        if anchor and anchor not in seen_anchors:
-            seen_anchors.add(anchor)
-            deduped_events.append(ev)
-    all_events = deduped_events
+    # De-duplicate named_entities
+    all_named_entities = list(set(all_named_entities))
 
     master_parsed = {
         "events": all_events,
-        "speakers": all_speakers,
-        "images": all_images,
+        "named_entities": all_named_entities,
+        "key_quotes": all_key_quotes,
+        "similes": all_similes,
     }
     events_count = len(all_events)
     print(f"[summary] master: {events_count} events, "
-          f"{len(all_speakers)} speakers, {len(all_images)} images")
+          f"{len(all_named_entities)} entities, {len(all_similes)} similes")
 
     if events_count == 0:
+        print(f"summary_returned_from=pass_a_failed chapter={chap_id}")
         return ("", "empty_summary", "error", set(), "", 0.0, False)
 
     # Log the Pass A JSON for verification
     try:
         import json as _json
+        print(f"summary_pass_a_chars={chars_sent_to_pass_a} chapter={chap_id}")
         print(f"[summary] PASS_A_JSON:\n{_json.dumps(master_parsed, ensure_ascii=False, indent=2)[:3000]}")
     except Exception:
         pass
 
     # ═══════════════════════════════════════════════════════════════
-    # PART 2: PASS B — Hindi Narration
+    # PASS B — Hindi Prose Narration (outline + FULL chapter text)
     # ═══════════════════════════════════════════════════════════════
-    outline_str = _build_outline_from_events(master_parsed)
+    outline_json = _build_outline_for_pass_b(master_parsed)
+
+    # For long chapters: send outline + an extractive condensation of the
+    # chapter (first 2000 + last 2000 words) so Pass B sees the tail.
+    if word_count > 2500:
+        chapter_words_list = chapter_text.split()
+        condensed = " ".join(chapter_words_list[:2000]) + "\n...\n" + " ".join(chapter_words_list[-2000:])
+        pass_b_chapter_text = condensed
+        print(f"[summary] Pass B using condensed chapter ({len(pass_b_chapter_text)} chars, "
+              f"first 2000 + last 2000 words)")
+    else:
+        pass_b_chapter_text = chapter_text
+
     pass_b_user = (
-        f"अध्याय: {chapter_title or chap_id}\n\n"
-        f"घटना-सूची:\n{outline_str}\n\n"
-        f"इस सूची के आधार पर 4–6 अनुच्छेदों में 250–450 शब्दों का सारांश लिखें।"
+        f"Outline (JSON):\n{outline_json}\n\n"
+        f"मूल अध्याय-पाठ:\n{pass_b_chapter_text}"
     )
+    chars_sent_to_pass_b = len(pass_b_user)
+    print(f"summary_pass_b_chars={chars_sent_to_pass_b} chapter={chap_id}")
+
     raw_summary, code_b = _groq_summary_call(
         groq_client, _SUMMARY_PASS_B_SYSTEM, pass_b_user,
-        temperature=0.4, max_tokens=1800,
-        frequency_penalty=0.6, presence_penalty=0.4)
+        temperature=0.4, max_tokens=2048,
+        frequency_penalty=0.5, presence_penalty=0.3)
+
     if not raw_summary:
-        return ("", code_b or "empty_summary", "error", set(), outline_str, 0.0, False)
+        print(f"summary_pass_b_error={code_b} chapter={chap_id}")
+        print(f"summary_returned_from=pass_b_failed chapter={chap_id}")
+        return ("", code_b or "summary_pass_b_failed", "error", set(),
+                outline_json, 0.0, False)
+
     summary = _clean_summary_llm_output(raw_summary)
     if not summary:
-        return ("", "empty_summary", "error", set(), outline_str, 0.0, False)
+        print(f"summary_pass_b_error=empty_after_clean chapter={chap_id}")
+        print(f"summary_returned_from=pass_b_failed chapter={chap_id}")
+        return ("", "summary_pass_b_failed", "error", set(),
+                outline_json, 0.0, False)
     print(f"[summary] pass-b: len={len(summary)} paras={len(summary.split(chr(10)+chr(10)))}")
 
     # ═══════════════════════════════════════════════════════════════
-    # PART 3: COVERAGE GATE on the final summary
+    # VALIDATION GATE on the final summary
     # ═══════════════════════════════════════════════════════════════
-    ok, reason, coverage, missing, _ = _validate_summary_v8(summary, master_parsed)
+    ok, reason, coverage, missing = _validate_summary_v9(summary, master_parsed)
     print(f"summary_gate chapter={chap_id} ok={ok} reason={reason} coverage={coverage:.1f}%")
 
     if not ok:
-        # Regenerate Pass B once with the missing names listed explicitly.
+        # Retry Pass B ONCE with the failure reason appended.
         regeneration_count += 1
         missing_str = ", ".join(sorted(missing)[:15]) if missing else "(none)"
         retry_user = (
             pass_b_user + "\n\n"
             f"पिछला प्रयास असफल: {reason}. "
             f"इन नामों को शामिल करें: {missing_str}. "
-            f"दोहराव हटाएँ। कोई अंग्रेज़ी क्रिया-सूची नहीं।"
+            f"दोहराव हटाएँ। केवल हिंदी गद्य लिखें।"
         )
-        print(f"[summary] gate failed ({reason}) → regenerating Pass B")
+        print(f"[summary] gate failed ({reason}) → retrying Pass B")
         raw_retry, _ = _groq_summary_call(
             groq_client, _SUMMARY_PASS_B_SYSTEM, retry_user,
-            temperature=0.3, max_tokens=1800,
-            frequency_penalty=0.6, presence_penalty=0.4)
+            temperature=0.3, max_tokens=2048,
+            frequency_penalty=0.5, presence_penalty=0.3)
         if raw_retry:
             retry_summary = _clean_summary_llm_output(raw_retry)
             if retry_summary:
-                ok2, reason2, cov2, missing2, _ = _validate_summary_v8(retry_summary, master_parsed)
+                ok2, reason2, cov2, missing2 = _validate_summary_v9(retry_summary, master_parsed)
                 print(f"summary_gate chapter={chap_id} retry ok={ok2} reason={reason2} coverage={cov2:.1f}%")
-                if ok2 or cov2 >= coverage:
+                if ok2:
                     summary = retry_summary
                     ok, reason, coverage, missing = ok2, reason2, cov2, missing2
 
     if not ok:
-        # Second regeneration also failed — try one more with stricter instructions.
-        regeneration_count += 1
-        print(f"[summary] second regen also failed ({reason}) → final attempt")
-        raw_retry2, _ = _groq_summary_call(
-            groq_client, _SUMMARY_PASS_B_SYSTEM, pass_b_user,
-            temperature=0.3, max_tokens=1800,
-            frequency_penalty=0.8, presence_penalty=0.6)
-        if raw_retry2:
-            retry2 = _clean_summary_llm_output(raw_retry2)
-            if retry2:
-                ok3, reason3, cov3, missing3, _ = _validate_summary_v8(retry2, master_parsed)
-                print(f"summary_gate chapter={chap_id} final ok={ok3} reason={reason3} coverage={cov3:.1f}%")
-                if ok3 or cov3 >= coverage:
-                    summary = retry2
-                    ok, reason, coverage, missing = ok3, reason3, cov3, missing3
+        # v9: NEVER return the outline as summary. Return an error.
+        print(f"[summary] quality gate failed twice ({reason}) → returning error "
+              f"(NOT the outline)")
+        print(f"summary_returned_from=quality_gate_failed chapter={chap_id}")
+        final_word_count = 0
+        print(f"summary_stats chapter={chap_id} "
+              f"chars_sent_to_pass_a={chars_sent_to_pass_a} "
+              f"chars_sent_to_pass_b={chars_sent_to_pass_b} "
+              f"chars_in_full_chapter={full_chars} n_chunks={n_chunks} "
+              f"events_returned={events_count} regeneration_count={regeneration_count} "
+              f"final_word_count={final_word_count}")
+        return ("", "summary_quality_gate_failed", "error", missing,
+                outline_json, coverage, False)
 
-    if not ok:
-        # All regenerations failed — return degraded outline as Hindi bulleted list.
-        print(f"[summary] all regenerations failed ({reason}) → degraded outline fallback")
-        degraded_summary = _render_degraded_outline(master_parsed, chapter_title)
-        if degraded_summary:
-            # Log the input integrity line.
-            final_word_count = len(degraded_summary.split())
-            print(f"summary_stats chapter={chap_id} chars_sent_to_model={chars_sent_to_pass_a} "
-                  f"chars_in_full_chapter={full_chars} n_chunks={n_chunks} "
-                  f"events_returned={events_count} regeneration_count={regeneration_count} "
-                  f"final_word_count={final_word_count} degraded=true")
-            return (degraded_summary, None, "degraded", missing, outline_str, coverage, True)
-        return ("", "empty_summary", "error", set(), outline_str, coverage, False)
-
-    # Log the input integrity line.
+    # Log the final stats.
     final_word_count = len(summary.split())
-    chars_sent_to_model = chars_sent_to_pass_a + len(outline_str)
-    print(f"summary_stats chapter={chap_id} chars_sent_to_model={chars_sent_to_model} "
+    print(f"summary_returned_from=pass_b chapter={chap_id}")
+    print(f"summary_stats chapter={chap_id} "
+          f"chars_sent_to_pass_a={chars_sent_to_pass_a} "
+          f"chars_sent_to_pass_b={chars_sent_to_pass_b} "
           f"chars_in_full_chapter={full_chars} n_chunks={n_chunks} "
           f"events_returned={events_count} regeneration_count={regeneration_count} "
-          f"final_word_count={final_word_count} degraded=false")
+          f"final_word_count={final_word_count}")
 
-    # Check for input truncation BUG
-    if chars_sent_to_model < 0.95 * full_chars and word_count > SINGLE_PASS_THRESHOLD:
-        print(f"[summary] WARN chars_sent_to_model ({chars_sent_to_model}) < "
-              f"0.95 * chars_in_full_chapter ({full_chars}) — possible truncation bug!")
-
-    return (summary, None, "ok", set(), outline_str, coverage, False)
+    return (summary, None, "ok", set(), outline_json, coverage, False)
 
 
 @app.route("/api/chapter/summary", methods=["POST"])
@@ -12052,10 +11971,10 @@ def api_chapter_summary():
                         "code": "no_transcript"}), 400
 
     # Check R2 cache (skip when force=true)
-    # ARIA: v8 cache namespace — invalidates all v7 summaries + their Swara
-    # audio so they're regenerated fresh with the JSON event extractor + narration.
-    summary_cache_key = f"summaries/v8/{book_id}/{chapter_index}.hi.json"
-    audio_cache_key = f"summaries/v8/{book_id}/{chapter_index}.hi.mp3"
+    # ARIA: v9 cache namespace — invalidates all v8 summaries (which may contain
+    # the Pass A outline leak) + their Swara audio.
+    summary_cache_key = f"summaries/v9/{book_id}/{chapter_index}.hi.json"
+    audio_cache_key = f"summaries/v9/{book_id}/{chapter_index}.hi.mp3"
 
     if not force:
         try:
@@ -12099,6 +12018,8 @@ def api_chapter_summary():
                 "groq_rate_limited": ("थोड़ी देर रुकें — बहुत सारे अनुरोध", 429),
                 "groq_all_models_failed": ("AI सेवा अभी उपलब्ध नहीं है", 503),
                 "empty_summary": ("सारांश खाली आया — बाद में कोशिश करें", 503),
+                "summary_pass_b_failed": ("सारांश बनाने में समस्या — बाद में कोशिश करें", 503),
+                "summary_quality_gate_failed": ("सारांश गुणवत्ता जाँच विफल — बाद में कोशिश करें", 503),
                 "internal": ("कुछ गलत हुआ — बाद में कोशिश करें", 500),
             }
             _msg, _sc = _err_map.get(gen_code or "empty_summary",

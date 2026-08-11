@@ -1428,3 +1428,73 @@ Files modified:
 - src/components/aria/hindi-summary-card.tsx (+25 lines: SUMMARY_CACHE_VERSION v8, degraded "संक्षिप्त रूप" badge)
 
 No git push — implementation + verification only, per the task spec.
+
+---
+Task ID: PASS-SEPARATION-V9
+Agent: main (Fix Pass A outline leaking as summary text — hard pass separation)
+Task: Fix the Hindi chapter summary UI rendering Pass A (English extraction outline) instead of Pass B (Hindi prose summary). The outline with "कथन:", "रूपक:", numbered events, and Hindi-English splices was being returned as the summary text when Pass B failed the quality gate and the degraded fallback returned the outline.
+
+Work Log:
+- Read prior worklog (NARRATION-V8, COVERAGE-FIX-V7) for architecture context.
+- Audited the return path: found the root cause in _generate_hindi_summary_inner — when the quality gate failed 3 times, _render_degraded_outline() rendered the Pass A JSON as a Hindi bulleted list (with "कथन:", "रूपक:", numbered events, "actor ने action" splices) and returned it as the `summary` field. This is exactly what the user saw.
+
+Fix 2 — HARD SEPARATION (the core fix):
+- Removed _render_degraded_outline() entirely. The degraded fallback path is GONE.
+- When the quality gate fails twice: return ("", "summary_quality_gate_failed", "error", ...) — an EMPTY summary with an error code. The UI shows the error toast + retry button. NEVER return the outline as summary.
+- When Pass B itself fails (empty output, Groq error): return ("", "summary_pass_b_failed", "error", ...) — also never the outline.
+- summary_returned_from log line: "pass_b" | "pass_b_failed" | "pass_a_failed" | "quality_gate_failed" | "cache".
+
+Fix 3 — Pass A schema (structured, not strings):
+- _SUMMARY_PASS_A_SYSTEM: new schema {events: [{actor, action, outcome}], named_entities: [...], key_quotes: [...], similes: [...]}. ALL English, no Hindi/Devanagari. 10-18 events.
+- _validate_pass_a_json: checks JSON parse, >=8 events, actor dominance (>60%), named_entities present.
+- _PASS_A_REPAIR: "ALL fields in English. No Hindi. No Devanagari."
+
+Fix 4 — Pass B verbatim Hindi prose prompt:
+- _SUMMARY_PASS_B_SYSTEM: verbatim from spec. "तुम एक साहित्यिक अनुवादक और व्याख्याकार हो।" + rules: Hindi only, no English verbs, no numbered list/bullet/कथन/रूपक headings, 3-5 paragraphs, cover every event, every named_entity, no repetition.
+- Pass B user message: outline JSON + FULL chapter text (or first 2000 + last 2000 words for >2500-word chapters).
+- Groq params: temp 0.4, freq_penalty 0.5, presence_penalty 0.3, max_tokens 2048.
+
+Fix 5 — Server-side validation gate (_validate_summary_v9):
+a) Devanagari ratio < 0.55 of all letter chars (outside parentheses) → FAIL.
+b) "ने " followed by ASCII [a-z] (Hindi-English splice) → FAIL.
+c) Numbered list lines or "कथन:"/"रूपक:" headings (_OUTLINE_LEAK_RE) → FAIL.
+d) < 80% of named_entities appear in summary → FAIL.
+e) Any 8-word shingle repeats > 2 times → FAIL.
+Also: bare-verb regex, paragraph similarity > 85%.
+On failure: retry Pass B once. On second failure: return error_code "summary_quality_gate_failed".
+
+Fix 6 — Input integrity logging:
+- summary_pass_a_chars=<n> chapter=<id>
+- summary_pass_b_chars=<n> chapter=<id>
+- summary_stats chapter=<id> chars_sent_to_pass_a=<n> chars_sent_to_pass_b=<n> chars_in_full_chapter=<n> n_chunks=<n> events_returned=<n> regeneration_count=<n> final_word_count=<n>
+- summary_returned_from=pass_b|pass_b_failed|pass_a_failed|quality_gate_failed|cache
+- For long chapters (>2500 words): Pass B receives outline + condensed chapter (first 2000 + last 2000 words).
+
+Fix 7 — Transcript splicing:
+- Verified transcript-view.tsx already renders the explain button as a sibling <div> AFTER the paragraph's closing </p>. The words array contains ONLY transcript words (words.slice(seg.startIdx, seg.endIdx)). The explain button is in a separate <div> block, never inside the word stream. No changes needed.
+
+Cache: v8 → v9. Deletion cleanup includes v9.
+
+Frontend:
+- hindi-summary-card.tsx: SUMMARY_CACHE_VERSION v8 → v9.
+- abm-api.ts: HindiSummary type adds degraded?: boolean (already present from v8).
+
+VERIFICATION:
+- python3 -m py_compile audiobook_app.py: PASSES.
+- npx tsc --noEmit: zero errors.
+- bun run lint: 0 errors, 0 warnings.
+- Inline gate tests (7 cases): T1 outline_leak caught (numbered list + कथन/रूपक); T2 ne_ascii_splice caught (ने + ASCII word); T3 low_devanagari_ratio caught (mostly English); T4 good Hindi summary passes (ratio 1.0, coverage 100%); T5 low_coverage caught (<80% named_entities); T6 shingle_repeat caught (>2 occurrences); T7 bare_verbs caught. All passed.
+- agent-browser: page loads cleanly (HTTP 200, title "ARIA"), no console errors.
+
+CONSTRAINTS honored:
+- Did NOT touch transcript sync offset, manual-scroll override, chapter catalog builder, analyze/chaptering, BGM mixing, cover persistence, deletion tombstones, or the voice registry.
+- transcript-view.tsx explain button structure already correct (sibling div after </p>).
+
+Stage Summary:
+Files modified:
+- mini-services/audiobook-maker/audiobook_app.py (+300/-250 lines: v9 prompts, _validate_pass_a_json, _build_outline_for_pass_b, _extract_named_entities, _validate_summary_v9, _NE_ASCII_RE, _OUTLINE_LEAK_RE, _generate_hindi_summary full rewrite with hard pass separation, _PASS_A_REPAIR/SUBJECT/TAIL, api_chapter_summary error map + v9 cache + v9 deletion cleanup)
+- src/components/aria/hindi-summary-card.tsx (SUMMARY_CACHE_VERSION v8 → v9)
+
+No git push — implementation + verification only, per the task spec.
+
+The Pass A outline can NEVER reach the client as summary text. When Pass B fails or the quality gate fails twice, the endpoint returns an error code (summary_pass_b_failed / summary_quality_gate_failed) and the UI shows a toast + the "फिर से बनाएँ" retry button. The outline is logged to Render logs for debugging but never displayed.
