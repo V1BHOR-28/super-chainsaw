@@ -76,15 +76,6 @@ export interface AnalyzeResponse {
    *  output_format='mp3' + single_file=false (ARIA per-chapter mode).
    *  Each entry has exact duration + file path info for playlist playback. */
   chapter_mp3s?: ChapterMp3Info[];
-  /** Complete parsed chapter catalog (EVERY chapter in the book, regardless
-   *  of whether it has generated audio). Separate from chapter_mp3s (the
-   *  generated playlist). Present when /api/analyze built the catalog; may
-   *  be empty for legacy jobs (frontend falls back to /api/job_chapters). */
-  chapter_catalog?: AnalyzeChapter[];
-  /** True when the backend could only synthesize chapter rows from
-   *  chapter_mp3s (no durable full catalog existed). The frontend uses this
-   *  to decide whether to offer a "re-upload to see all chapters" hint. */
-  chapter_catalog_incomplete?: boolean;
   /** Word-level transcript cues keyed by chapter index (string keys — JSON
    *  object keys are always strings on the wire). Each value is a list of
    *  [startMs, endMs, word] cues. Present when edge-tts WordBoundary events
@@ -100,16 +91,6 @@ export interface AnalyzeResponse {
    *  "off" → no BGM at all. */
   bgm_mode?: "off" | "runtime" | "prerender";
   narration_language?: "en" | "hinglish";
-  /** ARIA: present when the backend detects this exact file already has a
-   *  live generation (same client_id + file_hash, status generating/optimizing).
-   *  The frontend uses this to show an "already converting" toast instead of
-   *  opening an empty chapter selector. When true, job_id + chapters are still
-   *  present so the UI can render something useful. */
-  existing_job_id?: string;
-  is_running?: boolean;
-  status?: string;
-  progress_current?: number;
-  progress_total?: number;
 }
 
 /** A single BGM time cue — when to start/stop a mood loop and at what gain.
@@ -196,10 +177,6 @@ export interface MyJob {
   /** Per-chapter MP3 metadata from the persisted download token.
    *  Present for done jobs generated in per-chapter mode. */
   chapter_mp3s?: ChapterMp3Info[];
-  /** Compact chapter catalog (every chapter in the book) from the token
-   *  snapshot. Empty for legacy tokens — frontend falls back to
-   *  /api/job_chapters to fetch the full list on demand. */
-  chapter_catalog?: AnalyzeChapter[];
   // Present when status === "generating"
   progress_current?: number;
   progress_total?: number;
@@ -316,12 +293,6 @@ export async function analyzeEpub(file: File): Promise<AnalyzeResponse> {
   // Parse the JSON response
   try {
     const json = (await res.json()) as AnalyzeResponse;
-    // ARIA: normalize the busy-shape response. The backend returns
-    // existing_job_id (not job_id) when this file already has a live
-    // generation. Copy it to job_id so callers only ever see one contract.
-    if (!json.job_id && json.existing_job_id) {
-      json.job_id = json.existing_job_id;
-    }
     if (json.client_id) setStoredClientId(json.client_id);
     return json;
   } catch {
@@ -373,11 +344,6 @@ export async function generate(
       msg = body?.error || "Selection too large. Reduce the number of chapters.";
     } else if (errorCode === "invalid_voice") {
       msg = "Invalid voice selected. Pick a different voice.";
-    } else if (errorCode === "chapter_index_mismatch") {
-      msg = "This book was re-parsed on the server and the chapter numbers changed. " +
-            "Close this window, reopen the chapter list, and select again.";
-    } else if (errorCode === "thread_spawn_failed") {
-      msg = "The server accepted the job but couldn't start it. Try again in a minute.";
     } else if (body?.error === "Session expired. Re-upload file.") {
       msg = "This book's session has expired (server restarted). Re-upload the EPUB to convert more chapters.";
     } else {
@@ -442,7 +408,6 @@ export async function getJobChapters(jobId: string): Promise<AnalyzeResponse> {
   const res = await fetch(`${ABM_BASE}/job_chapters/${jobId}`, {
     credentials: "include",
     headers: cidHeaders(),
-    cache: "no-store",
   });
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
@@ -493,35 +458,6 @@ export async function getBgmCues(
   return (body?.cues ?? []) as BgmCue[];
 }
 
-/* ──── Health / readiness ──── */
-
-export interface HealthResponse {
-  process: string;
-  ready: boolean;
-  storage_ready: boolean;
-  recovery_complete: boolean;
-  jobs_loaded: number;
-  tokens_loaded: number;
-  registry_loaded: number;
-  version: string;
-  timestamp: number;
-}
-
-/** Poll the backend health endpoint. Returns quickly. The frontend uses this
- *  during cold-start to wait for `ready=true` before entering the library. */
-export async function checkHealth(signal?: AbortSignal): Promise<HealthResponse> {
-  const res = await fetch(`${ABM_BASE}/health`, {
-    credentials: "include",
-    headers: cidHeaders(),
-    cache: "no-store",
-    signal,
-  });
-  if (!res.ok) {
-    throw new Error(`Health check failed (${res.status})`);
-  }
-  return (await res.json()) as HealthResponse;
-}
-
 /** Returns the relative URL for a BGM loop asset MP3 by mood name.
  *  Served by Flask /api/bgm_asset/<mood> with 30-day immutable cache headers.
  *  Used as the `src` of hidden <audio loop> elements in the runtime mixer. */
@@ -547,7 +483,6 @@ export async function getMyJobs(): Promise<MyJobsResponse> {
   const res = await fetch(`${ABM_BASE}/my_jobs`, {
     credentials: "include",
     headers: cidHeaders(),
-    cache: "no-store",
   });
   if (!res.ok) {
     throw new Error(`My jobs fetch failed (${res.status})`);
@@ -589,102 +524,4 @@ export function getCoverUrl(jobId: string, hasCover: boolean): string {
   if (!hasCover) return "";
   const cid = getStoredClientId();
   return `${ABM_BASE}/cover/${jobId}${cid ? `?cid=${encodeURIComponent(cid)}` : ""}`;
-}
-
-/* ──── Hindi comprehension API ──── */
-
-export interface HindiSummary {
-  summary: string;
-  audio_url?: string;
-  /** "ok" | "partial" | "degraded" — partial means the gates failed twice
-   *  and flagged sentences were stripped. degraded means all regenerations
-   *  failed and the outline was rendered as a Hindi bulleted list. */
-  quality?: string;
-  /** Proper nouns from the outline that are missing from the summary
-   *  (only present when quality === "partial"). */
-  missing?: string[];
-  /** True when the summary is a degraded outline fallback (quality=degraded). */
-  degraded?: boolean;
-}
-
-export interface HindiGlossary {
-  explanation: string;
-  audio_url?: string;
-}
-
-/** Error thrown by getChapterSummary / explainParagraph on !res.ok.
- *  Carries the server's machine-readable `code` + optional `retry_after`
- *  (seconds) so the frontend can show a specific toast. */
-export class HindiApiError extends Error {
-  code?: string;
-  retry_after?: number;
-  constructor(message: string, code?: string, retry_after?: number) {
-    super(message);
-    this.name = "HindiApiError";
-    this.code = code;
-    this.retry_after = retry_after;
-  }
-}
-
-export async function getChapterSummary(
-  bookId: string,
-  chapterIndex: number,
-  force?: boolean,
-): Promise<HindiSummary> {
-  const url = force
-    ? `${ABM_BASE}/chapter/summary?force=1`
-    : `${ABM_BASE}/chapter/summary`;
-  const res = await fetch(url, {
-    method: "POST",
-    headers: cidHeaders({ "Content-Type": "application/json" }),
-    body: JSON.stringify({ book_id: bookId, chapter_index: chapterIndex, force }),
-    credentials: "include",
-    cache: "no-store",
-  });
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({}));
-    throw new HindiApiError(
-      body.error || `Summary failed (${res.status})`,
-      body.code,
-      body.retry_after,
-    );
-  }
-  return (await res.json()) as HindiSummary;
-}
-
-export async function getGlossaryEntry(bookId: string, term: string, contextSnippet: string): Promise<HindiGlossary> {
-  const res = await fetch(`${ABM_BASE}/glossary`, {
-    method: "POST",
-    headers: cidHeaders({ "Content-Type": "application/json" }),
-    body: JSON.stringify({ book_id: bookId, term, context_snippet: contextSnippet }),
-    credentials: "include",
-  });
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({}));
-    throw new HindiApiError(
-      body.error || `Glossary failed (${res.status})`,
-      body.code,
-      body.retry_after,
-    );
-  }
-  return (await res.json()) as HindiGlossary;
-}
-
-export async function explainParagraph(bookId: string, chapterIndex: number, paragraphText: string): Promise<HindiGlossary> {
-  const res = await fetch(`${ABM_BASE}/explain`, {
-    method: "POST",
-    headers: cidHeaders({ "Content-Type": "application/json" }),
-    body: JSON.stringify({ book_id: bookId, chapter_index: chapterIndex, paragraph_text: paragraphText }),
-    credentials: "include",
-    cache: "no-store",
-  });
-  if (!res.ok) {
-    const body = await res.json().catch(() => ({}));
-    throw new HindiApiError(
-      body.error || `Explain failed (${res.status})`,
-      body.code,
-      body.retry_after,
-    );
-  }
-  return (await res.json()) as HindiGlossary;
 }

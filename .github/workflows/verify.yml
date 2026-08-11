@@ -24,46 +24,26 @@ jobs:
       - name: Generate Prisma client
         run: bunx prisma generate
 
-      # ── Real code-quality verification (no database needed) ──
-      # These are the actual CI gates. They run on every push and fail the
-      # job if there's a type error or lint violation — no live database or
-      # API keys required.
-      - name: Type-check
-        run: bunx tsc --noEmit
-
-      - name: Lint
-        run: bun run lint
-
-      # ── Database-dependent maintenance (best-effort, non-fatal) ──
-      # The Neon free-tier database auto-pauses after inactivity and can be
-      # unreachable. These steps are operational tasks, not code-quality
-      # gates — they must NOT block merges when the DB is down.
-      # continue-on-error: true means a red X on THIS step still shows, but
-      # the overall job passes (green check) so the PR can merge.
       - name: Backfill missing memory embeddings
         # Idempotent: finds Memory rows with NULL embeddings (created while the
         # Gemini model-name bug was active) and generates them now. No-op when
-        # zero rows need backfilling.
-        continue-on-error: true
+        # zero rows need backfilling. Must run BEFORE verify so check 6 passes.
         env:
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
         run: bun run backfill:memory
 
-      - name: Run memory verification script
-        # Verifies the memory/embedding system end-to-end. Requires a live DB
-        # + API keys — non-fatal in CI so a paused Neon database doesn't
-        # block code-quality merges.
-        continue-on-error: true
+      - name: Run verification script
         env:
+          # These come from GitHub → Settings → Secrets → Actions
+          # (one-time setup — see SETUP.md in this same folder)
           DATABASE_URL: ${{ secrets.DATABASE_URL }}
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GROQ_API_KEY: ${{ secrets.GROQ_API_KEY }}
           OPENROUTER_API_KEY: ${{ secrets.OPENROUTER_API_KEY }}
         run: bun run verify:memory
 
-      # If type-check or lint exits non-zero, this job fails, which shows as a
-      # red ❌ on the commit/PR in GitHub. The DB-dependent steps are
-      # best-effort (continue-on-error) so a paused Neon database doesn't
-      # block merges. Green ✅ means the code actually type-checks + lints
-      # clean — not just "an agent said it passed."
+      # If verify:memory exits non-zero, this job fails, which shows as a red
+      # ❌ on the commit/PR in GitHub — you don't have to read logs to know
+      # something's wrong. Green ✅ means it actually passed, not "an agent
+      # said it passed."

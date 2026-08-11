@@ -765,7 +765,7 @@ def _check_job_owner(job_id):
     endpoints can still serve data after a restart.
     """
     if job_id not in jobs:
-        # ARIA fallback 1: check download tokens (persisted to disk, survive restart)
+        # ARIA fallback: check download tokens (persisted to disk, survive restart)
         for tok, rec in _download_tokens.items():
             if isinstance(rec, dict) and rec.get("job_id") == job_id:
                 caller = _get_client_id()
@@ -775,20 +775,6 @@ def _check_job_owner(job_id):
                         return None, jsonify({"error": "Forbidden"}), 403
                 # Construct a minimal job dict from the token snapshot
                 return rec, None, 0
-        # ARIA fallback 2: check durable registry (survives restart even if
-        # the token was lost). Construct a minimal dict from the registry entry
-        # so the caller can attempt _reconstruct_job_from_storj.
-        with _job_registry_lock:
-            reg_rec = _job_registry.get(job_id)
-        if reg_rec and isinstance(reg_rec, dict):
-            caller = _get_client_id()
-            owner = reg_rec.get("client_id", "")
-            if owner and caller and caller != owner:
-                if not _admin_auth_ok(_admin_auth_from_request()):
-                    return None, jsonify({"error": "Forbidden"}), 403
-            # Return the registry record — callers that need info will call
-            # _reconstruct_job_from_storj with this as the fallback_record.
-            return reg_rec, None, 0
         return None, jsonify({"error": "Job not found"}), 404
     job = jobs[job_id]
     owner = job.get("client_id", "")
@@ -1790,11 +1776,6 @@ def _save_tokens():
                     "chapter_mp3s": info.get("chapter_mp3s", []),
                     "selected_chapters": info.get("selected_chapters", []),
                     "total_chapters": info.get("total_chapters", 0),
-                    # ARIA: complete parsed chapter catalog (every chapter in
-                    # the book). Persisted so /api/job_chapters can return the
-                    # full catalog after a Render restart even when the EPUB
-                    # can't be re-downloaded/re-parsed.
-                    "chapter_catalog": info.get("chapter_catalog", []),
                     # ARIA: word-level transcript cues per chapter
                     # ({chapter_index: [[startMs, endMs, word], ...]}).
                     # Survives Flask restarts so the synced-transcript UI can
@@ -1865,8 +1846,7 @@ def _save_tokens():
                 title=tok_info.get("book_title", ""),
                 selected_chapters=tok_info.get("selected_chapters", []),
                 chapter_mp3s=tok_info.get("chapter_mp3s", []),
-                total_chapters=tok_info.get("total_chapters", 0),
-                chapter_catalog=tok_info.get("chapter_catalog", []))
+                total_chapters=tok_info.get("total_chapters", 0))
         _save_job_registry()
     except Exception as _e_reg:
         print(f"[registry] token-sync failed (non-fatal): {_e_reg}")
@@ -1949,11 +1929,6 @@ def _save_job_registry():
                     "epub_s3_key": rec.get("epub_s3_key", ""),
                     "selected_chapters": rec.get("selected_chapters", []),
                     "chapter_mp3s": rec.get("chapter_mp3s", []),
-                    # ARIA: complete parsed chapter metadata (every chapter in
-                    # the book, regardless of whether it has audio). Persisted
-                    # so /api/job_chapters can show the full catalog after a
-                    # Render restart even when the EPUB can't be re-parsed.
-                    "chapter_catalog": rec.get("chapter_catalog", []),
                     "updated_at": rec.get("updated_at", 0),
                 }
         community_store.atomic_write_json(_JOB_REGISTRY_FILE, data, indent=2)
@@ -2052,83 +2027,6 @@ def _register_job_and_flush(job_id, **fields):
     _save_job_registry()
 
 
-# ── ARIA: chapter catalog helpers ──
-# The "full chapter catalog" (every chapter parsed from the EPUB/PDF) and the
-# "generated chapter playlist" (only chapters with MP3 files) are two SEPARATE
-# datasets that must never be conflated. chapter_catalog is built once during
-# /api/analyze and persisted alongside chapter_mp3s so the Chapters drawer can
-# always show every chapter (with green ticks only on generated ones), even
-# after a Render restart or a later "More chapters" generation run.
-
-def _build_chapter_catalog(info):
-    """Build a JSON-safe complete chapter catalog from a parsed BookInfo.
-
-    Each entry: {index, title, words, chars, estimated_minutes}.
-    Uses the same 150 wpm estimation as /api/analyze and /api/job_chapters
-    so the catalog is consistent regardless of which path built it.
-    """
-    if not info or not getattr(info, "chapters", None):
-        return []
-    catalog = []
-    _lang = (getattr(info, "language", None) or "en")[:2].lower()
-    for ch in info.chapters:
-        _secs = _estimate_chapter_seconds(ch, _lang)
-        catalog.append({
-            "index": ch.index,
-            "title": ch.title,
-            "words": ch.word_count,
-            "chars": ch.char_count,
-            "estimated_minutes": round(_secs / 60.0, 1),
-        })
-    return catalog
-
-
-def _generated_chapter_indices(chapter_mp3s):
-    """Sorted list of chapter indices that have generated MP3 audio.
-
-    The authoritative narrated set is derived from chapter_mp3s (which is
-    MERGED across generations in generation_engine.py), NOT from the job's
-    `selected_chapters` field (which is OVERWRITTEN per generation and only
-    holds the latest batch). Returns [] when chapter_mp3s is empty/missing.
-    """
-    return sorted({
-        int(ch["index"])
-        for ch in (chapter_mp3s or [])
-        if isinstance(ch, dict) and ch.get("index") is not None
-    })
-
-
-# ARIA: no progress heartbeat for 3 min ⇒ the worker thread is dead.
-# A Render dyno shutdown kills worker threads without ever flipping the job
-# status, so a persisted 'generating' status is NOT evidence of a live run.
-_STALE_RUN_SECS = 180
-
-
-def _job_is_actually_running(job):
-    """True only if a generation/optimization thread is still alive.
-
-    A Render dyno shutdown kills worker threads without ever flipping the
-    job status, so a persisted 'generating' status is NOT evidence of a
-    live run. Require a recent heartbeat (or a live thread handle).
-    """
-    if not isinstance(job, dict):
-        return False
-    if job.get("status") not in ("generating", "optimizing"):
-        return False
-    th = job.get("worker_thread")
-    if th is not None:
-        try:
-            return bool(th.is_alive())
-        except Exception:
-            pass
-    hb = job.get("last_progress_at") or job.get("started_at") or 0
-    try:
-        hb = float(hb)
-    except Exception:
-        hb = 0.0
-    return hb > 0 and (time.time() - hb) < _STALE_RUN_SECS
-
-
 def _lookup_job_by_file_hash(client_id, file_hash):
     """Find a registry entry matching (client_id, file_hash).
 
@@ -2191,7 +2089,7 @@ def _reconstruct_job_from_storj(job_id, fallback_record=None):
         for k in ("epub_s3_key", "client_id", "original_filename", "file_hash",
                   "language_detected", "selected_chapters", "chapter_mp3s",
                   "total_chapters", "transcript_cues", "bgm_mode", "bgm_cues",
-                  "narration_language", "chapter_catalog",
+                  "narration_language",
                   "cover_s3_key", "cover_mime", "cover_thumb"):
             if not rec.get(k) and fallback_record.get(k):
                 rec[k] = fallback_record[k]
@@ -2232,12 +2130,6 @@ def _reconstruct_job_from_storj(job_id, fallback_record=None):
             "language_detected": rec.get("language_detected", False),
             "selected_chapters": rec.get("selected_chapters", []),
             "chapter_mp3s": rec.get("chapter_mp3s", []),
-            # ARIA: rebuild the full chapter catalog from the freshly-parsed
-            # info.chapters (always reflects the current EPUB). Fall back to
-            # the persisted copy only if info has no chapters (shouldn't happen
-            # — _parse_book raises on empty books — but defensive).
-            "chapter_catalog": (_build_chapter_catalog(info)
-                                 or rec.get("chapter_catalog", [])),
             # ARIA: word-level transcript cues restored from the download-token
             # snapshot (JSON object keys are strings here — that's expected;
             # the API helpers normalize via _chapter_has_transcript()).
@@ -8571,38 +8463,15 @@ def api_analyze():
     if existing_job:
         status = existing_job.get("status", "")
         if status in ("optimizing", "generating"):
-            if _job_is_actually_running(existing_job):
-                # Genuinely running — return the is_running payload WITH the
-                # full catalog so the frontend can render something useful
-                # instead of an empty selector.
-                _run_info = existing_job.get("info")
-                _run_chapters = (_build_chapter_catalog(_run_info)
-                                 if _run_info else [])
-                return jsonify({
-                    "existing_job_id": existing_jid,
-                    "job_id": existing_jid,
-                    "title": (getattr(_run_info, "title", None)
-                              or existing_job.get("original_filename", "")),
-                    "author": getattr(_run_info, "author", "") if _run_info else "",
-                    "total_chapters": (len(_run_info.chapters)
-                                       if _run_info else 0),
-                    "chapters": _run_chapters,
-                    "client_id": existing_job.get("client_id", ""),
-                    "status": status,
-                    "is_running": True,
-                    "progress_current": existing_job.get("progress_current", 0),
-                    "progress_total": existing_job.get("progress_total", 0),
-                    "opt_progress_current": existing_job.get("opt_progress_current", 0),
-                    "opt_progress_total": existing_job.get("opt_progress_total", 0),
-                })
-            # Stale: the worker died with the dyno. Demote to analyzed/optimized
-            # and fall through to the normal reuse path so the selector gets
-            # real chapters instead of a permanently-generating dead end.
-            with _jobs_lock:
-                existing_job["status"] = ("optimized"
-                                          if existing_job.get("ai_optimized")
-                                          else "analyzed")
-            status = existing_job["status"]
+            return jsonify({
+                "existing_job_id": existing_jid,
+                "status": status,
+                "is_running": True,
+                "progress_current": existing_job.get("progress_current", 0),
+                "progress_total": existing_job.get("progress_total", 0),
+                "opt_progress_current": existing_job.get("opt_progress_current", 0),
+                "opt_progress_total": existing_job.get("opt_progress_total", 0),
+            })
         if status in ("analyzed", "optimized"):
             # Reuse existing analyzed/optimized job
             info = existing_job["info"]
@@ -8658,38 +8527,15 @@ def api_analyze():
                 if _reg_job:
                     _reg_status = _reg_job.get("status", "")
                     if _reg_status in ("optimizing", "generating"):
-                        if _job_is_actually_running(_reg_job):
-                            # Genuinely running — return is_running WITH the
-                            # full catalog so the frontend can render something.
-                            _reg_run_info = _reg_job.get("info")
-                            _reg_run_chapters = (_build_chapter_catalog(_reg_run_info)
-                                                 if _reg_run_info else [])
-                            return jsonify({
-                                "existing_job_id": _reg_jid,
-                                "job_id": _reg_jid,
-                                "title": (getattr(_reg_run_info, "title", None)
-                                          or _reg_job.get("original_filename", "")),
-                                "author": (getattr(_reg_run_info, "author", "")
-                                           if _reg_run_info else ""),
-                                "total_chapters": (len(_reg_run_info.chapters)
-                                                   if _reg_run_info else 0),
-                                "chapters": _reg_run_chapters,
-                                "client_id": _reg_job.get("client_id", ""),
-                                "status": _reg_status,
-                                "is_running": True,
-                                "progress_current": _reg_job.get("progress_current", 0),
-                                "progress_total": _reg_job.get("progress_total", 0),
-                                "opt_progress_current": _reg_job.get("opt_progress_current", 0),
-                                "opt_progress_total": _reg_job.get("opt_progress_total", 0),
-                            })
-                        # Stale: the worker died with the dyno. Demote to
-                        # analyzed/optimized and fall through to the
-                        # reconstructed-chapters response below.
-                        with _jobs_lock:
-                            _reg_job["status"] = ("optimized"
-                                                  if _reg_job.get("ai_optimized")
-                                                  else "analyzed")
-                        _reg_status = _reg_job["status"]
+                        return jsonify({
+                            "existing_job_id": _reg_jid,
+                            "status": _reg_status,
+                            "is_running": True,
+                            "progress_current": _reg_job.get("progress_current", 0),
+                            "progress_total": _reg_job.get("progress_total", 0),
+                            "opt_progress_current": _reg_job.get("opt_progress_current", 0),
+                            "opt_progress_total": _reg_job.get("opt_progress_total", 0),
+                        })
                     _reg_info = _reg_job["info"]
                     _lang_reg = (getattr(_reg_info, "language", None) or "it")[:2].lower()
                     _reg_chapters = []
@@ -8872,21 +8718,16 @@ def api_analyze():
                   browser_lang=jobs[job_id].get("browser_lang", ""))
 
     _lang_new = (getattr(info, "language", None) or "it")[:2].lower()
-    # ARIA: build the complete chapter catalog ONCE via the shared helper and
-    # stash it on the job + registry. This is the authoritative "every chapter
-    # in the book" list — separate from chapter_mp3s (the generated playlist).
-    # Persisted in the download-token snapshot + durable registry so it
-    # survives Render restarts (see _save_tokens / _save_job_registry /
-    # _reconstruct_job_from_storj / generation_engine._create_download_token).
-    chapters = _build_chapter_catalog(info)
-    _total_secs_new = sum((c.get("estimated_minutes", 0) or 0) * 60.0 for c in chapters)
-    jobs[job_id]["chapter_catalog"] = chapters
-    jobs[job_id]["total_chapters"] = len(chapters)
-    try:
-        _register_job_and_flush(job_id, chapter_catalog=chapters,
-                                total_chapters=len(chapters))
-    except Exception:
-        pass
+    chapters = []
+    _total_secs_new = 0.0
+    for ch in info.chapters:
+        _secs = _estimate_chapter_seconds(ch, _lang_new)
+        _total_secs_new += _secs
+        chapters.append({
+            "index": ch.index, "title": ch.title,
+            "words": ch.word_count, "chars": ch.char_count,
+            "estimated_minutes": round(_secs / 60.0, 1),
+        })
     # Override total estimated minutes for response consistency with per-chapter values.
     _total_minutes_new = round(_total_secs_new / 60.0, 1)
 
@@ -9511,48 +9352,6 @@ def api_export_abm(job_id):
                                       download_name=download_name))
 
 
-def _resolve_selection(info, selected_chapters, job):
-    """Three-tier chapter selection resolver.
-
-    After a Storj reconstruction, info.chapters can be renumbered, so the
-    frontend's indices (from the durable chapter_catalog) may not match.
-    Tier 1: exact index match.
-    Tier 2: match by catalog title.
-    Tier 3: positional fallback (catalog order == parse order).
-    Returns (filtered_chapters, method) where method is "all"/"index"/"title"/"position"/"none".
-    """
-    all_chs = list(getattr(info, "chapters", []) or [])
-    if not selected_chapters:
-        return all_chs, "all"
-    sel = set(selected_chapters)
-    # tier 1: exact index match
-    hit = [ch for ch in all_chs if ch.index in sel]
-    if hit:
-        return hit, "index"
-    # tier 2: match by catalog title
-    catalog = job.get("chapter_catalog") or []
-    want_titles = {
-        (c.get("title") or "").strip().lower()
-        for c in catalog if c.get("index") in sel
-    }
-    want_titles.discard("")
-    if want_titles:
-        hit = [ch for ch in all_chs
-               if (getattr(ch, "title", "") or "").strip().lower() in want_titles]
-        if hit:
-            _jid = job.get("job_id", "")
-            print(f"[{_jid}] selection resolved by TITLE (index mismatch after reparse)", flush=True)
-            return hit, "title"
-    # tier 3: positional fallback (catalog order == parse order)
-    by_pos = {c.get("index"): i for i, c in enumerate(catalog)}
-    positions = sorted(by_pos[i] for i in sel if i in by_pos)
-    hit = [all_chs[p] for p in positions if 0 <= p < len(all_chs)]
-    if hit:
-        print("selection resolved POSITIONALLY", flush=True)
-        return hit, "position"
-    return [], "none"
-
-
 @app.route("/api/generate", methods=["POST"])
 def api_generate():
     data = request.json
@@ -10071,53 +9870,17 @@ def api_generate():
         if speechify_emotion:
             job["speechify_emotion"] = speechify_emotion
 
-    #  -  -  ARIA v9: selection validation BEFORE the atomic status claim  -  -
-    # All selection validation (index mismatch, max_text_chars) happens HERE,
-    # while status is still "analyzed"/"done". This prevents any early return
-    # from leaving the job permanently stuck in "generating" with no thread.
+    #  -  -  Atomic concurrency check + status claim  -  -
     client_id = job.get("client_id", "")
     client_ip = job.get("client_ip", "")
-    info = job["info"]
-
-    # ── 1.3: Three-tier selection resolver ──
-    job["selected_chapters"] = selected_chapters  # store for ABM export
-    filtered, resolve_method = _resolve_selection(info, selected_chapters, job)
-    if resolve_method == "none":
-        all_chs = list(getattr(info, "chapters", []) or [])
-        print(f"[{job_id}] SELECTION MISMATCH requested={selected_chapters} "
-              f"available={[ch.index for ch in all_chs][:200]}", flush=True)
-        return jsonify({
-            "error": "Chapter selection no longer matches this book's parsed chapters. "
-                     "Reopen the chapter list and pick again.",
-            "error_code": "chapter_index_mismatch",
-            "requested": selected_chapters,
-            "available": [ch.index for ch in all_chs][:200],
-        }), 400
-    if resolve_method in ("index", "title", "position"):
-        # Create a lightweight copy of info with filtered chapters
-        info = copy(info)
-        info.chapters = filtered
-        info.total_words = sum(ch.word_count for ch in filtered)
-        info.estimated_duration_minutes = info.total_words / 150
-
-    # ── 1.1: max_text_chars cap check BEFORE the claim ──
-    max_text_chars = _effective_max_text_chars(voice, job)
-    selected_chars = sum(ch.char_count for ch in info.chapters)
-    if selected_chars > max_text_chars:
-        _refund_payment_on_orphan(job_id, job, "selection_too_large")
-        try: gemini_tts.release_reservation(job_id)
-        except Exception: pass
-        return jsonify({
-            "error": f"Selection too large: {selected_chars:,} characters "
-                     f"(limit {max_text_chars:,}). Please reduce the chapter selection.",
-            "error_code": "selection_too_large",
-            "chars_selected": selected_chars,
-            "chars_limit": max_text_chars,
-        }), 413
-
-    #  -  -  Atomic concurrency check + status claim  -  -
     with _jobs_lock:
         # ARIA: allow re-generation of completed, failed, or interrupted jobs.
+        # The gen_epoch mechanism creates a new output_{epoch}/ directory for
+        # each generation, preserving previous audio. This eliminates the need
+        # for the frontend to call resetToChapters (which destroyed previous
+        # chapter_mp3s data). Including "error" and "interrupted" here makes
+        # the Retry button work — the user can re-generate without re-uploading
+        # the EPUB after a failure or a server-restart interruption.
         if job["status"] not in ("analyzed", "optimized", "done", "error", "interrupted", "cancelled"):
             _refund_payment_on_orphan(job_id, job, "status_conflict")
             try: gemini_tts.release_reservation(job_id)
@@ -10136,19 +9899,9 @@ def api_generate():
                 }), 429
         # Atomically claim the slot
         job["status"] = "generating"
-        job["_thread_started"] = False  # set True after thread.start() succeeds
         # Save voice in job for logging
         job["voice"] = voice
         job["platform"] = _client_platform()
-        job["start_time"] = time.time()
-
-    # ── 1.2: Revert guard for every post-claim return ──
-    def _unclaim(reason):
-        with _jobs_lock:
-            if job.get("status") == "generating" and not job.get("_thread_started"):
-                job["status"] = "optimized" if job.get("ai_optimized") else "analyzed"
-                job["progress_message"] = f"Not started: {reason}"
-        print(f"[{job_id}] generate unclaimed -> {reason}", flush=True)
 
     # Batch mobile: il job sopravvive a schermo bloccato (no auto-cancel per
     # heartbeat, la guardia salta se email_registered) e al COMPLETE crea il
@@ -10163,12 +9916,59 @@ def api_generate():
         job["notify_download_type"] = "podcast"
         job["notify_base_url"] = podcast_base_url
 
+    info = job["info"]
+
+    # Filter chapters if a subset was selected
+    job["selected_chapters"] = selected_chapters  # store for ABM export
+    if selected_chapters:
+        selected_set = set(selected_chapters)
+        filtered = [ch for ch in info.chapters if ch.index in selected_set]
+        if not filtered:
+            return jsonify({"error": "No chapters selected."}), 400
+        # Create a lightweight copy of info with filtered chapters
+        info = copy(info)
+        info.chapters = filtered
+        info.total_words = sum(ch.word_count for ch in filtered)
+        info.estimated_duration_minutes = info.total_words / 150
+
+    # Hard cap on TTS-bound text size for THIS run: applied solo alla selezione.
+    # 1 char ~= 50-100 byte di MP3, quindi il limite mantiene l'output sotto
+    # ~75-150 MB. Per voci PREMIUM (gemini:) usiamo MAX_GEMINI_TEXT_CHARS
+    # (default 800k, piu' restrittivo) data la maggior pressione su cost/RPM.
+    max_text_chars = _effective_max_text_chars(voice, job)
+    selected_chars = sum(ch.char_count for ch in info.chapters)
+    if selected_chars > max_text_chars:
+        with _jobs_lock:
+            if job["status"] == "generating":
+                job["status"] = "optimized" if job.get("ai_optimized") else "analyzed"
+        # Rete di sicurezza: i cap a monte (create_order_gemini + blocco
+        # pre-consume) dovrebbero impedire di arrivare qui con un pagamento gia`
+        # consumato. Resta pero` il caso del testo espanso dall'ottimizzazione
+        # LLM oltre il cap DOPO il consume: in quel caso rimborsa il pagamento e
+        # rilascia la prenotazione budget Gemini, cosi` non si trattiene denaro
+        # per un job non generabile.
+        _refund_payment_on_orphan(job_id, job, "selection_too_large")
+        try: gemini_tts.release_reservation(job_id)
+        except Exception: pass
+        return jsonify({
+            "error": f"Selection too large: {selected_chars:,} characters "
+                     f"(limit {max_text_chars:,}). Please reduce the chapter selection.",
+            "error_code": "selection_too_large",
+            "chars_selected": selected_chars,
+            "chars_limit": max_text_chars,
+        }), 413
+
     #  -  -  Pre-allocazione atomica budget Google Cloud TTS  -  -
+    # Verifica E deduce immediatamente i caratteri richiesti, così conversioni
+    # parallele non possono passare lo stesso check. Il refund della parte
+    # non consumata avviene in run_generation in caso di errore/cancellazione.
     if google_tts is not None and google_tts.is_google_voice(voice):
         total_chars_needed = sum(ch.char_count for ch in info.chapters)
         ok, remaining_after = google_tts.reserve_chars(total_chars_needed)
         if not ok:
-            _unclaim("google_tts_budget")
+            with _jobs_lock:
+                if job["status"] == "generating":
+                    job["status"] = "optimized" if job.get("ai_optimized") else "analyzed"
             return jsonify({
                 "error": f"Google TTS monthly limit: {remaining_after:,} chars remaining, "
                          f"but this book needs {total_chars_needed:,} chars.",
@@ -10176,12 +9976,25 @@ def api_generate():
                 "chars_needed": total_chars_needed,
                 "chars_remaining": remaining_after,
             }), 429
+        # Memorizza i caratteri prenotati nel job per il refund
         job["google_tts_reserved"] = total_chars_needed
         print(f"[{job_id}] Google TTS: reserved {total_chars_needed:,} chars "
               f"(remaining: {remaining_after:,})")
+        # Invalida la cache voci: se il budget si avvicina allo zero, le voci
+        # potrebbero scomparire al prossimo /api/voices
         _invalidate_voices_cache()
 
-    # Consumo quota: qui, non prima.
+    # Consumo quota: qui, non prima. Fra il claim atomico e questo punto ci
+    # sono ancora uscite sincrone che abortiscono il job senza avviarlo
+    # (selezione capitoli vuota, cap selection_too_large con refund pagamento)
+    # e nessuna prevede un rimborso quota equivalente (scelta di progetto:
+    # si consuma tardi, non si restituisce mai). Da qui in poi non resta
+    # alcun `return` prima di thread.start(): il job e' ormai certo di
+    # partire. Idempotente per job_id.
+    # Con quota disattivata (ABM_FREE_QUOTA_EUR_PER_MONTH=0) NON si consuma:
+    # riempire il contatore in silenzio significa che, alzando il limite a mese
+    # in corso, molti client risulterebbero gia' esauriti e verrebbero addebitati
+    # subito. Il client_id e' lo stesso usato dal gate (`_quota_client_id`).
     _fq_charge = job.pop("_free_quota_charge", None)
     if _fq_charge is not None and free_quota.limit_eur() > 0:
         try:
@@ -10193,30 +10006,14 @@ def api_generate():
 
     # Increment generation epoch to invalidate any stale threads
     job["gen_epoch"] = job.get("gen_epoch", 0) + 1
-
-    # ── 1.2: Wrap thread spawn in try/except with _unclaim ──
-    try:
-        thread = threading.Thread(
-            target=run_generation, args=(job_id, info, voice, rate, single_file),
-            kwargs={'output_format': output_format, 'podcast_base_url': podcast_base_url,
-                    'gemini_style_instruction': job.get("gemini_style_instruction"),
-                    'speechify_emotion': job.get("speechify_emotion")},
-            daemon=True
-        )
-        thread.start()
-        job["_thread_started"] = True  # mark as actually running
-    except Exception as _thread_err:
-        _unclaim("thread_spawn_failed")
-        print(f"[{job_id}] thread spawn failed: {_thread_err}", flush=True)
-        return jsonify({
-            "error": "The server accepted the job but couldn't start it. Try again in a minute.",
-            "error_code": "thread_spawn_failed",
-        }), 500
-
-    # ── 1.4: One-line start log ──
-    print(f"[{job_id}] GENERATION STARTED voice={voice} lang={narration_language} "
-          f"chapters={[ch.index for ch in info.chapters]} bgm={bgm_mode}", flush=True)
-
+    thread = threading.Thread(
+        target=run_generation, args=(job_id, info, voice, rate, single_file),
+        kwargs={'output_format': output_format, 'podcast_base_url': podcast_base_url,
+                'gemini_style_instruction': job.get("gemini_style_instruction"),
+                'speechify_emotion': job.get("speechify_emotion")},
+        daemon=True
+    )
+    thread.start()
     _log_activity(job_id, job.get("original_filename", ""), "GENERATE",
                   client_id, client_ip, voice,
                   browser_lang=job.get("browser_lang", ""),
@@ -10643,25 +10440,6 @@ def _purge_job_completely(job_id):
     except Exception as e:
         print(f"[purge] {job_id} cold cleanup failed (non-fatal): {e}")
 
-    # ARIA: purge Hindi comprehension artifacts (summaries + glossary, v1 + v2)
-    try:
-        if storage_backend.is_enabled():
-            for prefix in (
-                f"summaries/{job_id}/", f"summaries/v2/{job_id}/",
-                f"summaries/v3/{job_id}/", f"summaries/v4/{job_id}/",
-                f"summaries/v5/{job_id}/", f"summaries/v6/{job_id}/",
-                f"summaries/v7/{job_id}/", f"summaries/v8/{job_id}/",
-                f"summaries/v9/{job_id}/", f"summaries/v10/{job_id}/",
-                f"summaries/v11/{job_id}/", f"summaries/v12/{job_id}/",
-                f"glossary/{job_id}/", f"glossary/v2/{job_id}/",
-            ):
-                try:
-                    storage_backend.delete_prefix(prefix)
-                except Exception as _e:
-                    print(f"[purge] {job_id} Hindi cleanup failed for {prefix} (non-fatal): {_e}")
-    except Exception:
-        pass
-
     print(f"[purge] {job_id} hard-delete complete")
 
     # ARIA: record the job_id in the persisted _deleted_job_ids set so
@@ -10776,68 +10554,59 @@ def api_job_chapters(job_id):
         # ── ARIA WEAK fallback ──
         # Only reached if Storj reconstruction itself failed (e.g.
         # epub_s3_key missing from both the registry and the token snapshot,
-        # or the storage backend is disabled). Use the persisted
-        # chapter_catalog if present (preferred — it has the full book). Only
-        # synthesize rows from chapter_mp3s as a LAST resort, and flag the
-        # response as chapter_catalog_incomplete so the frontend knows the
-        # full catalog isn't available.
+        # or the storage backend is disabled). Return what we have from the
+        # token snapshot so the frontend can at least show the chapter
+        # browser + play existing audio. This path loses title provenance
+        # (author="" and total_chapters may be 1) — that's why it's a
+        # fallback, not the primary path.
         chapter_mp3s = job.get("chapter_mp3s") or []
-        _catalog = job.get("chapter_catalog") or []
-        _stored_total = job.get("total_chapters", 0)
-        # Prefer the persisted full catalog; only fall back to chapter_mp3s
-        # rows when no durable catalog exists anywhere.
-        if _catalog:
-            _resp_chapters = _catalog
-            _incomplete = False
-        elif chapter_mp3s:
-            _resp_chapters = [
-                {"index": ch["index"], "title": ch["title"], "words": 0,
-                 "chars": 0, "estimated_minutes": round(ch.get("duration_ms", 0) / 60000.0, 1)}
-                for ch in chapter_mp3s
-            ]
-            _incomplete = True
-        else:
-            resp = jsonify({"error": "Book data no longer available. Please re-upload the file."})
-            resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
-            return resp, 400
-        # total_chapters: NEVER report len(chapter_mp3s) when a larger
-        # persisted count exists — that was the root cause of "4 of 4".
-        _total = _stored_total or len(_catalog) or len(chapter_mp3s)
-        resp = jsonify({
-            "job_id": job_id,
-            "title": job.get("book_title", "") or job.get("title", ""),
-            "author": "",
-            "language": "",
-            "total_chapters": _total,
-            "total_words": 0,
-            "total_chars": 0,
-            "estimated_minutes": round(sum(ch.get("duration_ms", 0) for ch in chapter_mp3s) / 60000.0, 1),
-            "chapters": _resp_chapters,
-            "chapter_catalog_incomplete": _incomplete,
-            "has_cover": bool(job.get("cover_s3_key") or job.get("cover_thumb")),
-            "selected_chapters": _generated_chapter_indices(chapter_mp3s),
-            "chapter_mp3s": chapter_mp3s,
-            "transcript_cues": job.get("transcript_cues", {}) or {},
-            "bgm_mode": job.get("bgm_mode", "off"),
+        if chapter_mp3s:
+            return jsonify({
+                "job_id": job_id,
+                "title": job.get("book_title", "") or job.get("title", ""),
+                "author": "",
+                "language": "",
+                "total_chapters": job.get("total_chapters", len(chapter_mp3s)),
+                "total_words": 0,
+                "total_chars": 0,
+                "estimated_minutes": round(sum(ch.get("duration_ms", 0) for ch in chapter_mp3s) / 60000.0, 1),
+                "chapters": [
+                    {"index": ch["index"], "title": ch["title"], "words": 0,
+                     "chars": 0, "estimated_minutes": round(ch.get("duration_ms", 0) / 60000.0, 1)}
+                    for ch in chapter_mp3s
+                ],
+                "has_cover": False,
+                # ARIA: derive from chapter_mp3s (merged + authoritative).
+                "selected_chapters": sorted({
+                    ch["index"] for ch in chapter_mp3s
+                    if isinstance(ch, dict) and "index" in ch
+                }),
+                "chapter_mp3s": chapter_mp3s,
+                # ARIA: word-level transcript cues. The job dict here came
+                # from a download-token snapshot (transcript_cues restored
+                # by _reconstruct_job_from_storj OR carried on the token
+                # snapshot directly). Keys may be int (in-memory) or string
+                # (JSON-serialized token) — both are valid for the frontend
+                # to consume. May be {} for older jobs or non-edge voices.
+                "transcript_cues": job.get("transcript_cues", {}) or {},
+                # ARIA: BGM delivery mode — tells the frontend whether to
+                # fetch /api/bgm_cues for runtime mixing.
+                "bgm_mode": job.get("bgm_mode", "off"),
+            })
+        return jsonify({"error": "Book data no longer available. Please re-upload the file."}), 400
+
+    chapters = []
+    _total_secs = 0.0
+    for ch in info.chapters:
+        _secs = (ch.word_count or 0) / 2.5  # 150 wpm = 2.5 words/sec
+        _total_secs += _secs
+        chapters.append({
+            "index": ch.index, "title": ch.title,
+            "words": ch.word_count, "chars": ch.char_count,
+            "estimated_minutes": round(_secs / 60.0, 1),
         })
-        resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
-        return resp
 
-    # ── ARIA STRONG path ──
-    # info.chapters is available (either in-memory or freshly re-parsed from
-    # Storj). Build/refresh the chapter_catalog, then return it as the
-    # authoritative `chapters` list. chapter_mp3s is the generated playlist
-    # (only chapters with audio) — NEVER used as the full catalog here.
-    chapters = job.get("chapter_catalog") or _build_chapter_catalog(info)
-    if not job.get("chapter_catalog"):
-        try:
-            with _jobs_lock:
-                jobs[job_id]["chapter_catalog"] = chapters
-        except Exception:
-            pass
-    _total_secs = sum((c.get("estimated_minutes", 0) or 0) * 60.0 for c in chapters)
-
-    resp = jsonify({
+    return jsonify({
         "job_id": job_id,
         "title": info.title,
         "author": info.author,
@@ -10847,21 +10616,33 @@ def api_job_chapters(job_id):
         "total_chars": info.total_chars,
         "estimated_minutes": round(_total_secs / 60.0, 1),
         "chapters": chapters,
-        "has_cover": bool(job.get("cover_path") or job.get("cover_hires")
-                          or job.get("cover_s3_key") or job.get("cover_thumb")),
-        # ARIA: selected_chapters is derived from chapter_mp3s (the MERGED,
+        "has_cover": bool(job.get("cover_path") or job.get("cover_hires")),
+        # ARIA: derive selected_chapters from chapter_mp3s (the MERGED,
         # authoritative source across all generations). The job's
         # `selected_chapters` field is OVERWRITTEN per generation (only has
         # the latest batch), so using it directly would miss chapters from
-        # previous "More chapters" runs.
-        "selected_chapters": (_generated_chapter_indices(job.get("chapter_mp3s"))
-                              or (job.get("selected_chapters") or [])),
+        # previous "More chapters" runs. chapter_mp3s is correctly merged
+        # in generation_engine.py (prev_mp3s + new_mp3s), so its indices are
+        # the complete set of chapters currently in the audiobook.
+        "selected_chapters": sorted({
+            ch["index"] for ch in (job.get("chapter_mp3s") or [])
+            if isinstance(ch, dict) and "index" in ch
+        }) or (job.get("selected_chapters") or []),
+        # Per-chapter MP3 metadata. Present when the job was generated with
+        # output_format='mp3' + single_file=False (ARIA per-chapter mode).
+        # Each entry: {index, title, filename, duration_ms, start_ms, end_ms}.
+        # The frontend uses this to build a playlist player with exact
+        # chapter boundaries + stream each chapter individually.
         "chapter_mp3s": job.get("chapter_mp3s") or [],
+        # ARIA: word-level transcript cues for karaoke-style highlighting.
+        # Shape: {chapter_index: [[startMs, endMs, word], ...]} — flat arrays
+        # for compact JSON. May be {} (older jobs, non-edge voices, or if
+        # the boundary stream fell back to communicate.save()). The frontend
+        # checks per-chapter emptiness and shows "Transcript not available".
         "transcript_cues": job.get("transcript_cues", {}) or {},
+        # ARIA: BGM delivery mode — "off" | "runtime" | "prerender".
         "bgm_mode": job.get("bgm_mode", "off"),
     })
-    resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
-    return resp
 
 
 @app.route("/api/chapter_mp3/<job_id>/<int:chapter_index>")
@@ -11212,995 +10993,6 @@ def api_bgm_debug(job_id, chapter_index):
     })
 
 
-# ═══════════════════════════════════════════════════════════════════
-# ARIA: Hindi comprehension endpoints (summary, glossary, explain)
-# ═══════════════════════════════════════════════════════════════════
-
-# ── ARIA: Health/readiness endpoint ──
-# Always ready — the Flask server accepting connections IS readiness.
-# The old _mark_recovery_complete() pattern blocked startup if any
-# background thread hung, causing Render health check timeouts.
-_RECOVERY_COMPLETE = True
-
-@app.route("/api/health", methods=["GET"])
-def api_health():
-    """Lightweight readiness check. Returns quickly."""
-    storage_ready = True
-    try:
-        import storage_backend
-        storage_ready = storage_backend.is_enabled()
-    except Exception:
-        storage_ready = False
-
-    resp = jsonify({
-        "process": "alive",
-        "ready": _RECOVERY_COMPLETE,
-        "storage_ready": storage_ready,
-        "recovery_complete": _RECOVERY_COMPLETE,
-        "jobs_loaded": len(jobs),
-        "tokens_loaded": len(_download_tokens),
-        "registry_loaded": len(_job_registry),
-        "version": "10.0",
-        "timestamp": int(time.time()),
-    })
-    resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
-    return resp
-
-@app.route("/api/ai/health", methods=["GET"])
-def api_ai_health():
-    """Quick health check for the Groq AI backend.
-
-    Returns { groq_key_present, models_tried, working_model, error }.
-    Implemented as one tiny 5-token completion through groq_chat. This is the
-    first thing to hit whenever a Hindi feature breaks — it tells you whether
-    the API key is present and which model is actually working.
-    """
-    try:
-        import groq_client as _gc
-        result = _gc.groq_health()
-        resp = jsonify(result)
-        resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
-        return resp
-    except Exception:
-        import traceback
-        traceback.print_exc()
-        return jsonify({"groq_key_present": False, "models_tried": [],
-                        "working_model": None, "error": "internal"}), 500
-
-# ═══════════════════════════════════════════════════════════════════
-# ARIA: Chapter summary — windowed map-reduce (v12)
-# ═══════════════════════════════════════════════════════════════════
-
-_NON_INDIC_SCRIPT_RE = re.compile(
-    r"[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af\u0600-\u06ff\u0400-\u04ff]"
-)
-
-_OUTLINE_LEAK_RE = re.compile(r'(^\s*\d+\.\s|^\s*[-•·]\s|कथन:|रूपक:)', re.MULTILINE)
-_META_PHRASE_RE = re.compile(r'^(This chapter|This passage|Summary of|Overview of)', re.IGNORECASE | re.MULTILINE)
-
-
-def _summary_groq_call(system, user, *, temperature, max_tokens,
-                       frequency_penalty=0.0, presence_penalty=0.0):
-    """Thin wrapper over groq_client.groq_chat. Returns (text, error_code)."""
-    import groq_client as _gc
-    return _gc.groq_chat(system, user, temperature=temperature,
-                         max_tokens=max_tokens, frequency_penalty=frequency_penalty,
-                         presence_penalty=presence_penalty)
-
-
-# ── STEP 0: Segment ──
-
-def _segment_windows(chapter_text, target_words=350, overlap_words=50):
-    """Split chapter text into bounded overlapping windows.
-
-    Invariants:
-    - Every loop iteration advances the cursor.
-    - Sentence boundaries nearest the target size are preferred.
-    - The chapter tail is always included.
-    - Overlap can never equal or exceed the window size.
-    """
-    words = chapter_text.split()
-    n = len(words)
-
-    if n == 0:
-        return []
-
-    target_words = max(100, int(target_words))
-    overlap_words = max(
-        0,
-        min(int(overlap_words), target_words - 1),
-    )
-
-    sentence_ends = []
-    for i, word in enumerate(words):
-        if re.search(r'[.!?]["\')\]]*$', word):
-            sentence_ends.append(i + 1)
-
-    windows = []
-    start = 0
-    win_num = 1
-
-    while start < n:
-        target_end = min(start + target_words, n)
-
-        if target_end >= n:
-            best_end = n
-        else:
-            # A candidate must be far enough ahead that subtracting overlap
-            # cannot leave the cursor at the same position.
-            min_end = min(
-                start + max(50, overlap_words + 1),
-                n,
-            )
-            max_end = min(target_end + 50, n)
-
-            candidates = [
-                sentence_end
-                for sentence_end in sentence_ends
-                if min_end <= sentence_end <= max_end
-            ]
-
-            if candidates:
-                best_end = min(
-                    candidates,
-                    key=lambda sentence_end: abs(
-                        sentence_end - target_end
-                    ),
-                )
-            else:
-                best_end = target_end
-
-        if best_end <= start:
-            best_end = min(start + target_words, n)
-
-        window_text = " ".join(words[start:best_end]).strip()
-
-        if window_text:
-            windows.append((win_num, window_text))
-            win_num += 1
-
-        if best_end >= n:
-            break
-
-        next_start = best_end - overlap_words
-
-        # Absolute progress invariant. Never permit next_start <= start.
-        if next_start <= start:
-            next_start = best_end
-
-        start = next_start
-
-    return windows
-
-
-# ── STEP 1: Map (per-window LLM extraction) ──
-
-_MAP_SYSTEM_PROMPT = (
-    "You are an event extraction engine. You output ONLY valid JSON.\n\n"
-    "Schema:\n"
-    '{"window": <int>, "events": [{"what": "<one sentence, past tense, what happened>", '
-    '"speaker": "<name or \'narrator\' or \'unknown\'>", "addressee": "<name or \'unknown\'>", '
-    '"quote": "<verbatim substring from the window, <=15 words>", '
-    '"names_present": ["..."]}]}\n\n'
-    "Rules:\n"
-    "- Use ONLY this window. Do not summarize, do not interpret, do not add context.\n"
-    "- 1-5 events per window. If nothing happens, return empty events array.\n"
-    '- "quote" MUST be an exact substring of the window text.\n'
-    "- CRITICAL: if a character is reading a book, telling a story, or recounting a "
-    "dream, people inside that inner story are listed in names_present with a "
-    '"(in-story)" suffix and must NEVER be used as speaker or addressee of the outer scene.\n'
-    "- If a character begins speaking, every 'I' inside that speech belongs to THAT character."
-)
-
-def _map_window(window_num, window_text):
-    """Extract events from one window. Returns (events_list, error_or_none)."""
-    import json as _json
-
-    user_msg = f"Window {window_num}:\n<<<{window_text}>>>"
-    raw, code = _summary_groq_call(
-        _MAP_SYSTEM_PROMPT, user_msg,
-        temperature=0.1, max_tokens=1024,
-        frequency_penalty=0.0, presence_penalty=0.0)
-
-    if not raw:
-        return [], code or "map_empty"
-
-    # Strip markdown fences
-    raw = raw.strip()
-    if raw.startswith("```"):
-        raw = re.sub(r'^```(?:json)?\s*', '', raw)
-        raw = re.sub(r'\s*```$', '', raw)
-
-    try:
-        parsed = _json.loads(raw)
-    except Exception:
-        # Retry at temp 0
-        raw2, code2 = _summary_groq_call(
-            _MAP_SYSTEM_PROMPT, user_msg,
-            temperature=0.0, max_tokens=1024)
-        if not raw2:
-            return [], code2 or "map_parse_failed"
-        raw2 = raw2.strip()
-        if raw2.startswith("```"):
-            raw2 = re.sub(r'^```(?:json)?\s*', '', raw2)
-            raw2 = re.sub(r'\s*```$', '', raw2)
-        try:
-            parsed = _json.loads(raw2)
-        except Exception:
-            # Placeholder: first sentence of window
-            first_sent = window_text.split('.')[0][:200] + "."
-            return [{"what": first_sent, "speaker": "unknown", "addressee": "unknown",
-                     "quote": first_sent, "names_present": []}], None
-
-    events = parsed.get("events", [])
-    if not isinstance(events, list):
-        events = []
-
-    # Validate quotes: drop events whose quote is not in the window
-    window_norm = re.sub(r'\s+', ' ', window_text.lower())
-    valid = []
-    for ev in events:
-        if not isinstance(ev, dict):
-            continue
-        quote = (ev.get("quote") or "").strip()
-        if not quote:
-            continue
-        quote_norm = re.sub(r'\s+', ' ', quote.lower())
-        if quote_norm not in window_norm:
-            continue
-        if not ev.get("speaker"):
-            ev["speaker"] = "unknown"
-        if not ev.get("addressee"):
-            ev["addressee"] = "unknown"
-        if not ev.get("names_present"):
-            ev["names_present"] = []
-        valid.append(ev)
-
-    # Placeholder if zero valid events
-    if not valid:
-        first_sent = window_text.split('.')[0][:200]
-        if first_sent and not first_sent.endswith('.'):
-            first_sent += "."
-        valid = [{"what": first_sent or window_text[:200], "speaker": "unknown",
-                  "addressee": "unknown", "quote": first_sent or window_text[:200],
-                  "names_present": []}]
-
-    return valid, None
-
-
-# ── STEP 2: Ledger ──
-
-def _build_ledger(all_events):
-    """Build a numbered ledger from all window events + entity sets."""
-    ledger = []
-    entity_set = set()
-    in_story_set = set()
-
-    for ev in all_events:
-        ledger_num = len(ledger) + 1
-        ledger.append({
-            "num": ledger_num,
-            "what": ev.get("what", ""),
-            "speaker": ev.get("speaker", "unknown"),
-            "addressee": ev.get("addressee", "unknown"),
-            "names_present": ev.get("names_present", []),
-        })
-        for name in ev.get("names_present", []):
-            name = name.strip()
-            if "(in-story)" in name.lower():
-                clean = name.replace("(in-story)", "").strip()
-                if clean:
-                    in_story_set.add(clean)
-            elif name:
-                entity_set.add(name)
-        # Also add speaker and addressee to entity_set if they're proper names
-        for field in ("speaker", "addressee"):
-            val = ev.get(field, "").strip()
-            if val and val not in ("narrator", "unknown", "None", "null"):
-                entity_set.add(val)
-
-    return ledger, entity_set, in_story_set
-
-
-# ── STEP 3: Reduce (single LLM call from ledger) ──
-
-_REDUCE_SYSTEM_PROMPT = (
-    "You are a literary summarizer. Given a numbered event ledger, "
-    "write a summary in plain English prose.\n"
-    "Rules:\n"
-    "- Write 4-7 paragraphs of plain English narrative summary.\n"
-    "- Cover EVERY numbered event in order. Do not skip, do not reorder.\n"
-    "- Names marked as in-story characters are from a book/story being read "
-    "inside the chapter; mention them as such, never as participants in the main action.\n"
-    "- WRITE IN THIRD PERSON. Never use 'I' for the protagonist. Use 'the narrator' or 'Dante'.\n"
-    "- Every reported speech MUST name its speaker.\n"
-    "- When speech is nested, preserve the chain: 'X said that Y had told her that Z...'.\n"
-    "- No analysis, no moralizing, no 'this symbolizes'. Just what happened.\n"
-    "- Never begin two sentences with the same three words.\n"
-    "- The final paragraph must cover the highest-numbered events.\n"
-    "- Output ONLY the summary, nothing else."
-)
-
-def _reduce_summary(ledger, entity_set, in_story_set, chapter_title=""):
-    """Generate the final English summary from the ledger. Returns (summary, error_or_none)."""
-    import json as _json
-
-    ledger_text = _json.dumps(ledger, ensure_ascii=False, indent=2)
-    user_msg = (
-        f"Chapter: {chapter_title or 'unknown'}\n\n"
-        f"Event ledger:\n{ledger_text}\n\n"
-    )
-    if in_story_set:
-        user_msg += f"In-story characters (from a book being read inside the chapter, "
-        user_msg += f"NOT participants in the main action): {', '.join(sorted(in_story_set))}\n\n"
-    user_msg += "Write the summary."
-
-    raw, code = _summary_groq_call(
-        _REDUCE_SYSTEM_PROMPT, user_msg,
-        temperature=0.4, max_tokens=2048,
-        frequency_penalty=0.4, presence_penalty=0.0)
-
-    if not raw:
-        return "", code or "reduce_empty"
-
-    # Clean: strip markdown, preamble, fences
-    summary = _clean_summary_text(raw)
-    return summary, None
-
-
-def _clean_summary_text(text):
-    """Strip markdown, preamble lines, fences. Language-agnostic."""
-    if not text:
-        return ""
-    text = re.sub(r'\*\*(.+?)\*\*', r'\1', text)
-    text = re.sub(r'\*(.+?)\*', r'\1', text)
-    text = re.sub(r'^#+\s*', '', text, flags=re.MULTILINE)
-    text = re.sub(r'`([^`]+)`', r'\1', text)
-    _PREAMBLE_RE = re.compile(r'^(Here is|Here\'s|Sure|Certainly|Below is|Summary:)\b', re.IGNORECASE)
-    _FENCE_RE = re.compile(r'^```')
-    lines = text.split("\n")
-    kept = []
-    for ln in lines:
-        ln = ln.strip()
-        if not ln:
-            if kept and kept[-1] != "":
-                kept.append("")
-            continue
-        if _FENCE_RE.match(ln):
-            continue
-        if _PREAMBLE_RE.match(ln):
-            continue
-        kept.append(ln)
-    text = "\n".join(kept).strip()
-    text = re.sub(r'\n{3,}', '\n\n', text)
-    return text
-
-
-# ── STEP 4: Verify (deterministic, no LLM) ──
-
-def _verify_summary(summary, ledger, entity_set):
-    """Verify the summary against the ledger. Returns (ok, metrics_dict, uncovered_events)."""
-    summary_lower = summary.lower()
-
-    # Coverage: for each ledger event, check if its content words appear in the summary
-    covered = 0
-    uncovered = []
-    for ev in ledger:
-        what = ev.get("what", "")
-        speaker = ev.get("speaker", "")
-        # Extract content words (len > 3, not stop words)
-        content_words = [w.lower() for w in (what + " " + speaker).split()
-                         if len(w) > 3 and w.lower() not in
-                         {"the", "and", "but", "with", "from", "that", "this", "they",
-                          "their", "them", "then", "when", "were", "what", "have",
-                          "been", "into", "upon", "narrator", "unknown"}]
-        if any(w in summary_lower for w in content_words):
-            covered += 1
-        else:
-            uncovered.append(ev["num"])
-
-    coverage_pct = round(covered / len(ledger) * 100, 1) if ledger else 100.0
-
-    # Tail: last ledger event covered in the final paragraph
-    last_ev = ledger[-1] if ledger else None
-    tail_ok = False
-    if last_ev:
-        paras = [p.strip() for p in summary.split("\n\n") if p.strip()]
-        final_para = paras[-1].lower() if paras else ""
-        what_words = [w.lower() for w in last_ev.get("what", "").split()
-                      if len(w) > 3 and w.lower() not in
-                      {"the", "and", "but", "with", "from", "that", "this", "they",
-                       "their", "them", "then", "when", "were", "what", "have",
-                       "been", "into", "upon", "narrator", "unknown"}]
-        tail_ok = any(w in final_para for w in what_words) if what_words else True
-
-    # Degeneracy: sentence-opening 3-gram more than twice
-    sentences = re.findall(r'[^.!?]+[.!?]*', summary)
-    sentences = [s.strip() for s in sentences if s.strip()]
-    first_3 = {}
-    for s in sentences:
-        toks = s.lower().split()[:3]
-        if len(toks) == 3:
-            key = " ".join(toks)
-            first_3[key] = first_3.get(key, 0) + 1
-    degeneracy_failed = any(c > 2 for c in first_3.values())
-
-    # Entity coverage
-    entities_present = sum(1 for e in entity_set if e.lower() in summary_lower)
-    entity_pct = round(entities_present / len(entity_set) * 100, 1) if entity_set else 100.0
-
-    metrics = {
-        "coverage_pct": coverage_pct,
-        "tail_ok": tail_ok,
-        "degeneracy_failed": degeneracy_failed,
-        "entity_pct": entity_pct,
-        "total_events": len(ledger),
-        "covered_events": covered,
-    }
-
-    ok = coverage_pct >= 85.0 and tail_ok and not degeneracy_failed
-    return ok, metrics, uncovered
-
-
-# ── Main orchestrator ──
-
-def _generate_chapter_summary(chapter_text, chapter_title=""):
-    """Windowed map-reduce summary generation. Never raises.
-
-    Returns (summary, quality, error_code).
-    - summary: non-empty English prose, or "" on failure.
-    - quality: "ok", "degraded", or "error".
-    - error_code: None on success, machine code on failure.
-    """
-    import traceback
-    try:
-        return _generate_chapter_summary_inner(chapter_text, chapter_title)
-    except Exception:
-        traceback.print_exc()
-        return ("", "error", "internal")
-
-
-def _generate_chapter_summary_inner(chapter_text, chapter_title=""):
-    """Inner implementation."""
-    import time as _time
-    _t0 = _time.time()
-
-    if not chapter_text or not chapter_text.strip():
-        print(f"[summary] elapsed={_time.time() - _t0:.1f}s status=empty_summary")
-        return ("", "error", "empty_summary")
-
-    word_count = len(chapter_text.split())
-    chap_id = chapter_title or f"words={word_count}"
-    print(f"summary_input chapter={chap_id} words={word_count}")
-
-    # ── STEP 0: Segment ──
-    windows = _segment_windows(chapter_text)
-    n_windows = len(windows)
-    if n_windows == 0:
-        return ("", "error", "segmentation_failed")
-
-    # Verify last window contains the end of the chapter
-    last_win_text = windows[-1][1]
-    last_win_norm = re.sub(r'\s+', ' ', last_win_text.lower().strip())[-200:]
-    chapter_norm = re.sub(r'\s+', ' ', chapter_text.lower().strip())[-200:]
-    if last_win_norm not in chapter_norm and chapter_norm not in last_win_norm:
-        print(f"[summary] WARN: last window does not contain chapter ending")
-
-    print(f"[summary] STEP 0: {n_windows} windows, word_count={word_count}")
-
-    # ── STEP 1: Map (sequential, max 4 concurrent would be ideal but
-    #   sequential is simpler and avoids rate-limit issues on free tier) ──
-    all_events = []
-    for win_num, win_text in windows:
-        events, err = _map_window(win_num, win_text)
-        if err:
-            print(f"[summary] STEP 1: window {win_num} error={err}")
-        if events:
-            all_events.extend(events)
-        print(f"[summary] STEP 1: window {win_num} → {len(events)} events")
-
-    if not all_events:
-        return ("", "error", "map_all_windows_empty")
-
-    # ── STEP 2: Ledger ──
-    ledger, entity_set, in_story_set = _build_ledger(all_events)
-    print(f"[summary] STEP 2: ledger={len(ledger)} events, "
-          f"entities={len(entity_set)}, in_story={len(in_story_set)}")
-
-    # ── STEP 3: Reduce ──
-    summary, err = _reduce_summary(ledger, entity_set, in_story_set, chapter_title)
-    if not summary:
-        return ("", "error", err or "reduce_empty")
-    print(f"[summary] STEP 3: summary len={len(summary)} words={len(summary.split())}")
-
-    # ── STEP 4: Verify ──
-    ok, metrics, uncovered = _verify_summary(summary, ledger, entity_set)
-    print(f"[summary] STEP 4: ok={ok} coverage={metrics['coverage_pct']}% "
-          f"tail={metrics['tail_ok']} degeneracy={metrics['degeneracy_failed']} "
-          f"entity={metrics['entity_pct']}%")
-
-    if not ok:
-        # Retry reduce once with uncovered events pinned
-        retry_msg = (
-            f"YOU OMITTED THESE EVENTS (numbers {uncovered[:20]}). "
-            f"Coverage was {metrics['coverage_pct']}%. "
-            f"Tail covered: {metrics['tail_ok']}. "
-            f"Rewrite covering EVERY event."
-        )
-        print(f"[summary] STEP 4: retrying reduce (uncovered={uncovered[:10]})")
-        summary2, err2 = _reduce_summary(ledger, entity_set, in_story_set, chapter_title)
-        if summary2:
-            ok2, metrics2, _ = _verify_summary(summary2, ledger, entity_set)
-            print(f"[summary] STEP 4 retry: ok={ok2} coverage={metrics2['coverage_pct']}%")
-            if ok2 or metrics2["coverage_pct"] >= metrics["coverage_pct"]:
-                summary = summary2
-                ok, metrics = ok2, metrics2
-
-    if not ok:
-        print(f"[summary] summary_quality_degraded: "
-              f"coverage={metrics['coverage_pct']}% tail={metrics['tail_ok']} "
-              f"degeneracy={metrics['degeneracy_failed']} "
-              f"elapsed={_time.time() - _t0:.1f}s")
-        # Ship the best attempt — never error for quality
-        return (summary, "degraded", None)
-
-    # Log the structured summary line
-    import json as _json
-    log_line = _json.dumps({
-        "chapter": chap_id,
-        "source_words": word_count,
-        "windows": n_windows,
-        "total_events": len(ledger),
-        "coverage_pct": metrics["coverage_pct"],
-        "tail_ok": metrics["tail_ok"],
-        "entity_pct": metrics["entity_pct"],
-        "quality": "ok",
-        "cache": "v12",
-        "elapsed_sec": round(_time.time() - _t0, 1),
-    })
-    print(f"summary_log {log_line}")
-
-    return (summary, "ok", None)
-
-
-@app.route("/api/chapter/summary", methods=["POST"])
-def api_chapter_summary():
-    """Generate a Hindi chapter summary + synthesize audio.
-
-    POST { book_id, chapter_index, force?: bool }
-    Returns { summary, audio_url, quality, missing } on success.
-    Returns { error, code } on failure (code is machine-readable).
-
-    ?force=1 (or force:true in the body) bypasses the R2 cache so the
-    summary is regenerated fresh — used by the "फिर से बनाएँ" button.
-    """
-    import traceback
-    data = request.json or {}
-    book_id = (data.get("book_id") or "").strip()
-    chapter_index = data.get("chapter_index")
-    force = bool(data.get("force")) or request.args.get("force") == "1"
-    if not book_id or chapter_index is None:
-        return jsonify({"error": "book_id and chapter_index required", "code": "bad_request"}), 400
-
-    job, err, sc = _check_job_owner(book_id)
-    if err is not None:
-        return jsonify({"error": "पुस्तक नहीं मिली", "code": "job_not_found"}), 404
-
-    # Reconstruct if needed
-    if book_id not in jobs:
-        try:
-            job = _reconstruct_job_from_storj(book_id, fallback_record=job)
-        except Exception:
-            return jsonify({"error": "पुस्तक डेटा लोड नहीं हो सका", "code": "job_not_found"}), 404
-
-    # ── ARIA: chapter text fallback chain ──
-    chapter_text = ""
-    chapter_title = ""
-
-    # Source 1: transcript_cues (in-memory or restored from token)
-    _tc = job.get("transcript_cues") or {}
-    _tc_list = _tc.get(chapter_index) or _tc.get(str(chapter_index)) or []
-    if _tc_list:
-        chapter_text = " ".join(str(c[2]) for c in _tc_list if len(c) >= 3)
-
-    # Source 2: the parsed book's chapter text
-    if not chapter_text or not chapter_text.strip():
-        try:
-            info = job.get("info")
-            if info and info.chapters:
-                for c in info.chapters:
-                    if c.index == chapter_index:
-                        chapter_title = c.title or ""
-                        if getattr(c, "text", None):
-                            chapter_text = c.text
-                            print(f"[summary] using parsed book text for chapter {chapter_index} "
-                                  f"(transcript_cues was empty)")
-                        break
-        except Exception as _e:
-            print(f"[summary] parsed-book fallback failed: {_e}")
-
-    # Also get the chapter title from the catalog if not already set
-    if not chapter_title:
-        try:
-            info = job.get("info")
-            if info and info.chapters:
-                for c in info.chapters:
-                    if c.index == chapter_index:
-                        chapter_title = c.title or ""
-                        break
-        except Exception:
-            pass
-
-    # Source 3: R2-stored transcript JSON
-    if not chapter_text or not chapter_text.strip():
-        try:
-            import storage_backend
-            if storage_backend.is_enabled():
-                _tc_r2_key = f"chapters/{book_id}/{chapter_index}.transcript.json"
-                if storage_backend.object_exists(_tc_r2_key):
-                    import tempfile as _tf, json as _json
-                    fd, tmp = _tf.mkstemp(suffix=".json")
-                    os.close(fd)
-                    try:
-                        storage_backend.download_file(_tc_r2_key, tmp)
-                        with open(tmp, "r", encoding="utf-8") as f:
-                            _tc_data = _json.load(f)
-                        _cues = _tc_data.get("cues") or _tc_data.get("transcript_cues") or []
-                        if _cues:
-                            chapter_text = " ".join(
-                                str(c[2]) if isinstance(c, (list, tuple)) and len(c) >= 3
-                                else str(c.get("w", "")) if isinstance(c, dict)
-                                else ""
-                                for c in _cues
-                            )
-                            print(f"[summary] using R2 transcript JSON for chapter {chapter_index}")
-                    finally:
-                        try: os.remove(tmp)
-                        except: pass
-        except Exception as _e:
-            print(f"[summary] R2 transcript fallback failed: {_e}")
-
-    if not chapter_text or not chapter_text.strip():
-        return jsonify({"error": "इस अध्याय का ट्रांसक्रिप्ट डेटा उपलब्ध नहीं है",
-                        "code": "no_transcript"}), 400
-
-    # Check R2 cache (skip when force=true)
-    import hashlib as _hashlib
-    _text_hash = _hashlib.sha1(chapter_text.encode("utf-8")).hexdigest()[:16]
-    summary_cache_key = f"summaries/v12/{book_id}/{chapter_index}.{_text_hash}.en.json"
-    audio_cache_key = f"summaries/v12/{book_id}/{chapter_index}.{_text_hash}.en.mp3"
-
-    if not force:
-        try:
-            import storage_backend
-            if storage_backend.is_enabled() and storage_backend.object_exists(summary_cache_key):
-                import tempfile as _tf
-                fd, tmp = _tf.mkstemp(suffix=".json")
-                os.close(fd)
-                try:
-                    storage_backend.download_file(summary_cache_key, tmp)
-                    import json as _json
-                    with open(tmp, "r", encoding="utf-8") as f:
-                        cached = _json.load(f)
-                    audio_url = ""
-                    if storage_backend.object_exists(audio_cache_key):
-                        audio_url = storage_backend.presigned_get_url(audio_cache_key)
-                    _r = jsonify({
-                        "summary": cached.get("summary", ""),
-                        "audio_url": audio_url,
-                        "quality": cached.get("quality", "ok"),
-                        "missing": cached.get("missing", []),
-                        "degraded": cached.get("degraded", False),
-                    })
-                    _r.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
-                    return _r
-                finally:
-                    try: os.remove(tmp)
-                    except: pass
-        except Exception as e:
-            print(f"[summary] R2 cache read failed: {e}")
-    else:
-        print(f"[summary] force=true — bypassing cache, regenerating fresh")
-
-    # Generate summary via windowed map-reduce
-    try:
-        summary, quality, gen_code = _generate_chapter_summary(chapter_text, chapter_title)
-        if not summary:
-            _err_map = {
-                "groq_no_key": ("AI service unavailable", 503),
-                "groq_rate_limited": ("Rate limited — retrying", 429),
-                "groq_all_models_failed": ("AI service unavailable", 503),
-                "empty_summary": ("Summary came back empty — try again", 503),
-                "map_all_windows_empty": ("Could not extract events — try again", 503),
-                "reduce_empty": ("Could not generate summary — try again", 503),
-                "segmentation_failed": ("Chapter text too short", 400),
-                "internal": ("Something went wrong — try again", 500),
-            }
-            _msg, _sc = _err_map.get(gen_code or "empty_summary",
-                                     ("Summary unavailable, try again", 503))
-            return jsonify({"error": _msg, "code": gen_code or "empty_summary"}), _sc
-
-        # No sanitize needed — _clean_summary_text already handles it
-        missing_list = []
-        degraded = (quality == "degraded")
-
-        # Synthesize audio using the book's narration voice (English, not Hindi).
-        # Fail-soft — empty audio_url is fine, the text summary is still returned.
-        audio_url = ""
-        try:
-            import tempfile as _tf
-            import edge_tts, asyncio
-            # Use the book's narration voice, or fall back to a default English voice.
-            _summary_voice = job.get("voice") or "en-US-AriaNeural"
-            work_dir = UPLOAD_DIR / book_id
-            work_dir.mkdir(parents=True, exist_ok=True)
-            audio_path = str(work_dir / f"summary_{chapter_index}.en.mp3")
-            # Strip any SSML/markdown before synthesis
-            _clean_text = re.sub(r'<[^>]+>', ' ', summary)
-            _clean_text = re.sub(r'https?://\S+', ' ', _clean_text)
-            _clean_text = re.sub(r'\s+', ' ', _clean_text).strip()
-            async def _synth():
-                communicate = edge_tts.Communicate(_clean_text, _summary_voice, rate="-5%")
-                await communicate.save(audio_path)
-            loop = asyncio.new_event_loop()
-            try:
-                loop.run_until_complete(_synth())
-            finally:
-                loop.close()
-            if os.path.exists(audio_path) and os.path.getsize(audio_path) > 1000:
-                try:
-                    from audio_postprocess import post_process_audio
-                    post_process_audio(audio_path)
-                except Exception:
-                    pass
-                try:
-                    import storage_backend
-                    if storage_backend.is_enabled():
-                        storage_backend.upload_file(audio_path, audio_cache_key)
-                        audio_url = storage_backend.presigned_get_url(audio_cache_key)
-                except Exception as e:
-                    print(f"[summary] R2 audio upload failed: {e}")
-            else:
-                print(f"[summary] English TTS produced empty file")
-                try:
-                    import storage_backend
-                    if storage_backend.is_enabled():
-                        storage_backend.upload_file(audio_path, audio_cache_key)
-                        audio_url = storage_backend.presigned_get_url(audio_cache_key)
-                except Exception as e:
-                    print(f"[summary] R2 audio upload failed: {e}")
-        except Exception as e:
-            print(f"[summary] English TTS failed: {e}")
-
-        # Cache summary text + quality + missing to R2
-        try:
-            import storage_backend, json as _json
-            if storage_backend.is_enabled():
-                import tempfile as _tf
-                fd, tmp = _tf.mkstemp(suffix=".json")
-                os.close(fd)
-                with open(tmp, "w", encoding="utf-8") as f:
-                    _json.dump({
-                        "summary": summary,
-                        "quality": quality,
-                        "missing": missing_list,
-                        "degraded": degraded,
-                    }, f, ensure_ascii=False)
-                storage_backend.upload_file(tmp, summary_cache_key)
-                try: os.remove(tmp)
-                except: pass
-        except Exception as e:
-            print(f"[summary] R2 cache write failed: {e}")
-
-        _r = jsonify({
-            "summary": summary,
-            "audio_url": audio_url,
-            "quality": quality,
-            "missing": missing_list,
-            "degraded": degraded,
-        })
-        _r.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
-        return _r
-
-    except Exception:
-        traceback.print_exc()
-        return jsonify({"error": "Summary generation failed",
-                        "code": "summary_internal_error"}), 500
-
-
-@app.route("/api/glossary", methods=["POST"])
-def api_glossary():
-    """Explain a term in Hindi.
-
-    POST { book_id, term, context_snippet }
-    Returns { explanation: str, audio_url: str }
-    """
-    data = request.json or {}
-    book_id = (data.get("book_id") or "").strip()
-    term = (data.get("term") or "").strip()
-    context = (data.get("context_snippet") or "").strip()
-    if not term:
-        return jsonify({"error": "term required"}), 400
-
-    # Normalize term for cache key
-    import re as _re
-    normalized = _re.sub(r'[^a-zA-Z0-9]', '_', term.lower())[:60]
-    glossary_cache_key = f"glossary/v2/{book_id}/{normalized}.hi.json"
-    audio_cache_key = f"glossary/v2/{book_id}/{normalized}.hi.mp3"
-
-    # Check R2 cache
-    try:
-        import storage_backend
-        if storage_backend.is_enabled() and storage_backend.object_exists(glossary_cache_key):
-            import tempfile as _tf, json as _json
-            fd, tmp = _tf.mkstemp(suffix=".json")
-            os.close(fd)
-            try:
-                storage_backend.download_file(glossary_cache_key, tmp)
-                with open(tmp, "r", encoding="utf-8") as f:
-                    cached = _json.load(f)
-                audio_url = ""
-                if storage_backend.object_exists(audio_cache_key):
-                    audio_url = storage_backend.presigned_get_url(audio_cache_key)
-                return jsonify({"explanation": cached.get("explanation", ""), "audio_url": audio_url})
-            finally:
-                try: os.remove(tmp)
-                except: pass
-    except Exception as e:
-        print(f"[glossary] R2 cache read failed: {e}")
-
-    # Generate via Groq
-    try:
-        import groq_client as _gc
-        _GLOSSARY_PROMPT = (
-            "Explain the given term from a work of literature in simple Hindi "
-            "(Devanagari), in 40-70 words.\n"
-            "Say who or what it is, and why it matters in this book.\n"
-            "No spoilers beyond the provided context. Plain text only."
-        )
-        user_content = f"Term: {term}\nContext: {context[:500]}"
-        explanation, gcode = _gc.groq_chat(
-            _GLOSSARY_PROMPT, user_content,
-            temperature=0.3, max_tokens=512,
-        )
-        if not explanation:
-            _err_map = {
-                "groq_no_key": "AI सेवा अभी उपलब्ध नहीं है",
-                "groq_rate_limited": "थोड़ी देर रुकें — बहुत सारे अनुरोध",
-                "groq_all_models_failed": "AI सेवा अभी उपलब्ध नहीं है",
-            }
-            return jsonify({"error": _err_map.get(gcode or "", "अभी उपलब्ध नहीं है, बाद में कोशिश करें"),
-                            "code": gcode or "empty"}), 503
-
-        # Clean LLM output: drop non-Devanagari lines
-        import re as _re_clean
-        _lines = explanation.split("\n")
-        _clean_lines = [_ln.strip() for _ln in _lines if _ln.strip() and _re_clean.search(r"[\u0900-\u097F]", _ln)]
-        explanation = "\n".join(_clean_lines) if _clean_lines else explanation
-
-        # Synthesize audio (fail-soft)
-        audio_url = ""
-        try:
-            import hindi_tts, tempfile as _tf
-            work_dir = UPLOAD_DIR / (book_id or "glossary")
-            work_dir.mkdir(parents=True, exist_ok=True)
-            audio_path = str(work_dir / f"glossary_{normalized}.hi.mp3")
-            if hindi_tts.synthesize_hindi(explanation, audio_path):
-                try:
-                    import storage_backend
-                    if storage_backend.is_enabled():
-                        storage_backend.upload_file(audio_path, audio_cache_key)
-                        audio_url = storage_backend.presigned_get_url(audio_cache_key)
-                except Exception as e:
-                    print(f"[glossary] R2 audio upload failed: {e}")
-        except Exception as e:
-            print(f"[glossary] Hindi TTS failed: {e}")
-
-        # Cache to R2
-        try:
-            import storage_backend, json as _json, tempfile as _tf
-            if storage_backend.is_enabled():
-                fd, tmp = _tf.mkstemp(suffix=".json")
-                os.close(fd)
-                with open(tmp, "w", encoding="utf-8") as f:
-                    _json.dump({"explanation": explanation, "term": term}, f, ensure_ascii=False)
-                storage_backend.upload_file(tmp, glossary_cache_key)
-                try: os.remove(tmp)
-                except: pass
-        except Exception as e:
-            print(f"[glossary] R2 cache write failed: {e}")
-
-        return jsonify({"explanation": explanation, "audio_url": audio_url})
-
-    except Exception:
-        import traceback
-        traceback.print_exc()
-        return jsonify({"error": "कुछ गलत हुआ — बाद में कोशिश करें",
-                        "code": "internal"}), 503
-
-
-@app.route("/api/explain", methods=["POST"])
-def api_explain():
-    """Explain a paragraph in Hindi.
-
-    POST { book_id, chapter_index, paragraph_text }
-    Returns { explanation: str, audio_url: str } on success.
-    Returns { error: str, code: str, retry_after?: int } on failure.
-    """
-    # Rate limit: 60 requests/hour per client id (raised from 20 — a reader
-    # tapping explain across one canto exceeds 20 in minutes).
-    cid = _get_client_id() or _client_ip()
-    _rl_key = f"explain_{cid}"
-    _allowed, _retry = _ip_rl_check(_rl_key, cid, 60, 60)
-    if not _allowed:
-        return jsonify({"error": "थोड़ी देर रुकें — बहुत सारे अनुरोध",
-                        "code": "rate_limited", "retry_after": _retry}), 429
-
-    data = request.json or {}
-    paragraph = (data.get("paragraph_text") or "").strip()
-    if not paragraph or len(paragraph) < 10:
-        return jsonify({"error": "paragraph_text required", "code": "bad_request"}), 400
-
-    try:
-        import groq_client as _gc
-        _EXPLAIN_PROMPT = (
-            "Explain this passage of English literature in plain Hindi "
-            "(Devanagari), 80-120 words.\n"
-            "Unpack difficult vocabulary, archaic phrasing, and any cultural or "
-            "historical reference.\n"
-            "Do not translate word-for-word — explain the meaning.\n"
-            "Plain text only."
-        )
-        explanation, gcode = _gc.groq_chat(
-            _EXPLAIN_PROMPT, paragraph[:2000],
-            temperature=0.3, max_tokens=1024,
-        )
-        if not explanation:
-            _err_map = {
-                "groq_no_key": "AI सेवा अभी उपलब्ध नहीं है",
-                "groq_rate_limited": "थोड़ी देर रुकें — बहुत सारे अनुरोध",
-                "groq_all_models_failed": "AI सेवा अभी उपलब्ध नहीं है",
-            }
-            _sc = 429 if gcode == "groq_rate_limited" else 503
-            return jsonify({"error": _err_map.get(gcode or "", "अभी उपलब्ध नहीं है, बाद में कोशिश करें"),
-                            "code": gcode or "empty"}), _sc
-
-        # Clean LLM output: drop non-Devanagari lines
-        import re as _re_clean
-        _lines = explanation.split("\n")
-        _clean_lines = [_ln.strip() for _ln in _lines if _ln.strip() and _re_clean.search(r"[\u0900-\u097F]", _ln)]
-        explanation = "\n".join(_clean_lines) if _clean_lines else explanation
-
-        # Synthesize audio (no cache for explain; fail-soft)
-        audio_url = ""
-        try:
-            import hindi_tts, tempfile as _tf
-            fd, audio_path = _tf.mkstemp(suffix=".mp3")
-            os.close(fd)
-            if hindi_tts.synthesize_hindi(explanation, audio_path):
-                try:
-                    import storage_backend
-                    if storage_backend.is_enabled():
-                        import uuid as _uuid
-                        _temp_key = f"explain/{_uuid.uuid4().hex}.mp3"
-                        storage_backend.upload_file(audio_path, _temp_key)
-                        audio_url = storage_backend.presigned_get_url(_temp_key, ttl=3600)
-                except Exception as e:
-                    print(f"[explain] R2 audio upload failed: {e}")
-            try: os.remove(audio_path)
-            except: pass
-        except Exception as e:
-            print(f"[explain] Hindi TTS failed: {e}")
-
-        return jsonify({"explanation": explanation, "audio_url": audio_url})
-
-    except Exception:
-        import traceback
-        traceback.print_exc()
-        return jsonify({"error": "कुछ गलत हुआ — बाद में कोशिश करें",
-                        "code": "internal"}), 503
-
-
 @app.route("/api/reset_to_chapters/<job_id>", methods=["POST"])
 def api_reset_to_chapters(job_id):
     """Reset a completed job back to 'analyzed' so the user can select different chapters."""
@@ -12504,20 +11296,6 @@ def api_my_jobs():
         # option instead of a frozen progress bar forever. This is a belt-and-
         # suspenders check alongside the cleanup supervisor.
         if status == "generating":
-            # ARIA v9: also treat a job as stuck when it's "generating" with
-            # no _thread_started flag and >60s since start_time — the thread
-            # spawn failed silently. Flip to "analyzed" (not "interrupted") so
-            # the card is immediately clickable again.
-            if not job.get("_thread_started"):
-                _st = job.get("start_time") or 0
-                if _st and (time.time() - _st) > 60:
-                    print(f"[my_jobs] {jid} stuck (generating, no thread, "
-                          f"{int(time.time() - _st)}s) → analyzed")
-                    job["status"] = "analyzed"
-                    job["progress_message"] = (
-                        "Previous start failed — pick chapters and convert again."
-                    )
-                    status = "analyzed"
             _pu = job.get("progress_updated_at") or job.get("start_time", 0)
             if _pu and (time.time() - _pu) > 900:  # 15 min no progress
                 print(f"[my_jobs] {jid} stale (no progress {int(time.time() - _pu)}s) → interrupted")
@@ -12541,8 +11319,10 @@ def api_my_jobs():
         # show "2/34 chapters" after generating 3 chapters across multiple
         # "More chapters" runs. chapter_mp3s is correctly merged.
         _chapter_mp3s = job.get("chapter_mp3s") or []
-        _derived_selected = _generated_chapter_indices(_chapter_mp3s) or (
-            job.get("selected_chapters") or [])
+        _derived_selected = sorted({
+            ch["index"] for ch in _chapter_mp3s
+            if isinstance(ch, dict) and "index" in ch
+        }) or (job.get("selected_chapters") or [])
         # ARIA: annotate each chapter_mp3s entry with a `has_transcript`
         # boolean so the frontend library can render a synced-transcript
         # affordance without shipping the (large) transcript_cues payload
@@ -12551,12 +11331,6 @@ def api_my_jobs():
         _tc_live = job.get("transcript_cues") or {}
         _chapter_mp3s_annotated = _annotate_chapter_mp3s_with_transcript(
             _chapter_mp3s, _tc_live)
-        # ARIA: total_chapters from the persisted catalog (authoritative),
-        # falling back to info.chapters length, then the stored value.
-        _catalog_live = job.get("chapter_catalog") or []
-        _total_live = (len(_catalog_live)
-                       or (len(info.chapters) if info else 0)
-                       or job.get("total_chapters", 0))
         entry = {
             "job_id": jid,
             "status": status,
@@ -12565,13 +11339,8 @@ def api_my_jobs():
             "output_format": job.get("output_format", ""),
             "created_at": job.get("start_time") or job.get("last_poll") or 0,
             "selected_chapters": _derived_selected,
-            "total_chapters": _total_live,
+            "total_chapters": len(info.chapters) if info else 0,
             "chapter_mp3s": _chapter_mp3s_annotated,
-            # ARIA: compact chapter catalog so the frontend can render the
-            # full chapter list without an extra round-trip to
-            # /api/job_chapters. May be empty for legacy jobs (frontend falls
-            # back to fetching /api/job_chapters on drawer open).
-            "chapter_catalog": _catalog_live,
             # ARIA: has_cover so the frontend can show the EPUB's embedded
             # cover (served from /api/cover/<job_id>) instead of the CSS
             # monogram fallback. Checks cover_s3_key too so restored jobs
@@ -12678,17 +11447,7 @@ def api_my_jobs():
                 "mp3": bool(tinfo.get("output_file")),
                 "abm": bool(tinfo.get("optimized_abm_path")),
             },
-            # ARIA: total_chapters — prefer the token's persisted catalog
-            # length (authoritative), fall back to stored total_chapters, then
-            # chapter_mp3s length. NEVER report len(chapter_mp3s) when a larger
-            # persisted count exists.
-            "total_chapters": (len(tinfo.get("chapter_catalog") or [])
-                               or tinfo.get("total_chapters", 0)
-                               or len(tinfo.get("chapter_mp3s") or [])),
-            # ARIA: compact chapter catalog from the token snapshot so the
-            # frontend can render the full list without a /api/job_chapters
-            # round-trip. May be empty for legacy tokens (frontend falls back).
-            "chapter_catalog": tinfo.get("chapter_catalog", []),
+            "total_chapters": tinfo.get("total_chapters", 0),
             # ARIA: has_cover from the token snapshot — check cover_s3_key too
             # so restored jobs (after Render restart) still advertise their cover.
             "has_cover": bool(tinfo.get("has_cover", False) or tinfo.get("cover_s3_key", "")),
@@ -12711,8 +11470,10 @@ def api_my_jobs():
         # multiple "More chapters" runs. Deriving from chapter_mp3s gives the
         # complete set of chapters currently in the audiobook.
         _tok_chapter_mp3s = entry.get("chapter_mp3s") or []
-        entry["selected_chapters"] = _generated_chapter_indices(
-            _tok_chapter_mp3s) or tinfo.get("selected_chapters", [])
+        entry["selected_chapters"] = sorted({
+            ch["index"] for ch in _tok_chapter_mp3s
+            if isinstance(ch, dict) and "index" in ch
+        }) or tinfo.get("selected_chapters", [])
         # ARIA: annotate chapter_mp3s with `has_transcript` so the frontend
         # knows which chapters have word-level sync data. The token's
         # transcript_cues keys are strings (JSON-serialized) — the helper
@@ -12728,11 +11489,7 @@ def api_my_jobs():
 
     ordered = sorted(out.values(),
                      key=lambda e: -(e.get("created_at") or 0))
-    resp = jsonify({"jobs": ordered})
-    # ARIA: my_jobs is dynamic (chapter_mp3s/selected_chapters/status change
-    # as generations complete) — never let the browser cache it.
-    resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
-    return resp
+    return jsonify({"jobs": ordered})
 
 
 @app.route("/api/transfer/claim/<token>", methods=["POST"])
@@ -17847,7 +16604,6 @@ if __name__ == "__main__":
     # Render provides $PORT (typically 10000) and requires binding to 0.0.0.0.
     # Other hosts (local dev, sandbox) use ABM_PORT (default 5601) and 127.0.0.1.
     # We detect Render by checking if $PORT is set; if so, bind to 0.0.0.0:$PORT.
-    print(f"[startup] All initialization complete, starting Flask server...", flush=True)
     RENDER_PORT = os.environ.get("PORT")
     if RENDER_PORT:
         PORT = int(RENDER_PORT)

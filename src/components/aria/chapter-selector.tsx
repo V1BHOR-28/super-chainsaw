@@ -76,10 +76,6 @@ export function ChapterSelector({
     { id: "en-US-DavisNeural", name: "Davis — Deep Male", engine: "edge", gender: "Male", gender_icon: "♂", locale: "en-US" },
     { id: "en-US-JasonNeural", name: "Jason — Young Male", engine: "edge", gender: "Male", gender_icon: "♂", locale: "en-US" },
     { id: "en-GB-RyanNeural", name: "Ryan — British Male", engine: "edge", gender: "Male", gender_icon: "♂", locale: "en-GB" },
-    // 11th voice: Hindi narrator — only for Hindi content (summaries, glossary, explanations)
-    { id: "hi-IN-SwaraNeural", name: "Swara — Hindi Narrator", engine: "edge", gender: "Female", gender_icon: "♀", locale: "hi-IN" },
-    // Alternate male Hindi (not in active list):
-    // { id: "hi-IN-MadhurNeural", name: "Madhur — Hindi Male", engine: "edge", gender: "Male", gender_icon: "♂", locale: "hi-IN" },
   ];
 
   // No need to fetch voices from the API — all voices are edge-tts.
@@ -182,9 +178,6 @@ export function ChapterSelector({
       onConvertStarted?.();
     } catch (err) {
       console.error("[chapter-selector] convert failed", err);
-      // Log the full error for debugging — the Error message from abm-api.ts
-      // carries the server's error_code mapping. Keep the modal OPEN so the
-      // user can retry without re-opening the chapter list.
       toast({
         title: "Could not start conversion",
         description: err instanceof Error ? err.message : "Try again",
@@ -337,10 +330,7 @@ export function ChapterSelector({
             {chapters.length === 0 ? (
               <div className="text-center py-12">
                 <p className="text-sm" style={{ color: "var(--aria-fg-muted)" }}>
-                  No chapters found for this book.
-                </p>
-                <p className="text-xs opacity-70 mt-2" style={{ color: "var(--aria-fg-muted)" }}>
-                  job {analyzeResponse?.job_id ?? "—"} · status {analyzeResponse?.status ?? "unknown"}
+                  No chapters found. Try re-uploading the EPUB.
                 </p>
               </div>
             ) : (
@@ -448,24 +438,24 @@ export function ChapterSelector({
             </button>
             <button
               onClick={handleConvert}
-              disabled={converting || (!!analyzeResponse && selected.size === 0) || chapters.length === 0}
+              disabled={converting || (!!analyzeResponse && selected.size === 0)}
               className="flex-[2] px-4 py-2.5 rounded-lg text-sm font-medium transition-all flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
               style={{
                 background:
-                  converting || (!!analyzeResponse && selected.size === 0) || chapters.length === 0
+                  converting || (!!analyzeResponse && selected.size === 0)
                     ? "transparent"
                     : estimate.reconvertCount > 0
                       ? "rgba(245,158,11,0.15)"
                       : "var(--aria-accent-glow)",
                 border: `1px solid ${
-                  converting || (!!analyzeResponse && selected.size === 0) || chapters.length === 0
+                  converting || (!!analyzeResponse && selected.size === 0)
                     ? "var(--aria-border)"
                     : estimate.reconvertCount > 0
                       ? "rgba(245,158,11,0.5)"
                       : "var(--aria-accent-glow)"
                 }`,
                 color:
-                  converting || (!!analyzeResponse && selected.size === 0) || chapters.length === 0
+                  converting || (!!analyzeResponse && selected.size === 0)
                     ? "var(--aria-fg-muted)"
                     : estimate.reconvertCount > 0
                       ? "var(--aria-accent-glow)"

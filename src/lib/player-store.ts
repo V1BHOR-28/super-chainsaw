@@ -34,15 +34,8 @@ export interface PlayingJob {
   chapterMp3s?: ChapterMp3Info[];
   /** Which chapter indices are in the current audio. */
   selectedChapters?: number[];
-  /** Total chapter count in the book (the full catalog length). Carried so
-   *  the Chapters drawer can show "N of M" before /api/job_chapters loads. */
-  totalChapters?: number;
   /** Full chapter metadata for the chapter browser. */
   chapters?: PlayerChapterInfo[];
-  /** Complete chapter catalog (every chapter in the book, narrated or not).
-   *  Carried from /api/my_jobs so the Chapters drawer can render the full
-   *  list immediately without a /api/job_chapters round-trip when available. */
-  chapterCatalog?: PlayerChapterInfo[];
   /** Cover image URL from the Flask /api/cover/<jobId> endpoint. When
    *  absent, the CSS monogram fallback is used. */
   coverImgUrl?: string;
@@ -93,9 +86,6 @@ interface PlayerState {
   //   the final linear volume of each mood loop.
   bgmEnabled: boolean;
   bgmVolume: number;
-  // ARIA: Hindi help toggle — shows/hides all Hindi comprehension UI
-  // (summary, glossary, explain). Defaults to OFF.
-  hindiHelp: boolean;
 
   // Actions
   play: () => void;
@@ -118,7 +108,6 @@ interface PlayerState {
   // BGM actions
   toggleBgm: () => void;
   setBgmVolume: (v: number) => void;
-  toggleHindiHelp: () => void;
 }
 
 // ── Playback progress persistence (localStorage) ──
@@ -244,7 +233,6 @@ export const usePlayerStore = create<PlayerState>()(
       // and duck under speech, so 70% gives clearly audible background music.
       bgmEnabled: true,
       bgmVolume: 70,
-      hindiHelp: false,
 
       play: () => set({ isPlaying: true }),
       pause: () => set({ isPlaying: false }),
@@ -286,7 +274,6 @@ export const usePlayerStore = create<PlayerState>()(
 
       toggleBgm: () => set((s) => ({ bgmEnabled: !s.bgmEnabled })),
       setBgmVolume: (v) => set({ bgmVolume: Math.max(0, Math.min(100, Math.round(v))) }),
-      toggleHindiHelp: () => set((s) => ({ hindiHelp: !s.hindiHelp })),
     }),
     {
       name: "aria-audiobooks",
@@ -296,7 +283,6 @@ export const usePlayerStore = create<PlayerState>()(
         volume: s.volume,
         bgmEnabled: s.bgmEnabled,
         bgmVolume: s.bgmVolume,
-        hindiHelp: s.hindiHelp,
       }),
     }
   )

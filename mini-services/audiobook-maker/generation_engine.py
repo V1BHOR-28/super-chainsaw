@@ -1392,45 +1392,6 @@ def _email_generation_details(job, lang):
         return ""
 
 
-def _build_catalog_from_info(info):
-    """Build a JSON-safe complete chapter catalog from a parsed BookInfo.
-
-    Local mirror of audiobook_app._build_chapter_catalog (kept here to avoid
-    a circular import). Each entry: {index, title, words, chars,
-    estimated_minutes}. Returns [] when info has no chapters.
-    """
-    if not info or not getattr(info, "chapters", None):
-        return []
-    # Reuse the same estimation helper if available; otherwise fall back to a
-    # plain 150 wpm (2.5 words/sec) estimate.
-    try:
-        from audiobook_app import _estimate_chapter_seconds
-        _lang = (getattr(info, "language", None) or "en")[:2].lower()
-        catalog = []
-        for ch in info.chapters:
-            _secs = _estimate_chapter_seconds(ch, _lang)
-            catalog.append({
-                "index": ch.index,
-                "title": ch.title,
-                "words": ch.word_count,
-                "chars": ch.char_count,
-                "estimated_minutes": round(_secs / 60.0, 1),
-            })
-        return catalog
-    except Exception:
-        catalog = []
-        for ch in info.chapters:
-            _secs = (ch.word_count or 0) / 2.5
-            catalog.append({
-                "index": ch.index,
-                "title": ch.title,
-                "words": ch.word_count,
-                "chars": ch.char_count,
-                "estimated_minutes": round(_secs / 60.0, 1),
-            })
-        return catalog
-
-
 def _create_download_token(job_id):
     """Crea (idempotente) un download token per un job completato e lo persiste,
     SENZA inviare email. Ritorna il token, o None se il job non e' valido.
@@ -1476,14 +1437,6 @@ def _create_download_token(job_id):
         "chapter_mp3s": job.get("chapter_mp3s", []),
         "selected_chapters": job.get("selected_chapters", []),
         "total_chapters": len(info.chapters) if info else 0,
-        # ARIA: complete parsed chapter catalog (every chapter in the book,
-        # not just generated ones). Refreshed from the in-memory job on every
-        # token creation/refresh so /api/job_chapters can return the full
-        # catalog after a Render restart. Falls back to rebuilding from
-        # info.chapters if the job dict doesn't have it yet (e.g. jobs
-        # analyzed before this field existed).
-        "chapter_catalog": (job.get("chapter_catalog")
-                            or _build_catalog_from_info(info)),
         # ARIA: has_cover so /api/my_jobs can return it for the library UI
         # (the cover is extracted from the EPUB during /api/analyze and stored
         # at job["cover_thumb"]). Without this, the token loop in my_jobs
@@ -4911,26 +4864,6 @@ def run_generation(job_id, info, voice, rate, single_file, output_format='m4b', 
                     entry["end_ms"] = running_ms
 
                 job["chapter_mp3s"] = new_mp3s
-                # ARIA: after merging chapter_mp3s, refresh derived fields so
-                # the in-memory job stays consistent. selected_chapters is
-                # derived from the merged chapter_mp3s (NOT the per-run batch).
-                # chapter_catalog + total_chapters are preserved from analyze
-                # (rebuilt from info.chapters if missing — e.g. legacy jobs).
-                try:
-                    _merged_indices = sorted({
-                        int(e["index"]) for e in new_mp3s
-                        if isinstance(e, dict) and e.get("index") is not None
-                    })
-                    job["selected_chapters"] = _merged_indices
-                    if not job.get("chapter_catalog"):
-                        job["chapter_catalog"] = _build_catalog_from_info(info)
-                    job["total_chapters"] = (
-                        len(job.get("chapter_catalog") or [])
-                        or (len(info.chapters) if info else 0)
-                        or job.get("total_chapters", 0)
-                    )
-                except Exception as _e_derive:
-                    print(f"[{job_id}] post-merge derive failed (non-fatal): {_e_derive}")
 
                 # ARIA: finalize word boundaries — shift each chunk's boundaries
                 # by the chunk's offset within the chapter + the 3s silence prefix.

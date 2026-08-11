@@ -31,7 +31,6 @@ import {
   isPollingStatus,
   type MyJob,
   type AnalyzeResponse,
-  type AnalyzeChapter,
   type JobStatus,
   type ChapterMp3Info,
 } from "@/lib/abm-api";
@@ -81,10 +80,6 @@ interface LibraryCard {
   selectedChapters?: number[];
   totalChapters?: number;
   chapterMp3s?: ChapterMp3Info[];
-  /** Complete parsed chapter catalog (every chapter in the book). Carried
-   *  through from /api/my_jobs so the player can render the full Chapters
-   *  drawer without an extra round-trip when available. */
-  chapterCatalog?: AnalyzeChapter[];
   /** Whether the EPUB had an embedded cover. When true, coverImgUrl is set. */
   hasCover?: boolean;
   /** URL to the Flask /api/cover/<jobId> endpoint. Empty string when no cover. */
@@ -113,7 +108,6 @@ function toCard(job: MyJob): LibraryCard {
     selectedChapters: job.selected_chapters,
     totalChapters: job.total_chapters,
     chapterMp3s: job.chapter_mp3s,
-    chapterCatalog: job.chapter_catalog,
     hasCover,
     // Cover URL from the Flask /api/cover endpoint — available immediately
     // after upload (the Flask app extracts it from the EPUB during analyze).
@@ -151,7 +145,7 @@ export function LibraryView() {
   // Scope localStorage by userId so admin's library doesn't leak to new users
   // on the same browser. Falls back to "anon" if user isn't loaded yet.
   const userId = useAriaStore((s) => s.user?.id) || "anon";
-  const STORAGE_KEY = `aria-audiobook-library-v3:${userId}`;
+  const STORAGE_KEY = `aria-audiobook-library:${userId}`;
   const DELETED_KEY = `aria-audiobook-deleted:${userId}`;
 
   // ── Tombstone helpers (module-level, pure) ──
@@ -317,22 +311,7 @@ export function LibraryView() {
           const staleCards = prev.filter(
             (c) => !apiIds.has(c.jobId) && !tomb.has(c.jobId) && !_ACTIVE.has(c.status),
           );
-          // Merge: for each API card, if a previous card had a richer
-          // chapter_catalog (more entries), preserve it — a partial API
-          // response (e.g. after cold start, missing catalog) must NOT
-          // overwrite a complete cached catalog.
-          const merged = apiCards.map((apiCard) => {
-            const prevCard = prev.find((c) => c.jobId === apiCard.jobId);
-            if (prevCard) {
-              const apiCatLen = apiCard.chapterCatalog?.length ?? 0;
-              const prevCatLen = prevCard.chapterCatalog?.length ?? 0;
-              if (prevCatLen > apiCatLen) {
-                return { ...apiCard, chapterCatalog: prevCard.chapterCatalog };
-              }
-            }
-            return apiCard;
-          });
-          return [...merged, ...staleCards];
+          return [...apiCards, ...staleCards];
         });
         setError(null);
         return; // success — exit the retry loop
@@ -372,14 +351,20 @@ export function LibraryView() {
     await fetchJobsWithRetry(false);
   }, [fetchJobsWithRetry]);
 
-  // ── Initial fetch: load library as soon as userId is available ──
-  // The old health-polling pattern blocked library loading if the backend
-  // was slow to respond to /api/health, causing a deadlock where the user
-  // stared at a "waking up" screen forever. The cold-start retry logic in
-  // fetchJobsWithRetry already handles Render's spin-up time.
   useEffect(() => {
+    // Don't fetch until the real userId is available (not "anon").
+    // Without this, the component fetches with "anon" first (returns 0 jobs
+    // immediately), sets loading=false, then when the session loads and
+    // userId changes to the real ID, loading is set to true again but the
+    // fetch may return quickly with 0 jobs for a new user — the user sees
+    // "No audiobooks yet" instead of the loading/waking-up UI.
     if (userId === "anon") return;
     // Initial fetch with cold-start retry logic.
+    // Re-runs when userId changes (login/logout/switch) so the new user's
+    // library is fetched fresh.
+    // Enforce a minimum 1.5s loading time so the user always sees the loading
+    // UI (not a jarring flash of "No audiobooks yet" when the backend is
+    // responsive but the user has 0 jobs).
     const minLoadTimer = new Promise<void>((r) => setTimeout(r, 1500));
     Promise.all([
       fetchJobsWithRetry(true),
@@ -431,48 +416,19 @@ export function LibraryView() {
     });
     try {
       const resp = await analyzeEpub(file);
-
-      // ARIA: the backend returns a busy-shape response (is_running=true)
-      // when this exact file already has a live generation. Don't open an
-      // empty chapter selector — tell the user and let the library poller
-      // pick the job up as it finishes.
-      if (resp.is_running) {
-        toast({
-          title: "This book is already converting",
-          description: "It's in your library — we'll update it as it finishes.",
-        });
-        fetchJobs();
-        return;
-      }
-
-      // Defensive: if the payload came back without chapters (older backend,
-      // or a reuse path that omitted the catalog), fetch them explicitly
-      // rather than rendering "No chapters found".
-      let effective = resp;
-      if (!resp.chapters || resp.chapters.length === 0) {
-        if (!resp.job_id) {
-          throw new Error("The server did not return a job for this file. Please try again.");
-        }
-        try {
-          effective = await getJobChapters(resp.job_id);
-        } catch {
-          throw new Error("Book was analyzed but its chapter list could not be loaded. Try re-uploading.");
-        }
-      }
-
       // If the user previously deleted this job_id (e.g. the old backend
       // resurrected it via file_hash dedup), un-delete it so it shows in
       // the library again. The user explicitly re-uploaded the EPUB, so
       // they want it back.
-      if (deletedRef.current.has(effective.job_id)) {
-        deletedRef.current.delete(effective.job_id);
+      if (deletedRef.current.has(resp.job_id)) {
+        deletedRef.current.delete(resp.job_id);
         persistTombstones(`aria-audiobook-deleted:${userId}`, deletedRef.current);
         setDeletedVersion((v) => v + 1);
       }
-      setAnalyzeResponse(effective);
+      setAnalyzeResponse(resp);
       toast({
         title: "Book analyzed",
-        description: `${effective.title} — ${effective.total_chapters} chapters detected`,
+        description: `${resp.title} — ${resp.total_chapters} chapters detected`,
       });
     } catch (err) {
       console.error("[library-view] analyze failed", err);
@@ -507,9 +463,7 @@ export function LibraryView() {
         accent: card.accent,
         downloadUrl: getDownloadUrl(card.jobId),
         selectedChapters: chaptersResp?.selected_chapters ?? card.selectedChapters,
-        totalChapters: chaptersResp?.total_chapters ?? card.totalChapters,
         chapters: chaptersResp?.chapters,
-        chapterCatalog: chaptersResp?.chapter_catalog ?? card.chapterCatalog,
         chapterMp3s: chaptersResp?.chapter_mp3s ?? card.chapterMp3s,
         coverImgUrl: card.coverImgUrl,
       });
@@ -601,47 +555,17 @@ export function LibraryView() {
 
   const handleConvertStarted = () => {
     // The user has clicked "Convert" in the chapter selector.
-    // UPSERT: a just-uploaded book has NO card yet, so we must insert an
-    // optimistic card. Without this, nothing renders, nothing polls, and
-    // the user sees "nothing happens" after Convert.
-    const resp = analyzeResponse;
-    const jobId = resp?.job_id ?? wholeBookJob?.jobId;
+    // The resetToChapters call happens inside the selector's handleConvert
+    // (before generate()), not here. This callback just flips the UI status
+    // and refreshes the job list.
+    const jobId = analyzeResponse?.job_id ?? wholeBookJob?.jobId;
     if (jobId) {
-      applyCards((prev) => {
-        const existing = prev.find((c) => c.jobId === jobId);
-        if (existing) {
-          return prev.map((c) =>
-            c.jobId === jobId
-              ? { ...c, status: "generating" as JobStatus, progressCurrent: 0,
-                  progressTotal: 0, progressMessage: "Starting…",
-                  progressUpdatedAt: Date.now() / 1000 }
-              : c,
-          );
-        }
-        const title = resp?.title ?? wholeBookJob?.title ?? "Untitled";
-        const optimistic: LibraryCard = {
-          jobId,
-          title,
-          author: resp?.author ?? wholeBookJob?.author ?? null,
-          accent: accentForTitle(title || jobId),
-          status: "generating",
-          createdAt: Date.now() / 1000,
-          progressCurrent: 0,
-          progressTotal: 0,
-          progressMessage: "Starting…",
-          progressUpdatedAt: Date.now() / 1000,
-          totalChapters: resp?.total_chapters,
-          chapterCatalog: resp?.chapters,
-          hasCover: false,
-          coverImgUrl: getCoverUrl(jobId, true) || undefined,
-        };
-        return [optimistic, ...prev];
-      });
+      applyCards((prev) =>
+        prev.map((c) => (c.jobId === jobId ? { ...c, status: "generating" } : c)),
+      );
     }
     handleCloseSelector();
-    // Force a refresh that cannot be swallowed by the in-flight guard
-    setTimeout(() => { isFetchingRef.current = false; fetchJobs(); }, 800);
-    setTimeout(() => fetchJobs(), 4000);
+    fetchJobs();
   };
 
   // ── Final render-time guard ──
