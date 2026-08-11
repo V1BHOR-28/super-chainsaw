@@ -76,6 +76,15 @@ export interface AnalyzeResponse {
    *  output_format='mp3' + single_file=false (ARIA per-chapter mode).
    *  Each entry has exact duration + file path info for playlist playback. */
   chapter_mp3s?: ChapterMp3Info[];
+  /** Complete parsed chapter catalog (EVERY chapter in the book, regardless
+   *  of whether it has generated audio). Separate from chapter_mp3s (the
+   *  generated playlist). Present when /api/analyze built the catalog; may
+   *  be empty for legacy jobs (frontend falls back to /api/job_chapters). */
+  chapter_catalog?: AnalyzeChapter[];
+  /** True when the backend could only synthesize chapter rows from
+   *  chapter_mp3s (no durable full catalog existed). The frontend uses this
+   *  to decide whether to offer a "re-upload to see all chapters" hint. */
+  chapter_catalog_incomplete?: boolean;
   /** Word-level transcript cues keyed by chapter index (string keys — JSON
    *  object keys are always strings on the wire). Each value is a list of
    *  [startMs, endMs, word] cues. Present when edge-tts WordBoundary events
@@ -177,6 +186,10 @@ export interface MyJob {
   /** Per-chapter MP3 metadata from the persisted download token.
    *  Present for done jobs generated in per-chapter mode. */
   chapter_mp3s?: ChapterMp3Info[];
+  /** Compact chapter catalog (every chapter in the book) from the token
+   *  snapshot. Empty for legacy tokens — frontend falls back to
+   *  /api/job_chapters to fetch the full list on demand. */
+  chapter_catalog?: AnalyzeChapter[];
   // Present when status === "generating"
   progress_current?: number;
   progress_total?: number;
@@ -408,6 +421,7 @@ export async function getJobChapters(jobId: string): Promise<AnalyzeResponse> {
   const res = await fetch(`${ABM_BASE}/job_chapters/${jobId}`, {
     credentials: "include",
     headers: cidHeaders(),
+    cache: "no-store",
   });
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
@@ -483,6 +497,7 @@ export async function getMyJobs(): Promise<MyJobsResponse> {
   const res = await fetch(`${ABM_BASE}/my_jobs`, {
     credentials: "include",
     headers: cidHeaders(),
+    cache: "no-store",
   });
   if (!res.ok) {
     throw new Error(`My jobs fetch failed (${res.status})`);
@@ -544,6 +559,7 @@ export async function getChapterSummary(bookId: string, chapterIndex: number): P
     headers: cidHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify({ book_id: bookId, chapter_index: chapterIndex }),
     credentials: "include",
+    cache: "no-store",
   });
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));

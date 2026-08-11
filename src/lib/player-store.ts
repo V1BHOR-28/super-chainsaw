@@ -34,8 +34,15 @@ export interface PlayingJob {
   chapterMp3s?: ChapterMp3Info[];
   /** Which chapter indices are in the current audio. */
   selectedChapters?: number[];
+  /** Total chapter count in the book (the full catalog length). Carried so
+   *  the Chapters drawer can show "N of M" before /api/job_chapters loads. */
+  totalChapters?: number;
   /** Full chapter metadata for the chapter browser. */
   chapters?: PlayerChapterInfo[];
+  /** Complete chapter catalog (every chapter in the book, narrated or not).
+   *  Carried from /api/my_jobs so the Chapters drawer can render the full
+   *  list immediately without a /api/job_chapters round-trip when available. */
+  chapterCatalog?: PlayerChapterInfo[];
   /** Cover image URL from the Flask /api/cover/<jobId> endpoint. When
    *  absent, the CSS monogram fallback is used. */
   coverImgUrl?: string;

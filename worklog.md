@@ -872,3 +872,102 @@ Files modified:
 No git push — implementation + verification only, per the task spec.
 
 Regenerating the summary for Inferno Canto I will now: (1) send the FULL chapter text to Groq (no [:2000] slice), (2) use max_tokens=1600 (not 1024), (3) use the Devanagari full-coverage prompt that explicitly requires naming all main characters + covering beginning/middle/end + no skipped prophecies, (4) validate that Virgil (from the last 15% of the chapter) appears in the summary, (5) reject + retry if any CJK/Arabic/Cyrillic chars leak through, (6) cache under summaries/v3/ so the old truncated v2 summary is bypassed. The stray 迷 character is caught by both the validation (reject → retry) and the final _sanitize_summary pass (strip).
+
+---
+Task ID: REGRESSION-FIX-2
+Agent: main (Fix Hindi summary audio identity + broken chapter catalog + stale player data)
+Task: Fix three regressions: (1) Chapter 3 plays Chapter 2's Hindi summary audio because the old HTMLAudioElement is reused across chapters; (2) Chapters drawer shows only generated chapters (4 of 4) instead of the full book catalog (4 of 34) because chapter_mp3s was used as the full catalog; (3) Player keeps stale chapter data after a new generation because chaptersData is never reset.
+
+Work Log:
+- Read prior worklog (HINDI-SUMMARY-FIX, BGM-1, BUGFIX-1-2) for architecture context.
+- Dispatched a thorough Explore agent to map ALL chapter_catalog persistence points in audiobook_app.py + generation_engine.py (12 items). Confirmed: chapter_catalog did NOT exist yet; chapter_mp3s is assigned in exactly ONE place (generation_engine.py:4866, MERGE by index); selected_chapters is OVERWRITTEN per generation; the weak fallback in /api/job_chapters created chapters from chapter_mp3s (the root cause of "4 of 4").
+
+BACKEND (audiobook_app.py) — new helpers (after _register_job_and_flush):
+- _build_chapter_catalog(info): builds a JSON-safe complete catalog [{index,title,words,chars,estimated_minutes}] from a parsed BookInfo. Uses _estimate_chapter_seconds for consistent timing.
+- _generated_chapter_indices(chapter_mp3s): sorted list of chapter indices that have generated MP3 audio. Authoritative narrated set (replaces 4 inline duplications of the same pattern).
+
+BACKEND (audiobook_app.py) — /api/analyze:
+- Replaced inline chapter-list build with _build_chapter_catalog(info). Stashes result as jobs[job_id]["chapter_catalog"] + ["total_chapters"]. Persists via _register_job_and_flush(job_id, chapter_catalog=..., total_chapters=...).
+
+BACKEND (audiobook_app.py) — _save_tokens:
+- Added "chapter_catalog" to the token snapshot dict literal (between total_chapters and transcript_cues).
+- Added chapter_catalog= to the _register_job() call in the registry-sync block.
+
+BACKEND (audiobook_app.py) — _save_job_registry:
+- Added "chapter_catalog" to the registry snapshot dict literal.
+
+BACKEND (audiobook_app.py) — _reconstruct_job_from_storj:
+- Added "chapter_catalog" to the overlay list (token → registry fallback).
+- Added "chapter_catalog": _build_chapter_catalog(info) or rec.get("chapter_catalog", []) to the rebuild dict (rebuilds from the freshly-parsed info.chapters — always reflects the current EPUB).
+
+BACKEND (audiobook_app.py) — /api/job_chapters (CRITICAL FIX):
+- WEAK fallback: now prefers the persisted chapter_catalog (full book) over synthesizing rows from chapter_mp3s. Only falls back to chapter_mp3s rows as a LAST resort, with "chapter_catalog_incomplete": True flag. total_chapters NEVER reports len(chapter_mp3s) when a larger persisted count exists — uses _stored_total or len(_catalog).
+- STRONG path: uses job.get("chapter_catalog") or _build_chapter_catalog(info) as the authoritative chapters list. Refreshes the job's catalog if missing.
+- Both paths: selected_chapters derived via _generated_chapter_indices(chapter_mp3s). Cache-Control: no-store header on all responses.
+
+BACKEND (audiobook_app.py) — /api/my_jobs:
+- Live-job loop: total_chapters from len(chapter_catalog) or len(info.chapters) or stored value. Added "chapter_catalog" to the entry. Uses _generated_chapter_indices helper.
+- Token-restored loop: total_chapters from len(chapter_catalog) or stored total or len(chapter_mp3s). Added "chapter_catalog" from token. Uses _generated_chapter_indices helper.
+- Response: Cache-Control: no-store header.
+
+BACKEND (audiobook_app.py) — /api/chapter/summary:
+- Added Cache-Control: no-store header to both the cached-path and fresh-path success responses.
+
+BACKEND (generation_engine.py):
+- Added _build_catalog_from_info(info) local helper (mirror of audiobook_app._build_chapter_catalog, kept local to avoid circular import — reuses _estimate_chapter_seconds with a 150wpm fallback).
+- _create_download_token _refresh_fields: added "chapter_catalog": job.get("chapter_catalog") or _build_catalog_from_info(info). Both the existing-token update path and new-token creation path carry it automatically.
+- Post-merge (per-chapter mp3 branch, after job["chapter_mp3s"] = new_mp3s): refreshes selected_chapters = _merged_indices, rebuilds chapter_catalog from info if missing, recomputes total_chapters from catalog length. Ensures the in-memory job stays consistent after every generation.
+
+FRONTEND (hindi-summary-card.tsx) — Bug 1 fix (FULL REWRITE):
+- Removed the old render-time prevChapter state-reset block + the audioRef.current reuse bug.
+- Parent now passes a `key` prop (bookId:chapterIndex) so React REMOUNTS the component on chapter change — naturally tearing down the old audio element via unmount cleanup. This is the cleanest guarantee that Chapter 3 can never replay Chapter 2's audio.
+- Unmount cleanup effect: pause → removeEventListener(ended/error) → removeAttribute("src") → load() → null the ref.
+- createSummaryAudio(url): destroys any existing element first, then constructs a fresh <audio> with preload="metadata" + ended/error listeners. Called from handlePlayAudio when the current element's src doesn't match the current summary URL.
+- Request identity guard: requestGenerationRef (incremented on every load click) + latestBookIdRef/latestChapterIndexRef (synced via effect). A response is dropped unless generation matches AND book/chapter still match — prevents a slow Chapter 2 fetch from populating Chapter 3's card.
+- Cache: SUMMARY_CACHE_VERSION = "v4" prefix. _isValidSummary() validates cached values (summary is non-empty string + audio_url is string) before use. Failed/empty responses are never cached.
+- Multi-paragraph rendering preserved (split on \n{2,} into separate <p>).
+
+FRONTEND (player-view.tsx) — Bug 3 fix:
+- chapterRevision: [jobId, ...sorted chapterMp3s indices, length].join(":"). Ref-guarded render-time reset clears chaptersData to null when the job snapshot changes (new generation appended a chapter). This forces a fresh getJobChapters on the next drawer open.
+- loadChapters: request identity guard (chapterRequestRef + usePlayerStore.getState().currentJob?.jobId check). Dedup via chaptersLoadingRef. Stale responses dropped.
+- HindiSummaryCard now has a key prop (bookId:chapterIndex) for remount-on-chapter-change.
+- ChaptersPanel: new passedTotalChapters prop. chapters sourced from chaptersData?.chapters ?? passedChapters (which is now job.chapterCatalog ?? job.chapters). chapterMp3sList from chaptersData?.chapter_mp3s ?? chapterMp3s. generatedIndices = Set(chapterMp3sList indices). totalChapters NEVER falls back to chapterMp3s.length. inAudio uses generatedIndices.has(ch.index) when hasChapterMp3s, else selectedSet.has (legacy fallback) — an EMPTY narrated set no longer marks everything as narrated.
+
+FRONTEND (abm-api.ts):
+- Added chapter_catalog? + chapter_catalog_incomplete? to AnalyzeResponse. Added chapter_catalog? to MyJob.
+- cache: "no-store" on getJobChapters, getMyJobs, getChapterSummary fetches.
+
+FRONTEND (library-view.tsx):
+- LibraryCard: added chapterCatalog? field. toCard: maps job.chapter_catalog. openPlayer: passes totalChapters + chapterCatalog from the pre-fetched getJobChapters response (falling back to card fields).
+
+FRONTEND (player-store.ts):
+- PlayingJob: added totalChapters? + chapterCatalog? fields.
+
+VERIFICATION:
+- python3 -m py_compile audiobook_app.py + generation_engine.py: both PASS.
+- npx tsc --noEmit: zero errors in any modified file (hindi-summary-card, player-view, abm-api, library-view, player-store).
+- bun run lint: 0 errors, 0 warnings (resolved react-hooks/refs + set-state-in-effect rule conflicts by using key-based remount for the summary card + ref-guarded render-time reset for the player chapter revision, matching the existing lint-clean pattern).
+- Inline logic tests (6 cases): merged indices, non-contiguous selection, empty/None, dedupe, total=10 (not 4) with 4 generated, legacy fallback. All passed.
+- agent-browser: page loads cleanly (HTTP 200, title "ARIA"), no console errors, no hydration crashes, Fast Refresh compiled all changes. Dev log shows all-200 responses.
+
+CONSTRAINTS honored:
+- Did NOT touch use-word-sync.ts, transcript-view.tsx, timing/offset logic, or the audio engine.
+- Did NOT change the voice count (stays 11) or Hindi voice selection/narration tuning.
+- Did NOT change the Hindi summary-generation prompt (only added no-store cache header).
+- Did NOT touch BGM cue logic/mixing, cover persistence, deletion tombstones, or auth/client ownership.
+- Did NOT change the visual design.
+- Glossary/explain-paragraph endpoints' token budgets unchanged.
+
+Stage Summary:
+Files modified:
+- mini-services/audiobook-maker/audiobook_app.py (+85 lines: 2 helpers, /api/analyze catalog build+persist, _save_tokens catalog field, _save_job_registry catalog field, _reconstruct_job_from_storj catalog overlay+rebuild, /api/job_chapters catalog-priority rewrite + incomplete flag + no-store, /api/my_jobs both loops catalog+helper+no-store, /api/chapter/summary no-store headers)
+- mini-services/audiobook-maker/generation_engine.py (+50 lines: _build_catalog_from_info helper, _refresh_fields chapter_catalog, post-merge selected_chapters/catalog/total derive)
+- src/components/aria/hindi-summary-card.tsx (FULL REWRITE: key-based remount, unmount cleanup, createSummaryAudio, request identity guard, v4 cache + validation)
+- src/components/aria/player-view.tsx (+45 lines: chapterRevision reset, request-guarded loadChapters, HindiSummaryCard key prop, ChaptersPanel passedTotalChapters + chapter_mp3s-authoritative calculations + inAudio fix)
+- src/lib/abm-api.ts (+18 lines: chapter_catalog/incomplete types on AnalyzeResponse, chapter_catalog on MyJob, cache:no-store on 3 fetches)
+- src/lib/player-store.ts (+6 lines: totalChapters + chapterCatalog on PlayingJob)
+- src/components/aria/library-view.tsx (+5 lines: chapterCatalog on LibraryCard + toCard + openPlayer, AnalyzeChapter import)
+
+No git push — implementation + verification only, per the task spec.
+
+The fix is complete: Chapter 3 will always play Chapter 3's Hindi summary (key-based remount destroys the old audio element), and the Chapters drawer will always show the full book catalog with green ticks only on generated chapters — even after a later English TTS generation (chapterRevision invalidates the stale snapshot) and a backend restart (chapter_catalog persisted in token + registry + reconstructed from info.chapters).

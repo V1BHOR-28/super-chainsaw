@@ -31,6 +31,7 @@ import {
   isPollingStatus,
   type MyJob,
   type AnalyzeResponse,
+  type AnalyzeChapter,
   type JobStatus,
   type ChapterMp3Info,
 } from "@/lib/abm-api";
@@ -80,6 +81,10 @@ interface LibraryCard {
   selectedChapters?: number[];
   totalChapters?: number;
   chapterMp3s?: ChapterMp3Info[];
+  /** Complete parsed chapter catalog (every chapter in the book). Carried
+   *  through from /api/my_jobs so the player can render the full Chapters
+   *  drawer without an extra round-trip when available. */
+  chapterCatalog?: AnalyzeChapter[];
   /** Whether the EPUB had an embedded cover. When true, coverImgUrl is set. */
   hasCover?: boolean;
   /** URL to the Flask /api/cover/<jobId> endpoint. Empty string when no cover. */
@@ -108,6 +113,7 @@ function toCard(job: MyJob): LibraryCard {
     selectedChapters: job.selected_chapters,
     totalChapters: job.total_chapters,
     chapterMp3s: job.chapter_mp3s,
+    chapterCatalog: job.chapter_catalog,
     hasCover,
     // Cover URL from the Flask /api/cover endpoint — available immediately
     // after upload (the Flask app extracts it from the EPUB during analyze).
@@ -463,7 +469,9 @@ export function LibraryView() {
         accent: card.accent,
         downloadUrl: getDownloadUrl(card.jobId),
         selectedChapters: chaptersResp?.selected_chapters ?? card.selectedChapters,
+        totalChapters: chaptersResp?.total_chapters ?? card.totalChapters,
         chapters: chaptersResp?.chapters,
+        chapterCatalog: chaptersResp?.chapter_catalog ?? card.chapterCatalog,
         chapterMp3s: chaptersResp?.chapter_mp3s ?? card.chapterMp3s,
         coverImgUrl: card.coverImgUrl,
       });

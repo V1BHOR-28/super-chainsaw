@@ -73,18 +73,55 @@ export function PlayerView() {
   const [chaptersData, setChaptersData] = useState<AnalyzeResponse | null>(null);
   const [chaptersLoading, setChaptersLoading] = useState(false);
 
-  // Lazy-load chapter data when the user opens the browser (or use what was
-  // passed in from the library via job.chapters / job.selectedChapters)
+  // ── ARIA: reset chaptersData whenever the active job snapshot changes ──
+  // The identity includes the jobId + the sorted generated chapter indices +
+  // the chapter_mp3s count, so generating a new chapter (which appends to
+  // chapter_mp3s) invalidates the stale snapshot and forces a fresh fetch.
+  // Without this, the player kept an old 4-chapter snapshot after another
+  // chapter was generated.
+  const chapterRevision = [
+    job?.jobId ?? "",
+    ...(job?.chapterMp3s ?? []).map((ch) => ch.index).sort((a, b) => a - b),
+    String(job?.chapterMp3s?.length ?? 0),
+  ].join(":");
+  const chapterRevisionRef = useRef(chapterRevision);
+  if (chapterRevisionRef.current !== chapterRevision) {
+    chapterRevisionRef.current = chapterRevision;
+    // Reset during render (React-allowed when guarded by a condition) so the
+    // stale snapshot is cleared BEFORE the next render reads chaptersData.
+    setChaptersData(null);
+  }
+
+  // Request identity guard — prevents a slow request from a previous job/
+  // generation from overwriting the current state after the user switches.
+  const chapterRequestRef = useRef(0);
+  const chaptersLoadingRef = useRef(false);
+
   const loadChapters = async () => {
-    if (chaptersData || !job) return;
+    if (!job || chaptersLoadingRef.current) return;
+    const requestId = ++chapterRequestRef.current;
+    const requestedJobId = job.jobId;
+
+    chaptersLoadingRef.current = true;
     setChaptersLoading(true);
     try {
-      const resp = await getJobChapters(job.jobId);
+      const resp = await getJobChapters(requestedJobId);
+      // Stale-response guard: drop the response if the user switched jobs
+      // (or triggered another fetch) since this request was issued.
+      if (
+        requestId !== chapterRequestRef.current ||
+        usePlayerStore.getState().currentJob?.jobId !== requestedJobId
+      ) {
+        return;
+      }
       setChaptersData(resp);
     } catch (err) {
       console.error("[player-view] could not load chapters", err);
     } finally {
-      setChaptersLoading(false);
+      chaptersLoadingRef.current = false;
+      if (requestId === chapterRequestRef.current) {
+        setChaptersLoading(false);
+      }
     }
   };
 
@@ -354,6 +391,7 @@ export function PlayerView() {
             <>
               <TranscriptView />
               <HindiSummaryCard
+                key={`${job?.jobId ?? ""}:${job?.chapterMp3s?.[currentChapterIdx]?.index ?? -1}`}
                 bookId={job?.jobId ?? ""}
                 chapterIndex={job?.chapterMp3s?.[currentChapterIdx]?.index ?? -1}
                 chapterTitle={job?.chapterMp3s?.[currentChapterIdx]?.title ?? ""}
@@ -368,8 +406,9 @@ export function PlayerView() {
         <ChaptersPanel
           loading={chaptersLoading}
           chaptersData={chaptersData}
-          passedChapters={job.chapters}
+          passedChapters={job.chapterCatalog ?? job.chapters}
           passedSelected={job.selectedChapters ?? chaptersData?.selected_chapters}
+          passedTotalChapters={job.totalChapters}
           chapterMp3s={job.chapterMp3s ?? chaptersData?.chapter_mp3s}
           currentChapterIdx={currentChapterIdx}
           currentTime={currentTime}
@@ -927,6 +966,7 @@ function ChaptersPanel({
   chaptersData,
   passedChapters,
   passedSelected,
+  passedTotalChapters,
   chapterMp3s,
   currentChapterIdx,
   currentTime,
@@ -939,6 +979,7 @@ function ChaptersPanel({
   chaptersData: AnalyzeResponse | null;
   passedChapters?: { index: number; title: string; chars: number; estimated_minutes: number }[];
   passedSelected?: number[];
+  passedTotalChapters?: number;
   chapterMp3s?: ChapterMp3Info[];
   currentChapterIdx: number;
   currentTime: number;
@@ -947,37 +988,55 @@ function ChaptersPanel({
   onSeekToChapter: (idx: number) => void;
   onClose: () => void;
 }) {
-  const chapters = chaptersData?.chapters ?? passedChapters ?? [];
-  const selectedSet = new Set(
-    chaptersData?.selected_chapters ?? passedSelected ?? []
+  // ── ARIA: full chapter catalog (every chapter in the book) ──
+  // Prefer the freshly-fetched /api/job_chapters response, then the catalog
+  // carried on the job (job.chapterCatalog), then any legacy chapters prop.
+  // chapter_mp3s is NEVER used as the full catalog — only as the narrated set.
+  const chapters = chaptersData?.chapters?.length
+    ? chaptersData.chapters
+    : passedChapters ?? [];
+  // ── ARIA: chapter_mp3s is the AUTHORITATIVE narrated set ──
+  // Use selected_chapters only as a backward-compat fallback when
+  // chapter_mp3s is unavailable (legacy single-file jobs).
+  const chapterMp3sList = chaptersData?.chapter_mp3s?.length
+    ? chaptersData.chapter_mp3s
+    : chapterMp3s ?? [];
+  const generatedIndices = new Set(
+    chapterMp3sList.map((chapter) => chapter.index),
   );
-  // totalChapters: prefer the API value, fall back to chapters array length.
-  // If both are 0 but we have chapterMp3s, use that count instead (happens
-  // when the job data comes from a download token after Flask restart —
-  // the token has chapter_mp3s + selected_chapters but not the full parsed
-  // chapter list, so total_chapters is 0).
-  const totalChapters = chaptersData?.total_chapters
-    || chapters.length
-    || chapterMp3s?.length
-    || selectedSet.size
-    || 0;
-  const inAudioCount = selectedSet.size > 0
-    ? selectedSet.size
-    : chapterMp3s?.length
-    || chapters.length;
-  const hasChapterMp3s = !!chapterMp3s && chapterMp3s.length > 0;
+  // Backward-compat fallback: if chapter_mp3s is empty but selected_chapters
+  // is present (legacy single-file job), use that so the drawer still shows
+  // ticks. selected_chapters is NEVER used when chapter_mp3s is non-empty.
+  const selectedSet = generatedIndices.size > 0
+    ? generatedIndices
+    : new Set(chaptersData?.selected_chapters ?? passedSelected ?? []);
+
+  // totalChapters: prefer the API value, then the passed job value, then the
+  // chapters array length. NEVER fall back to chapter_mp3s.length — that was
+  // the root cause of "4 of 4" (showing only generated chapters).
+  const totalChapters =
+    chaptersData?.total_chapters ||
+    passedTotalChapters ||
+    chapters.length ||
+    0;
+  const inAudioCount = generatedIndices.size > 0
+    ? generatedIndices.size
+    : selectedSet.size > 0
+      ? selectedSet.size
+      : 0;
+  const hasChapterMp3s = chapterMp3sList.length > 0;
 
   // When chapterMp3s is available, use exact durations. Otherwise fall back
   // to proportional estimates from char counts (backward compat).
   const audioChapters = hasChapterMp3s
-    ? chapterMp3s!
+    ? chapterMp3sList
     : selectedSet.size > 0
       ? chapters.filter((c) => selectedSet.has(c.index))
       : chapters;
 
   const chapterStarts = hasChapterMp3s
-    ? chapterMp3s!.map((_, i) =>
-        chapterMp3s!.slice(0, i).reduce((s, ch) => s + (ch.duration_ms || 0), 0) / 1000
+    ? chapterMp3sList.map((_, i) =>
+        chapterMp3sList.slice(0, i).reduce((s, ch) => s + (ch.duration_ms || 0), 0) / 1000
       )
     : (() => {
         const totalAudioChars = audioChapters.reduce((sum, c) => sum + ((c as any).chars || 0), 0);
@@ -1146,7 +1205,13 @@ function ChaptersPanel({
           })
         ) : (
           chapters.map((ch, idx) => {
-            const inAudio = selectedSet.size === 0 || selectedSet.has(ch.index);
+            // ARIA: chapter_mp3s is the authoritative narrated set. An EMPTY
+            // narrated set must NOT mark everything as narrated — that was the
+            // root cause of "all chapters show green ticks". Fall back to
+            // selected_chapters only for legacy single-file jobs (no chapter_mp3s).
+            const inAudio = hasChapterMp3s
+              ? generatedIndices.has(ch.index)
+              : selectedSet.has(ch.index);
             const audioIdx = audioChapters.findIndex((c) =>
               hasChapterMp3s
                 ? (c as ChapterMp3Info).index === ch.index

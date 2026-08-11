@@ -1776,6 +1776,11 @@ def _save_tokens():
                     "chapter_mp3s": info.get("chapter_mp3s", []),
                     "selected_chapters": info.get("selected_chapters", []),
                     "total_chapters": info.get("total_chapters", 0),
+                    # ARIA: complete parsed chapter catalog (every chapter in
+                    # the book). Persisted so /api/job_chapters can return the
+                    # full catalog after a Render restart even when the EPUB
+                    # can't be re-downloaded/re-parsed.
+                    "chapter_catalog": info.get("chapter_catalog", []),
                     # ARIA: word-level transcript cues per chapter
                     # ({chapter_index: [[startMs, endMs, word], ...]}).
                     # Survives Flask restarts so the synced-transcript UI can
@@ -1846,7 +1851,8 @@ def _save_tokens():
                 title=tok_info.get("book_title", ""),
                 selected_chapters=tok_info.get("selected_chapters", []),
                 chapter_mp3s=tok_info.get("chapter_mp3s", []),
-                total_chapters=tok_info.get("total_chapters", 0))
+                total_chapters=tok_info.get("total_chapters", 0),
+                chapter_catalog=tok_info.get("chapter_catalog", []))
         _save_job_registry()
     except Exception as _e_reg:
         print(f"[registry] token-sync failed (non-fatal): {_e_reg}")
@@ -1929,6 +1935,11 @@ def _save_job_registry():
                     "epub_s3_key": rec.get("epub_s3_key", ""),
                     "selected_chapters": rec.get("selected_chapters", []),
                     "chapter_mp3s": rec.get("chapter_mp3s", []),
+                    # ARIA: complete parsed chapter metadata (every chapter in
+                    # the book, regardless of whether it has audio). Persisted
+                    # so /api/job_chapters can show the full catalog after a
+                    # Render restart even when the EPUB can't be re-parsed.
+                    "chapter_catalog": rec.get("chapter_catalog", []),
                     "updated_at": rec.get("updated_at", 0),
                 }
         community_store.atomic_write_json(_JOB_REGISTRY_FILE, data, indent=2)
@@ -2027,6 +2038,52 @@ def _register_job_and_flush(job_id, **fields):
     _save_job_registry()
 
 
+# ── ARIA: chapter catalog helpers ──
+# The "full chapter catalog" (every chapter parsed from the EPUB/PDF) and the
+# "generated chapter playlist" (only chapters with MP3 files) are two SEPARATE
+# datasets that must never be conflated. chapter_catalog is built once during
+# /api/analyze and persisted alongside chapter_mp3s so the Chapters drawer can
+# always show every chapter (with green ticks only on generated ones), even
+# after a Render restart or a later "More chapters" generation run.
+
+def _build_chapter_catalog(info):
+    """Build a JSON-safe complete chapter catalog from a parsed BookInfo.
+
+    Each entry: {index, title, words, chars, estimated_minutes}.
+    Uses the same 150 wpm estimation as /api/analyze and /api/job_chapters
+    so the catalog is consistent regardless of which path built it.
+    """
+    if not info or not getattr(info, "chapters", None):
+        return []
+    catalog = []
+    _lang = (getattr(info, "language", None) or "en")[:2].lower()
+    for ch in info.chapters:
+        _secs = _estimate_chapter_seconds(ch, _lang)
+        catalog.append({
+            "index": ch.index,
+            "title": ch.title,
+            "words": ch.word_count,
+            "chars": ch.char_count,
+            "estimated_minutes": round(_secs / 60.0, 1),
+        })
+    return catalog
+
+
+def _generated_chapter_indices(chapter_mp3s):
+    """Sorted list of chapter indices that have generated MP3 audio.
+
+    The authoritative narrated set is derived from chapter_mp3s (which is
+    MERGED across generations in generation_engine.py), NOT from the job's
+    `selected_chapters` field (which is OVERWRITTEN per generation and only
+    holds the latest batch). Returns [] when chapter_mp3s is empty/missing.
+    """
+    return sorted({
+        int(ch["index"])
+        for ch in (chapter_mp3s or [])
+        if isinstance(ch, dict) and ch.get("index") is not None
+    })
+
+
 def _lookup_job_by_file_hash(client_id, file_hash):
     """Find a registry entry matching (client_id, file_hash).
 
@@ -2089,7 +2146,7 @@ def _reconstruct_job_from_storj(job_id, fallback_record=None):
         for k in ("epub_s3_key", "client_id", "original_filename", "file_hash",
                   "language_detected", "selected_chapters", "chapter_mp3s",
                   "total_chapters", "transcript_cues", "bgm_mode", "bgm_cues",
-                  "narration_language",
+                  "narration_language", "chapter_catalog",
                   "cover_s3_key", "cover_mime", "cover_thumb"):
             if not rec.get(k) and fallback_record.get(k):
                 rec[k] = fallback_record[k]
@@ -2130,6 +2187,12 @@ def _reconstruct_job_from_storj(job_id, fallback_record=None):
             "language_detected": rec.get("language_detected", False),
             "selected_chapters": rec.get("selected_chapters", []),
             "chapter_mp3s": rec.get("chapter_mp3s", []),
+            # ARIA: rebuild the full chapter catalog from the freshly-parsed
+            # info.chapters (always reflects the current EPUB). Fall back to
+            # the persisted copy only if info has no chapters (shouldn't happen
+            # — _parse_book raises on empty books — but defensive).
+            "chapter_catalog": (_build_chapter_catalog(info)
+                                 or rec.get("chapter_catalog", [])),
             # ARIA: word-level transcript cues restored from the download-token
             # snapshot (JSON object keys are strings here — that's expected;
             # the API helpers normalize via _chapter_has_transcript()).
@@ -8718,16 +8781,21 @@ def api_analyze():
                   browser_lang=jobs[job_id].get("browser_lang", ""))
 
     _lang_new = (getattr(info, "language", None) or "it")[:2].lower()
-    chapters = []
-    _total_secs_new = 0.0
-    for ch in info.chapters:
-        _secs = _estimate_chapter_seconds(ch, _lang_new)
-        _total_secs_new += _secs
-        chapters.append({
-            "index": ch.index, "title": ch.title,
-            "words": ch.word_count, "chars": ch.char_count,
-            "estimated_minutes": round(_secs / 60.0, 1),
-        })
+    # ARIA: build the complete chapter catalog ONCE via the shared helper and
+    # stash it on the job + registry. This is the authoritative "every chapter
+    # in the book" list — separate from chapter_mp3s (the generated playlist).
+    # Persisted in the download-token snapshot + durable registry so it
+    # survives Render restarts (see _save_tokens / _save_job_registry /
+    # _reconstruct_job_from_storj / generation_engine._create_download_token).
+    chapters = _build_chapter_catalog(info)
+    _total_secs_new = sum((c.get("estimated_minutes", 0) or 0) * 60.0 for c in chapters)
+    jobs[job_id]["chapter_catalog"] = chapters
+    jobs[job_id]["total_chapters"] = len(chapters)
+    try:
+        _register_job_and_flush(job_id, chapter_catalog=chapters,
+                                total_chapters=len(chapters))
+    except Exception:
+        pass
     # Override total estimated minutes for response consistency with per-chapter values.
     _total_minutes_new = round(_total_secs_new / 60.0, 1)
 
@@ -10569,59 +10637,68 @@ def api_job_chapters(job_id):
         # ── ARIA WEAK fallback ──
         # Only reached if Storj reconstruction itself failed (e.g.
         # epub_s3_key missing from both the registry and the token snapshot,
-        # or the storage backend is disabled). Return what we have from the
-        # token snapshot so the frontend can at least show the chapter
-        # browser + play existing audio. This path loses title provenance
-        # (author="" and total_chapters may be 1) — that's why it's a
-        # fallback, not the primary path.
+        # or the storage backend is disabled). Use the persisted
+        # chapter_catalog if present (preferred — it has the full book). Only
+        # synthesize rows from chapter_mp3s as a LAST resort, and flag the
+        # response as chapter_catalog_incomplete so the frontend knows the
+        # full catalog isn't available.
         chapter_mp3s = job.get("chapter_mp3s") or []
-        if chapter_mp3s:
-            return jsonify({
-                "job_id": job_id,
-                "title": job.get("book_title", "") or job.get("title", ""),
-                "author": "",
-                "language": "",
-                "total_chapters": job.get("total_chapters", len(chapter_mp3s)),
-                "total_words": 0,
-                "total_chars": 0,
-                "estimated_minutes": round(sum(ch.get("duration_ms", 0) for ch in chapter_mp3s) / 60000.0, 1),
-                "chapters": [
-                    {"index": ch["index"], "title": ch["title"], "words": 0,
-                     "chars": 0, "estimated_minutes": round(ch.get("duration_ms", 0) / 60000.0, 1)}
-                    for ch in chapter_mp3s
-                ],
-                "has_cover": False,
-                # ARIA: derive from chapter_mp3s (merged + authoritative).
-                "selected_chapters": sorted({
-                    ch["index"] for ch in chapter_mp3s
-                    if isinstance(ch, dict) and "index" in ch
-                }),
-                "chapter_mp3s": chapter_mp3s,
-                # ARIA: word-level transcript cues. The job dict here came
-                # from a download-token snapshot (transcript_cues restored
-                # by _reconstruct_job_from_storj OR carried on the token
-                # snapshot directly). Keys may be int (in-memory) or string
-                # (JSON-serialized token) — both are valid for the frontend
-                # to consume. May be {} for older jobs or non-edge voices.
-                "transcript_cues": job.get("transcript_cues", {}) or {},
-                # ARIA: BGM delivery mode — tells the frontend whether to
-                # fetch /api/bgm_cues for runtime mixing.
-                "bgm_mode": job.get("bgm_mode", "off"),
-            })
-        return jsonify({"error": "Book data no longer available. Please re-upload the file."}), 400
-
-    chapters = []
-    _total_secs = 0.0
-    for ch in info.chapters:
-        _secs = (ch.word_count or 0) / 2.5  # 150 wpm = 2.5 words/sec
-        _total_secs += _secs
-        chapters.append({
-            "index": ch.index, "title": ch.title,
-            "words": ch.word_count, "chars": ch.char_count,
-            "estimated_minutes": round(_secs / 60.0, 1),
+        _catalog = job.get("chapter_catalog") or []
+        _stored_total = job.get("total_chapters", 0)
+        # Prefer the persisted full catalog; only fall back to chapter_mp3s
+        # rows when no durable catalog exists anywhere.
+        if _catalog:
+            _resp_chapters = _catalog
+            _incomplete = False
+        elif chapter_mp3s:
+            _resp_chapters = [
+                {"index": ch["index"], "title": ch["title"], "words": 0,
+                 "chars": 0, "estimated_minutes": round(ch.get("duration_ms", 0) / 60000.0, 1)}
+                for ch in chapter_mp3s
+            ]
+            _incomplete = True
+        else:
+            resp = jsonify({"error": "Book data no longer available. Please re-upload the file."})
+            resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+            return resp, 400
+        # total_chapters: NEVER report len(chapter_mp3s) when a larger
+        # persisted count exists — that was the root cause of "4 of 4".
+        _total = _stored_total or len(_catalog) or len(chapter_mp3s)
+        resp = jsonify({
+            "job_id": job_id,
+            "title": job.get("book_title", "") or job.get("title", ""),
+            "author": "",
+            "language": "",
+            "total_chapters": _total,
+            "total_words": 0,
+            "total_chars": 0,
+            "estimated_minutes": round(sum(ch.get("duration_ms", 0) for ch in chapter_mp3s) / 60000.0, 1),
+            "chapters": _resp_chapters,
+            "chapter_catalog_incomplete": _incomplete,
+            "has_cover": bool(job.get("cover_s3_key") or job.get("cover_thumb")),
+            "selected_chapters": _generated_chapter_indices(chapter_mp3s),
+            "chapter_mp3s": chapter_mp3s,
+            "transcript_cues": job.get("transcript_cues", {}) or {},
+            "bgm_mode": job.get("bgm_mode", "off"),
         })
+        resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        return resp
 
-    return jsonify({
+    # ── ARIA STRONG path ──
+    # info.chapters is available (either in-memory or freshly re-parsed from
+    # Storj). Build/refresh the chapter_catalog, then return it as the
+    # authoritative `chapters` list. chapter_mp3s is the generated playlist
+    # (only chapters with audio) — NEVER used as the full catalog here.
+    chapters = job.get("chapter_catalog") or _build_chapter_catalog(info)
+    if not job.get("chapter_catalog"):
+        try:
+            with _jobs_lock:
+                jobs[job_id]["chapter_catalog"] = chapters
+        except Exception:
+            pass
+    _total_secs = sum((c.get("estimated_minutes", 0) or 0) * 60.0 for c in chapters)
+
+    resp = jsonify({
         "job_id": job_id,
         "title": info.title,
         "author": info.author,
@@ -10631,33 +10708,21 @@ def api_job_chapters(job_id):
         "total_chars": info.total_chars,
         "estimated_minutes": round(_total_secs / 60.0, 1),
         "chapters": chapters,
-        "has_cover": bool(job.get("cover_path") or job.get("cover_hires")),
-        # ARIA: derive selected_chapters from chapter_mp3s (the MERGED,
+        "has_cover": bool(job.get("cover_path") or job.get("cover_hires")
+                          or job.get("cover_s3_key") or job.get("cover_thumb")),
+        # ARIA: selected_chapters is derived from chapter_mp3s (the MERGED,
         # authoritative source across all generations). The job's
         # `selected_chapters` field is OVERWRITTEN per generation (only has
         # the latest batch), so using it directly would miss chapters from
-        # previous "More chapters" runs. chapter_mp3s is correctly merged
-        # in generation_engine.py (prev_mp3s + new_mp3s), so its indices are
-        # the complete set of chapters currently in the audiobook.
-        "selected_chapters": sorted({
-            ch["index"] for ch in (job.get("chapter_mp3s") or [])
-            if isinstance(ch, dict) and "index" in ch
-        }) or (job.get("selected_chapters") or []),
-        # Per-chapter MP3 metadata. Present when the job was generated with
-        # output_format='mp3' + single_file=False (ARIA per-chapter mode).
-        # Each entry: {index, title, filename, duration_ms, start_ms, end_ms}.
-        # The frontend uses this to build a playlist player with exact
-        # chapter boundaries + stream each chapter individually.
+        # previous "More chapters" runs.
+        "selected_chapters": (_generated_chapter_indices(job.get("chapter_mp3s"))
+                              or (job.get("selected_chapters") or [])),
         "chapter_mp3s": job.get("chapter_mp3s") or [],
-        # ARIA: word-level transcript cues for karaoke-style highlighting.
-        # Shape: {chapter_index: [[startMs, endMs, word], ...]} — flat arrays
-        # for compact JSON. May be {} (older jobs, non-edge voices, or if
-        # the boundary stream fell back to communicate.save()). The frontend
-        # checks per-chapter emptiness and shows "Transcript not available".
         "transcript_cues": job.get("transcript_cues", {}) or {},
-        # ARIA: BGM delivery mode — "off" | "runtime" | "prerender".
         "bgm_mode": job.get("bgm_mode", "off"),
     })
+    resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    return resp
 
 
 @app.route("/api/chapter_mp3/<job_id>/<int:chapter_index>")
@@ -11311,7 +11376,9 @@ def api_chapter_summary():
                 audio_url = ""
                 if storage_backend.object_exists(audio_cache_key):
                     audio_url = storage_backend.presigned_get_url(audio_cache_key)
-                return jsonify({"summary": cached.get("summary", ""), "audio_url": audio_url})
+                _r = jsonify({"summary": cached.get("summary", ""), "audio_url": audio_url})
+                _r.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+                return _r
             finally:
                 try: os.remove(tmp)
                 except: pass
@@ -11370,7 +11437,9 @@ def api_chapter_summary():
         except Exception as e:
             print(f"[summary] R2 cache write failed: {e}")
 
-        return jsonify({"summary": summary, "audio_url": audio_url})
+        _r = jsonify({"summary": summary, "audio_url": audio_url})
+        _r.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        return _r
 
     except Exception as e:
         print(f"[summary] failed: {e}")
@@ -11900,10 +11969,8 @@ def api_my_jobs():
         # show "2/34 chapters" after generating 3 chapters across multiple
         # "More chapters" runs. chapter_mp3s is correctly merged.
         _chapter_mp3s = job.get("chapter_mp3s") or []
-        _derived_selected = sorted({
-            ch["index"] for ch in _chapter_mp3s
-            if isinstance(ch, dict) and "index" in ch
-        }) or (job.get("selected_chapters") or [])
+        _derived_selected = _generated_chapter_indices(_chapter_mp3s) or (
+            job.get("selected_chapters") or [])
         # ARIA: annotate each chapter_mp3s entry with a `has_transcript`
         # boolean so the frontend library can render a synced-transcript
         # affordance without shipping the (large) transcript_cues payload
@@ -11912,6 +11979,12 @@ def api_my_jobs():
         _tc_live = job.get("transcript_cues") or {}
         _chapter_mp3s_annotated = _annotate_chapter_mp3s_with_transcript(
             _chapter_mp3s, _tc_live)
+        # ARIA: total_chapters from the persisted catalog (authoritative),
+        # falling back to info.chapters length, then the stored value.
+        _catalog_live = job.get("chapter_catalog") or []
+        _total_live = (len(_catalog_live)
+                       or (len(info.chapters) if info else 0)
+                       or job.get("total_chapters", 0))
         entry = {
             "job_id": jid,
             "status": status,
@@ -11920,8 +11993,13 @@ def api_my_jobs():
             "output_format": job.get("output_format", ""),
             "created_at": job.get("start_time") or job.get("last_poll") or 0,
             "selected_chapters": _derived_selected,
-            "total_chapters": len(info.chapters) if info else 0,
+            "total_chapters": _total_live,
             "chapter_mp3s": _chapter_mp3s_annotated,
+            # ARIA: compact chapter catalog so the frontend can render the
+            # full chapter list without an extra round-trip to
+            # /api/job_chapters. May be empty for legacy jobs (frontend falls
+            # back to fetching /api/job_chapters on drawer open).
+            "chapter_catalog": _catalog_live,
             # ARIA: has_cover so the frontend can show the EPUB's embedded
             # cover (served from /api/cover/<job_id>) instead of the CSS
             # monogram fallback. Checks cover_s3_key too so restored jobs
@@ -12028,7 +12106,17 @@ def api_my_jobs():
                 "mp3": bool(tinfo.get("output_file")),
                 "abm": bool(tinfo.get("optimized_abm_path")),
             },
-            "total_chapters": tinfo.get("total_chapters", 0),
+            # ARIA: total_chapters — prefer the token's persisted catalog
+            # length (authoritative), fall back to stored total_chapters, then
+            # chapter_mp3s length. NEVER report len(chapter_mp3s) when a larger
+            # persisted count exists.
+            "total_chapters": (len(tinfo.get("chapter_catalog") or [])
+                               or tinfo.get("total_chapters", 0)
+                               or len(tinfo.get("chapter_mp3s") or [])),
+            # ARIA: compact chapter catalog from the token snapshot so the
+            # frontend can render the full list without a /api/job_chapters
+            # round-trip. May be empty for legacy tokens (frontend falls back).
+            "chapter_catalog": tinfo.get("chapter_catalog", []),
             # ARIA: has_cover from the token snapshot — check cover_s3_key too
             # so restored jobs (after Render restart) still advertise their cover.
             "has_cover": bool(tinfo.get("has_cover", False) or tinfo.get("cover_s3_key", "")),
@@ -12051,10 +12139,8 @@ def api_my_jobs():
         # multiple "More chapters" runs. Deriving from chapter_mp3s gives the
         # complete set of chapters currently in the audiobook.
         _tok_chapter_mp3s = entry.get("chapter_mp3s") or []
-        entry["selected_chapters"] = sorted({
-            ch["index"] for ch in _tok_chapter_mp3s
-            if isinstance(ch, dict) and "index" in ch
-        }) or tinfo.get("selected_chapters", [])
+        entry["selected_chapters"] = _generated_chapter_indices(
+            _tok_chapter_mp3s) or tinfo.get("selected_chapters", [])
         # ARIA: annotate chapter_mp3s with `has_transcript` so the frontend
         # knows which chapters have word-level sync data. The token's
         # transcript_cues keys are strings (JSON-serialized) — the helper
@@ -12070,7 +12156,11 @@ def api_my_jobs():
 
     ordered = sorted(out.values(),
                      key=lambda e: -(e.get("created_at") or 0))
-    return jsonify({"jobs": ordered})
+    resp = jsonify({"jobs": ordered})
+    # ARIA: my_jobs is dynamic (chapter_mp3s/selected_chapters/status change
+    # as generations complete) — never let the browser cache it.
+    resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    return resp
 
 
 @app.route("/api/transfer/claim/<token>", methods=["POST"])
