@@ -11496,12 +11496,16 @@ def _extract_named_entities(parsed):
 def _validate_summary_v9(summary, parsed_outline):
     """Validate the final Hindi summary against the Pass A JSON.
 
-    v9 gates (reject and retry once, then error):
-    a) Devanagari character ratio < 0.55 of all letter characters (outside parentheses).
+    v9.1 gates (relaxed to avoid false rejections of valid Hindi summaries):
+    a) Devanagari character ratio < 0.40 of all letter characters (outside parentheses).
     b) Contains "ने " immediately followed by an ASCII [a-z] word.
     c) Matches numbered list lines or "कथन:" / "रूपक:" headings.
-    d) Fewer than 80% of named_entities appear in the text.
-    e) Any 8-word shingle repeats more than twice.
+    d) Fewer than 50% of named_entities appear in the text (was 80% — too strict
+       for chapters with 15+ entities; a 3-5 paragraph summary can't naturally
+       fit every minor name).
+    e) Any 8-word shingle repeats more than 2 times (was "more than twice" = 3+).
+    f) Bare-verb regex: ONLY checks outside parentheses (proper noun glosses
+       like "(Francesca)" should not trigger the bare-verb gate).
 
     Returns (ok, reason, coverage, missing).
     """
@@ -11514,13 +11518,12 @@ def _validate_summary_v9(summary, parsed_outline):
         return (False, "no_devanagari", 0.0, set())
 
     # a) Devanagari character ratio (outside parentheses)
-    # Strip parenthesized content (proper noun glosses)
     text_outside_parens = re.sub(r'\([^)]*\)', '', summary)
     devanagari_chars = len(re.findall(r'[\u0900-\u097F]', text_outside_parens))
     all_letter_chars = len(re.findall(r'[\u0900-\u097Fa-zA-Z]', text_outside_parens))
     if all_letter_chars > 0:
         ratio = devanagari_chars / all_letter_chars
-        if ratio < 0.55:
+        if ratio < 0.40:
             return (False, f"low_devanagari_ratio({ratio:.2f})", 0.0, set())
 
     # b) "ने " followed by ASCII [a-z] (Hindi-English splice)
@@ -11531,12 +11534,13 @@ def _validate_summary_v9(summary, parsed_outline):
     if _OUTLINE_LEAK_RE.search(summary):
         return (False, "outline_leak", 0.0, set())
 
-    # Bare-verb regex reject (keep from v8)
-    if _BARE_VERB_RE.search(summary):
-        matches = _BARE_VERB_RE.findall(summary)
+    # f) Bare-verb regex: ONLY check outside parentheses
+    # Proper nouns in parentheses like "(Francesca)" should not trigger this.
+    if _BARE_VERB_RE.search(text_outside_parens):
+        matches = _BARE_VERB_RE.findall(text_outside_parens)
         return (False, f"bare_verbs({','.join(set(matches))})", 0.0, set())
 
-    # e) 8-word shingle repetition (max 2 occurrences)
+    # e) 8-word shingle repetition (max 2 occurrences = 3+ fails)
     words = summary.split()
     if len(words) >= 8:
         shingles = {}
@@ -11547,7 +11551,7 @@ def _validate_summary_v9(summary, parsed_outline):
             if count > 2:
                 return (False, f"shingle_repeat({sh[:30]}...)", 0.0, set())
 
-    # Paragraph similarity (>85% → FAIL, keep from v8)
+    # Paragraph similarity (>85% → FAIL)
     paragraphs = [p.strip() for p in summary.split("\n\n") if p.strip()]
     for i in range(len(paragraphs)):
         for j in range(i + 1, len(paragraphs)):
@@ -11556,7 +11560,10 @@ def _validate_summary_v9(summary, parsed_outline):
             if sim > 0.85:
                 return (False, f"para_similarity({sim:.2f})", 0.0, set())
 
-    # d) Coverage: >=80% of named_entities from Pass A
+    # d) Coverage: >=50% of named_entities from Pass A (was 80%)
+    # A 3-5 paragraph Hindi summary can't naturally fit 15+ entity names.
+    # 50% ensures the summary covers the MAJOR entities (Dante, Virgil, Minos,
+    # Francesca) without failing on minor ones (Galeotto, Caïna).
     entities = _extract_named_entities(parsed_outline)
     missing = set()
     if entities:
@@ -11568,7 +11575,7 @@ def _validate_summary_v9(summary, parsed_outline):
             else:
                 missing.add(n)
         coverage = round(len(present) / len(entities) * 100, 1) if entities else 100.0
-        if coverage < 80.0:
+        if coverage < 50.0:
             return (False, f"low_coverage({coverage:.0f}%)", coverage, missing)
     else:
         coverage = 100.0
@@ -11886,19 +11893,34 @@ def _generate_hindi_summary_inner(groq_client, chapter_text: str, chapter_title:
                     ok, reason, coverage, missing = ok2, reason2, cov2, missing2
 
     if not ok:
-        # v9: NEVER return the outline as summary. Return an error.
-        print(f"[summary] quality gate failed twice ({reason}) → returning error "
-              f"(NOT the outline)")
-        print(f"summary_returned_from=quality_gate_failed chapter={chap_id}")
-        final_word_count = 0
+        # v9.1: If the summary is non-empty Hindi prose that just failed a
+        # strict gate (coverage, shingle, similarity), return it with
+        # quality="partial" rather than erroring. A partial summary is
+        # better than no summary — the user sees the text with a badge.
+        # Only error on structural failures (outline leak, bare verbs,
+        # ne_ascii splice, low devanagari ratio) which indicate the
+        # output is fundamentally broken.
+        _STRUCTURAL_FAILURES = {"outline_leak", "ne_ascii_splice",
+                                "low_devanagari_ratio", "bare_verbs",
+                                "non_indic_script", "no_devanagari", "empty"}
+        if any(sf in reason for sf in _STRUCTURAL_FAILURES):
+            print(f"[summary] structural gate failed ({reason}) → returning error")
+            print(f"summary_returned_from=quality_gate_failed chapter={chap_id}")
+            return ("", "summary_quality_gate_failed", "error", missing,
+                    outline_json, coverage, False)
+        # Non-structural failure (coverage, shingle, similarity): return
+        # the summary with quality="partial" + the missing names.
+        print(f"[summary] non-structural gate failed ({reason}) → returning "
+              f"partial summary (NOT erroring)")
+        final_word_count = len(summary.split())
+        print(f"summary_returned_from=pass_b_partial chapter={chap_id}")
         print(f"summary_stats chapter={chap_id} "
               f"chars_sent_to_pass_a={chars_sent_to_pass_a} "
               f"chars_sent_to_pass_b={chars_sent_to_pass_b} "
               f"chars_in_full_chapter={full_chars} n_chunks={n_chunks} "
               f"events_returned={events_count} regeneration_count={regeneration_count} "
               f"final_word_count={final_word_count}")
-        return ("", "summary_quality_gate_failed", "error", missing,
-                outline_json, coverage, False)
+        return (summary, None, "partial", missing, outline_json, coverage, False)
 
     # Log the final stats.
     final_word_count = len(summary.split())
