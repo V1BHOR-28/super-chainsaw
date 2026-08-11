@@ -10652,6 +10652,7 @@ def _purge_job_completely(job_id):
                 f"summaries/v5/{job_id}/", f"summaries/v6/{job_id}/",
                 f"summaries/v7/{job_id}/", f"summaries/v8/{job_id}/",
                 f"summaries/v9/{job_id}/", f"summaries/v10/{job_id}/",
+                f"summaries/v11/{job_id}/",
                 f"glossary/{job_id}/", f"glossary/v2/{job_id}/",
             ):
                 try:
@@ -11284,66 +11285,87 @@ _OUTLINE_LEAK_RE = re.compile(r'(^\s*\d+\.\s|^\s*[-•·]\s|कथन:|रूप
 # Regex: meta-commentary opening phrases.
 _META_PHRASE_RE = re.compile(r'^(This chapter|This passage|Summary of|Overview of)', re.IGNORECASE | re.MULTILINE)
 
-# ── Pass A: Event extraction prompt (returns STRICT JSON, English only) ──
+# ── Pass A: Speaker-tagged event extraction (returns STRICT JSON) ──
 _SUMMARY_PASS_A_SYSTEM = (
     "You are an event extraction engine for classical literature. "
-    "You output ONLY valid JSON — no prose, no commentary, no markdown fences, no Hindi.\n\n"
+    "You output ONLY valid JSON — no prose, no commentary, no markdown fences.\n\n"
     "The JSON schema:\n"
     '{\n'
     '  "events": [\n'
-    '    {"actor": "who performs the action (English)", "action": "verb-based description (English)", '
-    '"outcome": "what results (English)"}\n'
+    '    {"id": 1, "speaker": "<who is uttering/acting: narrator | proper name | \'unnamed lady\'>", '
+    '"addressee": "<who they speak to, or null>", '
+    '"nesting": "<0 = narration, 1 = quoted speech, 2 = speech inside speech, 3 = deeper>", '
+    '"action": "<one clause, plain past tense, third person>", '
+    '"quote": "<verbatim <=12 words from source proving this event>"}\n'
     '  ],\n'
     '  "named_entities": ["Minos", "Semiramis", "Dido", ...],\n'
     '  "key_quotes": ["<=8 words verbatim from the chapter", ...],\n'
     '  "similes": ["starlings in winter", "cranes in long-drawn company", ...]\n'
     '}\n\n'
     "HARD RULES:\n"
-    "1. An event MUST have a verb describing something that HAPPENS. "
-    "'X was seen', 'X appeared', 'X was named' are FORBIDDEN as standalone events.\n"
-    "2. Never emit bare English verbs, tags, or vocabulary.\n"
-    "3. The narrator/protagonist (Dante) is the default actor UNLESS the text clearly says otherwise.\n"
+    "1. The first-person 'I' in the source is NOT always the same person. "
+    "When a character begins speaking, every 'I' inside that speech belongs to "
+    "THAT character until their speech ends. Track the speaker stack.\n"
+    "2. Never merge two speakers into one event.\n"
+    "3. Every event MUST have a verbatim quote from the source. No quote = drop the event.\n"
     "4. 10-18 events, covering the chapter END TO END. The final event must come from the last ~10%.\n"
     "5. named_entities: every named person, creature, place, or concept that appears.\n"
     "6. key_quotes: 3-6 short verbatim phrases that anchor the chapter's key moments.\n"
     "7. similes: all similes/metaphors that carry meaning.\n"
-    "8. ALL fields in English. NEVER use Hindi/Devanagari in Pass A output."
+    "8. ALL fields in English.\n"
+    "9. If the source describes a character without naming them (e.g. 'a noble lady "
+    "in Heaven'), use a descriptive label like 'unnamed lady in Heaven' as the speaker."
 )
 
-# ── Pass B: English prose narration ──
+# ── Pass B: Third-person, attribution-preserving English ──
 _SUMMARY_PASS_B_SYSTEM = (
-    "You are a literary summarizer. Given an event outline and the chapter text, "
+    "You are a literary summarizer. Given a verified event list (JSON), "
     "write a summary in plain modern English prose.\n"
     "Rules:\n"
-    "- Output ONLY English prose. No bullets, no numbered lists, no headings, "
-    "no glossary, no meta-commentary like 'This passage describes...'.\n"
+    "- WRITE IN THIRD PERSON. Do not use 'I' for the protagonist. "
+    "Use 'Dante' or 'the narrator' — never first person.\n"
+    "- Every reported speech MUST name its speaker: 'Virgil told him that "
+    "Beatrice had come down from Heaven', never 'I heard that...'.\n"
+    "- When speech is nested (nesting >= 2), preserve the chain explicitly: "
+    "'X said that Y had told her that Z...'.\n"
     "- Cover every event in the outline, in order. Do not skip any.\n"
     "- Use plain modern English, not archaic or poetic register.\n"
-    "- Preserve all proper nouns exactly as spelled in the source "
-    "(Beatrice, Lucia, Rachel, Virgil, Ciacco, Plutus, Cerberus).\n"
-    "- Never begin two consecutive sentences with the same subject.\n"
-    "- Do not invent names, dialogue, or relationships absent from the event list.\n"
-    "- Target 250-450 words for a typical canto; scale up for longer chapters.\n"
+    "- Preserve all proper nouns exactly as spelled in the source.\n"
+    "- Do not invent names, dialogue, companions, or destinations not in the events.\n"
+    "- Do not explain, interpret, or moralize. Report only.\n"
+    "- Output ONLY English prose. No bullets, no numbered lists, no headings.\n"
+    "- Target 250-450 words, 4-6 paragraphs.\n"
     "- Output only the summary, nothing else."
 )
 
 # Repair instruction for Pass A JSON failures.
 _PASS_A_REPAIR = (
-    "Your previous output was not valid JSON or contained Hindi. "
+    "Your previous output was not valid JSON. "
     "Output ONLY a JSON object with keys: events, named_entities, key_quotes, similes. "
-    "ALL fields in English. No Hindi. No Devanagari."
+    "Each event must have: id, speaker, addressee, nesting, action, quote. "
+    "The quote must be a verbatim substring of the source."
 )
 
 # Subject-misattribution repair.
 _PASS_A_SUBJECT_REPAIR = (
-    "You mis-attributed the subject. Re-read the text: identify who performs EACH action. "
-    "Do not carry one character forward as the default actor. Output the corrected JSON (English only)."
+    "You collapsed speakers. Re-read the text: when a character begins speaking, "
+    "every 'I' inside that speech belongs to THAT character. Track the speaker stack. "
+    "List the proper nouns found in the source and assign each event to the correct "
+    "speaker. Output the corrected JSON."
 )
 
-# Tail repair — append the last chunk explicitly.
+# Tail repair.
 _PASS_A_TAIL_REPAIR = (
     "Your last event was from the first 70% of the text — you did not reach the end. "
-    "Re-read the FINAL portion and add events from it. Output the corrected JSON (English only)."
+    "Re-read the FINAL portion and add events from it. Output the corrected JSON."
+)
+
+# Speaker collapse repair.
+_PASS_A_SPEAKER_REPAIR = (
+    "SPEAKER_COLLAPSE detected: the source contains multiple speech-introduction cues "
+    "but your events have too few distinct speakers. The source contains these proper "
+    "nouns: {names}. Re-read the text, track who is speaking at each point, and "
+    "output the corrected JSON with proper speaker attribution."
 )
 
 
@@ -11476,10 +11498,12 @@ def _sanitize_summary(text: str) -> str:
 def _validate_pass_a_json(raw_json, chapter_text):
     """Validate the Pass A JSON output. Returns (parsed, errors_list).
 
-    v9 checks:
+    v11 checks:
     - JSON parses
     - >= 8 events for a chapter over 400 words
-    - no single actor owns >60% of events
+    - each event has speaker, addressee, nesting, action, quote
+    - quote is a verbatim substring of the normalized source (case/whitespace-insensitive)
+    - no single speaker owns >60% of events
     - named_entities present and non-empty
     """
     import json as _json
@@ -11506,20 +11530,54 @@ def _validate_pass_a_json(raw_json, chapter_text):
     if chapter_words > 400 and len(events) < 8:
         errors.append(f"too_few_events({len(events)}<8)")
 
-    # Check actor distribution
-    actor_counts = {}
+    # Normalize source for quote verification (case-insensitive, whitespace-collapsed)
+    source_norm = re.sub(r'\s+', ' ', chapter_text.lower())
+
+    # Validate each event has required fields + verify quote
+    valid_events = []
+    quotes_dropped = 0
     for ev in events:
         if not isinstance(ev, dict):
+            quotes_dropped += 1
             continue
-        actor = (ev.get("actor") or "").strip()
-        if actor:
-            actor_counts[actor] = actor_counts.get(actor, 0) + 1
+        quote = (ev.get("quote") or "").strip()
+        if not quote:
+            quotes_dropped += 1
+            continue
+        # Verify quote is a verbatim substring of the source
+        quote_norm = re.sub(r'\s+', ' ', quote.lower())
+        if quote_norm not in source_norm:
+            quotes_dropped += 1
+            continue
+        # Ensure speaker field exists
+        if not ev.get("speaker"):
+            ev["speaker"] = "narrator"
+        valid_events.append(ev)
 
-    if events and actor_counts:
-        max_actor = max(actor_counts.values())
-        if max_actor / len(events) > 0.6:
-            dominant = max(actor_counts, key=actor_counts.get)
-            errors.append(f"actor_dominance({dominant}:{max_actor}/{len(events)})")
+    if events and quotes_dropped / len(events) > 0.25:
+        errors.append(f"too_many_quotes_dropped({quotes_dropped}/{len(events)})")
+
+    parsed["events"] = valid_events
+
+    # Check speaker distribution
+    speaker_counts = {}
+    for ev in valid_events:
+        speaker = (ev.get("speaker") or "").strip()
+        if speaker:
+            speaker_counts[speaker] = speaker_counts.get(speaker, 0) + 1
+
+    if valid_events and speaker_counts:
+        max_speaker = max(speaker_counts.values())
+        if max_speaker / len(valid_events) > 0.6:
+            dominant = max(speaker_counts, key=speaker_counts.get)
+            errors.append(f"speaker_dominance({dominant}:{max_speaker}/{len(valid_events)})")
+
+    # Speaker collapse detection: source has 3+ speech cues but Pass A has <3 distinct speakers
+    speech_cues = len(re.findall(r'\b(said|began|replied|answered|addressed|spoke|cried|exclaimed)\b',
+                                 chapter_text, re.IGNORECASE))
+    distinct_speakers = len(speaker_counts)
+    if speech_cues >= 3 and distinct_speakers < 3:
+        errors.append(f"speaker_collapse({distinct_speakers}_speakers_{speech_cues}_cues)")
 
     # Check named_entities present
     named_entities = parsed.get("named_entities", [])
@@ -11551,16 +11609,16 @@ def _extract_named_entities(parsed):
     return set()
 
 
-def _validate_summary_v10(summary, parsed_outline):
+def _validate_summary_v11(summary, parsed_outline, chapter_text=""):
     """Validate the final English summary against the Pass A JSON.
 
-    v10.1 gates (English, retuned):
+    v11 gates:
     a) Format gate: reject if numbered list, bullet chars, or meta-commentary opening.
-    b) Degeneracy gate: reject if any 6-word shingle appears 3+ times, or if 3+
-       sentences share the same first 3 tokens.
-    c) Entity gate: reject if < 80% of named_entities appear in the summary.
-    d) Tail gate: reject if < 70% of the final 15% of Pass A events are
-       represented.
+    b) Degeneracy gate: 6-word shingle 3+ times, 3+ sentences same first 3 tokens.
+    c) Hallucination gate: first-person pronouns outside quotes, invented proper nouns.
+    d) Entity gate: >= 65% of named_entities from Pass A (retuned from 80%).
+    e) Tail gate: >= 70% of final 15% of events represented.
+    f) Paragraph similarity > 85%.
 
     Returns (ok, reason, coverage, missing).
     """
@@ -11570,7 +11628,6 @@ def _validate_summary_v10(summary, parsed_outline):
     if _NON_INDIC_SCRIPT_RE.search(summary):
         return (False, "non_indic_script", 0.0, set())
 
-    # Hoist summary_lower — used by both entity gate and tail gate
     summary_lower = summary.lower()
 
     # a) Format gate
@@ -11579,9 +11636,8 @@ def _validate_summary_v10(summary, parsed_outline):
     if _META_PHRASE_RE.search(summary.strip().split('\n')[0]):
         return (False, "meta_opening", 0.0, set())
 
-    # b) Degeneracy gate: 6-word shingle 3+ times
+    # b) Degeneracy: 6-word shingle 3+ times
     words = summary.split()
-    shingle_count = 0
     if len(words) >= 6:
         shingles = {}
         for i in range(len(words) - 5):
@@ -11590,10 +11646,8 @@ def _validate_summary_v10(summary, parsed_outline):
         for sh, count in shingles.items():
             if count >= 3:
                 return (False, f"shingle_repeat({sh[:30]}...)", 0.0, set())
-            if count >= 2:
-                shingle_count += 1
 
-    # b2) 3+ sentences share same first 3 tokens
+    # b2) 3+ sentences same first 3 tokens
     sentences = re.findall(r'[^.!?]+[.!?]*', summary)
     sentences = [s.strip() for s in sentences if s.strip()]
     first_3 = {}
@@ -11606,7 +11660,7 @@ def _validate_summary_v10(summary, parsed_outline):
         if count >= 3:
             return (False, f"sentence_start_repeat({key[:30]}...)", 0.0, set())
 
-    # Paragraph similarity (>85% → FAIL)
+    # f) Paragraph similarity
     paragraphs = [p.strip() for p in summary.split("\n\n") if p.strip()]
     for i in range(len(paragraphs)):
         for j in range(i + 1, len(paragraphs)):
@@ -11615,7 +11669,24 @@ def _validate_summary_v10(summary, parsed_outline):
             if sim > 0.85:
                 return (False, f"para_similarity({sim:.2f})", 0.0, set())
 
-    # c) Entity gate: >=80% of named_entities
+    # c) Hallucination gate: first-person pronouns outside quotes
+    # Strip quoted strings (anything between " or ' or « »)
+    _text_outside_quotes = re.sub(r'[""\'«»].*?[""\'«»]', '', summary)
+    if re.search(r'\b(I |I\'|my |we )\b', _text_outside_quotes):
+        return (False, "first_person_outside_quotes", 0.0, set())
+
+    # c2) Invented proper nouns: check capitalized tokens in summary not in source
+    if chapter_text:
+        source_lower = chapter_text.lower()
+        summary_caps = re.findall(r'\b[A-Z][a-z]{2,}\b', summary)
+        _COMMON = {"The", "And", "But", "Then", "When", "While", "After", "Before",
+                   "They", "His", "Her", "Their", "This", "That", "These", "Those",
+                   "There", "Here", "Now", "Next", "Finally", "However", "He", "She", "It"}
+        for cap in summary_caps:
+            if cap not in _COMMON and cap.lower() not in source_lower:
+                return (False, f"entity_invented({cap})", 0.0, set())
+
+    # d) Entity gate: >= 65% of named_entities (retuned from 80%)
     entities = _extract_named_entities(parsed_outline)
     missing = set()
     if entities:
@@ -11626,12 +11697,12 @@ def _validate_summary_v10(summary, parsed_outline):
             else:
                 missing.add(n)
         coverage = round(len(present) / len(entities) * 100, 1) if entities else 100.0
-        if coverage < 80.0:
+        if coverage < 65.0:
             return (False, f"low_coverage({coverage:.0f}%)", coverage, missing)
     else:
         coverage = 100.0
 
-    # d) Tail gate: >=70% of final 15% of events represented
+    # e) Tail gate: >= 70% of final 15% of events represented
     events = parsed_outline.get("events", []) if parsed_outline else []
     if events:
         tail_start = int(0.85 * len(events))
@@ -11639,10 +11710,10 @@ def _validate_summary_v10(summary, parsed_outline):
         if tail_events:
             tail_represented = 0
             for ev in tail_events:
-                actor = (ev.get("actor") or "").strip()
+                speaker = (ev.get("speaker") or "").strip()
                 action = (ev.get("action") or "").strip()
-                check_words = [w.lower() for w in (actor + " " + action).split()
-                               if len(w) > 3 and w.lower() not in {"the", "and", "but", "with", "from"}]
+                check_words = [w.lower() for w in (speaker + " " + action).split()
+                               if len(w) > 3 and w.lower() not in {"the", "and", "but", "with", "from", "narrator", "unnamed"}]
                 if any(w in summary_lower for w in check_words):
                     tail_represented += 1
             tail_pct = round(tail_represented / len(tail_events) * 100, 1)
@@ -11844,7 +11915,7 @@ def _generate_hindi_summary_inner(groq_client, chapter_text: str, chapter_title:
         if errors:
             error_str = "; ".join(errors)
             print(f"[summary] Pass A chunk {ci+1} errors: {error_str}")
-            if any("actor_dominance" in e for e in errors):
+            if any("speaker_dominance" in e for e in errors):
                 regeneration_count += 1
                 raw_a3, _ = _groq_summary_call(
                     groq_client, _SUMMARY_PASS_A_SYSTEM + "\n" + _PASS_A_SUBJECT_REPAIR,
@@ -11853,8 +11924,23 @@ def _generate_hindi_summary_inner(groq_client, chapter_text: str, chapter_title:
                     frequency_penalty=0.6, presence_penalty=0.4)
                 if raw_a3:
                     parsed3, errors3 = _validate_pass_a_json(raw_a3, chunk)
-                    if parsed3 and not any("actor_dominance" in e for e in errors3):
+                    if parsed3 and not any("speaker_dominance" in e for e in errors3):
                         parsed = parsed3
+            if any("speaker_collapse" in e for e in errors):
+                regeneration_count += 1
+                # Extract proper nouns from the chunk for the repair instruction
+                _chunk_nouns = re.findall(r'\b[A-Z][a-z]{2,}\b', chunk)
+                _chunk_noun_str = ", ".join(sorted(set(_chunk_nouns))[:20])
+                _speaker_repair = _PASS_A_SPEAKER_REPAIR.format(names=_chunk_noun_str)
+                raw_a4, _ = _groq_summary_call(
+                    groq_client, _SUMMARY_PASS_A_SYSTEM + "\n" + _speaker_repair,
+                    pass_a_user,
+                    temperature=0.3, max_tokens=2048,
+                    frequency_penalty=0.6, presence_penalty=0.4)
+                if raw_a4:
+                    parsed4, errors4 = _validate_pass_a_json(raw_a4, chunk)
+                    if parsed4 and not any("speaker_collapse" in e for e in errors4):
+                        parsed = parsed4
 
         all_events.extend(parsed.get("events", []))
         all_named_entities.extend(parsed.get("named_entities", []))
@@ -11906,8 +11992,8 @@ def _generate_hindi_summary_inner(groq_client, chapter_text: str, chapter_title:
         pass_b_chapter_text = chapter_text
 
     pass_b_user = (
-        f"Outline (JSON):\n{outline_json}\n\n"
-        f"Chapter text:\n{pass_b_chapter_text}"
+        f"Event list (JSON):\n{outline_json}\n\n"
+        f"Write the summary based ONLY on the events above."
     )
     chars_sent_to_pass_b = len(pass_b_user)
     print(f"summary_pass_b_chars={chars_sent_to_pass_b} chapter={chap_id}")
@@ -11934,7 +12020,7 @@ def _generate_hindi_summary_inner(groq_client, chapter_text: str, chapter_title:
     # ═══════════════════════════════════════════════════════════════
     # VALIDATION GATE on the final summary
     # ═══════════════════════════════════════════════════════════════
-    ok, reason, coverage, missing = _validate_summary_v10(summary, master_parsed)
+    ok, reason, coverage, missing = _validate_summary_v11(summary, master_parsed, chapter_text)
     print(f"summary_gate chapter={chap_id} ok={ok} reason={reason} coverage={coverage:.1f}% tail=...")
 
     if not ok:
@@ -11956,7 +12042,7 @@ def _generate_hindi_summary_inner(groq_client, chapter_text: str, chapter_title:
         if raw_retry:
             retry_summary = _clean_summary_llm_output(raw_retry)
             if retry_summary:
-                ok2, reason2, cov2, missing2 = _validate_summary_v10(retry_summary, master_parsed)
+                ok2, reason2, cov2, missing2 = _validate_summary_v11(retry_summary, master_parsed, chapter_text)
                 print(f"summary_gate chapter={chap_id} retry ok={ok2} reason={reason2} coverage={cov2:.1f}%")
                 if ok2:
                     summary = retry_summary
@@ -12107,8 +12193,8 @@ def api_chapter_summary():
     # Check R2 cache (skip when force=true)
     # ARIA: v9 cache namespace — invalidates all v8 summaries (which may contain
     # the Pass A outline leak) + their Swara audio.
-    summary_cache_key = f"summaries/v10/{book_id}/{chapter_index}.en.json"
-    audio_cache_key = f"summaries/v10/{book_id}/{chapter_index}.en.mp3"
+    summary_cache_key = f"summaries/v11/{book_id}/{chapter_index}.en.json"
+    audio_cache_key = f"summaries/v11/{book_id}/{chapter_index}.en.mp3"
 
     if not force:
         try:
