@@ -11297,69 +11297,84 @@ def _summary_groq_call(system, user, *, temperature, max_tokens,
 # ── STEP 0: Segment ──
 
 def _segment_windows(chapter_text, target_words=350, overlap_words=50):
-    """Split chapter into overlapping windows on sentence boundaries.
+    """Split chapter text into bounded overlapping windows.
 
-    Returns list of (window_num, text). Never drops the tail.
+    Invariants:
+    - Every loop iteration advances the cursor.
+    - Sentence boundaries nearest the target size are preferred.
+    - The chapter tail is always included.
+    - Overlap can never equal or exceed the window size.
     """
-    import hashlib
     words = chapter_text.split()
     n = len(words)
+
     if n == 0:
         return []
 
-    # Find sentence boundary positions (indices into words list)
+    target_words = max(100, int(target_words))
+    overlap_words = max(
+        0,
+        min(int(overlap_words), target_words - 1),
+    )
+
     sentence_ends = []
-    for i, w in enumerate(words):
-        if w and w[-1] in '.!?;:"\')\u201d\u2019':
-            sentence_ends.append(i + 1)  # end of sentence = start of next
-    if not sentence_ends or sentence_ends[-1] < n:
-        sentence_ends.append(n)
+    for i, word in enumerate(words):
+        if re.search(r'[.!?]["\')\]]*$', word):
+            sentence_ends.append(i + 1)
 
     windows = []
     start = 0
     win_num = 1
+
     while start < n:
-        # Target end position
-        target_end = start + target_words
-        # Find the sentence boundary closest to (but not before) target_end
-        best_end = n
-        for se in sentence_ends:
-            if se >= start + 50 and se <= target_end + 50:
-                best_end = se
-                break
-            if se > target_end + 50:
-                best_end = se
-                break
+        target_end = min(start + target_words, n)
+
+        if target_end >= n:
+            best_end = n
+        else:
+            # A candidate must be far enough ahead that subtracting overlap
+            # cannot leave the cursor at the same position.
+            min_end = min(
+                start + max(50, overlap_words + 1),
+                n,
+            )
+            max_end = min(target_end + 50, n)
+
+            candidates = [
+                sentence_end
+                for sentence_end in sentence_ends
+                if min_end <= sentence_end <= max_end
+            ]
+
+            if candidates:
+                best_end = min(
+                    candidates,
+                    key=lambda sentence_end: abs(
+                        sentence_end - target_end
+                    ),
+                )
+            else:
+                best_end = target_end
+
         if best_end <= start:
             best_end = min(start + target_words, n)
 
-        window_text = " ".join(words[start:best_end])
-        windows.append((win_num, window_text))
-        win_num += 1
+        window_text = " ".join(words[start:best_end]).strip()
+
+        if window_text:
+            windows.append((win_num, window_text))
+            win_num += 1
 
         if best_end >= n:
             break
-        start = best_end - overlap_words
-        if start < 0:
-            start = 0
 
-    # Merge final window if too small
-    if len(windows) >= 2:
-        last_num, last_text = windows[-1]
-        if len(last_text.split()) < 150:
-            prev_num, prev_text = windows[-2]
-            windows[-2] = (prev_num, prev_text + " " + last_text)
-            windows.pop()
+        next_start = best_end - overlap_words
 
-    # Cap at 40 windows
-    if len(windows) > 40:
-        merged = []
-        chunk_size = len(windows) // 40 + 1
-        for i in range(0, len(windows), chunk_size):
-            batch = windows[i:i+chunk_size]
-            merged_text = " ".join(t for _, t in batch)
-            merged.append((len(merged) + 1, merged_text))
-        windows = merged
+        # Absolute progress invariant. Never permit next_start <= start.
+        if next_start <= start:
+            next_start = best_end
+
+        start = next_start
 
     return windows
 
@@ -11653,7 +11668,11 @@ def _generate_chapter_summary(chapter_text, chapter_title=""):
 
 def _generate_chapter_summary_inner(chapter_text, chapter_title=""):
     """Inner implementation."""
+    import time as _time
+    _t0 = _time.time()
+
     if not chapter_text or not chapter_text.strip():
+        print(f"[summary] elapsed={_time.time() - _t0:.1f}s status=empty_summary")
         return ("", "error", "empty_summary")
 
     word_count = len(chapter_text.split())
@@ -11673,8 +11692,7 @@ def _generate_chapter_summary_inner(chapter_text, chapter_title=""):
     if last_win_norm not in chapter_norm and chapter_norm not in last_win_norm:
         print(f"[summary] WARN: last window does not contain chapter ending")
 
-    print(f"[summary] STEP 0: {n_windows} windows, word_count={word_count}, "
-          f"last_window_start={windows[-1][1][:60]!r}")
+    print(f"[summary] STEP 0: {n_windows} windows, word_count={word_count}")
 
     # ── STEP 1: Map (sequential, max 4 concurrent would be ideal but
     #   sequential is simpler and avoids rate-limit issues on free tier) ──
@@ -11727,7 +11745,8 @@ def _generate_chapter_summary_inner(chapter_text, chapter_title=""):
     if not ok:
         print(f"[summary] summary_quality_degraded: "
               f"coverage={metrics['coverage_pct']}% tail={metrics['tail_ok']} "
-              f"degeneracy={metrics['degeneracy_failed']}")
+              f"degeneracy={metrics['degeneracy_failed']} "
+              f"elapsed={_time.time() - _t0:.1f}s")
         # Ship the best attempt — never error for quality
         return (summary, "degraded", None)
 
@@ -11743,6 +11762,7 @@ def _generate_chapter_summary_inner(chapter_text, chapter_title=""):
         "entity_pct": metrics["entity_pct"],
         "quality": "ok",
         "cache": "v12",
+        "elapsed_sec": round(_time.time() - _t0, 1),
     })
     print(f"summary_log {log_line}")
 
@@ -11990,8 +12010,8 @@ def api_chapter_summary():
 
     except Exception:
         traceback.print_exc()
-        return jsonify({"error": "Something went wrong — try again",
-                        "code": "internal"}), 500
+        return jsonify({"error": "Summary generation failed",
+                        "code": "summary_internal_error"}), 500
 
 
 @app.route("/api/glossary", methods=["POST"])
