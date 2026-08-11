@@ -1124,3 +1124,68 @@ Files modified:
 No git push — implementation + verification only, per the task spec.
 
 Re-uploading an EPUB that had a persisted "generating" status (from a dead worker) will now: (1) detect the stale heartbeat, (2) demote the job to analyzed/optimized, (3) return the full chapter catalog, (4) open the selector with all chapters. A genuinely running job returns the is_running shape WITH the catalog so the frontend shows an "already converting" toast instead of an empty selector.
+
+---
+Task ID: COVERAGE-FIX
+Agent: main (Fix Hindi summary under-coverage + hallucination + explain button label leaking into transcript)
+Task: Fix (1) Hindi chapter summaries covering ~35% of the chapter and inventing content (Canto VII omitted Plutus, boulder-rollers, clergy, Fortune discourse, Styx, wrathful, sullen — while inventing a Dante/Virgil exchange); (2) "हिंदी में समझाओ" button label being concatenated into transcript word text (e.g. "hawaहिंदी में समझाओse phula hua").
+
+Work Log:
+- Read prior worklog (REPETITION-FIX, REGRESSION-FIX-2, EMPTY-CHAPTERS-FIX) for architecture context.
+- Read current state: audiobook_app.py summary helpers (old v4 single-pass + map-reduce with _groq_summary_call, _clean_summary_llm_output, _validate_summary, _dedupe_summary, _generate_hindi_summary), transcript-view.tsx paragraphBreaks + explain button JSX.
+
+BACKEND (audiobook_app.py) — Problem 1 fix (two-pass outline → summary):
+
+New prompts (v5):
+- _SUMMARY_PASS_A_PROMPT: English extraction instruction. "You are an extraction engine. Read the chapter and output a numbered list, in strict narrative order, of EVERY distinct beat..." temperature 0.1, max_tokens 2048, no penalties. Output is a checklist — NOT shown to the user.
+- _SUMMARY_PASS_B_PROMPT: Hindi summary driven by the outline as a checklist. "EVERY numbered beat in the outline must be represented in the summary. Do not skip any. Work through them in order." Hard rules: preserve proper nouns with Roman spelling in parentheses, no invented dialogue, no repetition, 4-7 paragraphs. temperature 0.3, frequency_penalty 0.4, presence_penalty 0.3.
+- _SUMMARY_REPAIR_PROMPT: Hinglish one-shot repair when coverage < 80%. "Ye naam/beats summary se chhoot gaye hain: [list]. Inhe summary mein sahi jagah par jodo."
+
+New helpers:
+- _extract_outline_proper_nouns(outline): extracts capitalized tokens (3+ letters) from the Pass A outline, excluding sentence-initial common words (The, And, But, Then, They, etc.). Returns a set of proper nouns to check coverage against.
+- _check_coverage(summary, outline_nouns): checks what fraction of outline proper nouns appear in the Hindi summary (matches on the Latin-script name, case-insensitive). Returns (coverage_pct, missing_set).
+
+_groq_summary_call — now accepts configurable frequency_penalty + presence_penalty params (defaults 0.6/0.3). Pass A uses 0.0/0.0 (extraction doesn't need anti-repetition), Pass B uses 0.4/0.3 (per spec). Fallback retry without penalties on TypeError/400 unchanged.
+
+_generate_hindi_summary — FULLY REWRITTEN as two-pass flow:
+- Pass A (Extraction): if word_count > 8000 (~12k tokens), splits into ~2000-word segments, runs Pass A on each, concatenates outlines in order (renumbering beats sequentially). Otherwise single Pass A on the full chapter text. Never truncates.
+- Pass B (Hindi summary): sends the outline + the FULL chapter text (never truncated) with the checklist prompt. The outline forces coverage of every beat.
+- Coverage gate: extracts proper nouns from the outline, checks what fraction appear in the summary. If <80%, makes one repair call appending the missing names. Logs coverage percentage per chapter.
+- De-duplication: _dedupe_summary still runs (inside _clean_summary_llm_output), now at 85% token-overlap threshold (bumped from 80%).
+- NO minimum-length validation — the old length rule padded/retried to hit a character count, which produced the looping paragraphs. _validate_summary now only checks: script (no CJK/Arabic/Cyrillic), non-empty (at least one Devanagari char), and tail-coverage (proper nouns from last 15% of chapter). No length threshold at all.
+
+Cache namespace bump: summaries/v4/ → summaries/v5/ — invalidates all v4 summaries (which used the old under-coverage flow) + their Swara audio. Deletion cleanup updated to include v5.
+
+FRONTEND (transcript-view.tsx) — Problem 2 fix (explain button label leaking):
+
+Root cause: the explain button was rendered INSIDE the words.map() as a sibling of the word span within the same <span key={i}> wrapper. The <span className="block mt-3"> was a block element nested inside an inline span, and its label text could leak into the word stream.
+
+Fix — FULL RESTRUCTURE of the word rendering:
+- Removed the explain button from inside words.map(). The words array now contains ONLY transcript words — no explain button, no label text, no non-transcript strings.
+- Built paragraph segments: [{startIdx, endIdx}] from paragraphBreaks. Each segment is rendered as its own <p> element.
+- The explain control is rendered as a sibling <div> AFTER each paragraph's closing </p> — never inside the words array, never between two words of the same paragraph.
+- Paragraph boundaries fall on word boundaries from the timing data (paragraphBreaks contains word indices, never mid-token).
+- The word index `i` is computed as `seg.startIdx + j` so data-cue-index stays aligned with the audio. The explain button click uses `words.slice(seg.startIdx, seg.endIdx).join(" ")` to send the correct paragraph text.
+- Every segment (including the first and last) gets an explain button. The trailing sentinel (words.length) was removed — segments are built from the breaks + a trailing segment from the last break to words.length.
+- Added eslint-disable-next-line for the pre-existing setFollowPlayback(true) in the chapter-change effect (the linter flagged it after the restructure, but it's pre-existing behavior the spec says not to touch).
+
+VERIFICATION:
+- python3 -m py_compile audiobook_app.py: PASSES.
+- npx tsc --noEmit: zero errors in transcript-view.tsx.
+- bun run lint: 0 errors, 0 warnings (after targeted eslint-disable for pre-existing set-state-in-effect).
+- Inline logic tests (7 cases): T1 dedupe 85% threshold (80% overlap survives, 100% dropped); T2 exact duplicate dropped; T3 proper noun extraction (Dante/Plutus/Virgil/Fortune/Styx extracted, The/They excluded); T4 good coverage >= 80%; T5 bad coverage < 80% + missing detected (Plutus/Fortune/Styx); T6 no length check (short summary passes); T7 no_devanagari check. All passed.
+- agent-browser: page loads cleanly (HTTP 200, title "ARIA"), no console errors, no hydration crashes. Dev log shows all-200 responses, clean compilation.
+
+CONSTRAINTS honored:
+- Did NOT touch transcript sync offset, manual-scroll override, or timing logic.
+- Did NOT touch BGM mixing, cover persistence, deletion tombstones, chapter catalog builder, or the voice registry.
+- Did NOT touch playback.
+
+Stage Summary:
+Files modified:
+- mini-services/audiobook-maker/audiobook_app.py (+120 lines: v5 two-pass prompts, _extract_outline_proper_nouns + _check_coverage helpers, _groq_summary_call configurable penalties, _generate_hindi_summary full rewrite as two-pass outline→summary + coverage gate + long-chapter segmented Pass A, _validate_summary no length check, _dedupe_summary 85% threshold, v5 cache namespace + deletion cleanup)
+- src/components/aria/transcript-view.tsx (+40 lines: restructured word rendering into paragraph segments with explain button as sibling <div> after each </p>, words array contains only transcript words, eslint-disable for pre-existing set-state-in-effect)
+
+No git push — implementation + verification only, per the task spec.
+
+Regenerating Canto VII will now: (1) extract every beat into a numbered outline (Pass A), (2) write a Hindi summary that must represent EVERY beat in the outline (Pass B), (3) check coverage of proper nouns and repair if <80%, (4) cache under v5. The transcript will render explain buttons as sibling blocks between paragraphs — the label "हिंदी में समझाओ" can never leak into the word stream because it's in a separate DOM element, not in the words array.

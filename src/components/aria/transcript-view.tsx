@@ -75,6 +75,7 @@ export function TranscriptView() {
 
   // Reset follow on chapter change
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- pre-existing: reset follow state when the chapter changes (legitimate sync, not a derived-state cascade)
     setFollowPlayback(true);
   }, [currentChapterIdx]);
 
@@ -367,8 +368,13 @@ export function TranscriptView() {
   // produced zero breaks and the explain button was unreachable dead code.
   // This punctuation-first + length-fallback strategy yields a break every
   // 55–110 words regardless of punctuation, preferring real sentence ends
-  // when the source has them. A trailing sentinel (words.length) ensures the
-  // final segment also gets a button.
+  // when the source has them.
+  //
+  // CRITICAL: paragraph breaks must fall on a word boundary from the timing
+  // data, never inside a token. The explain control is rendered as its OWN
+  // sibling block AFTER each paragraph's closing element — never inside the
+  // words array, never between two words of the same paragraph. The words
+  // array used for highlight sync contains ONLY transcript words.
   const paragraphBreaks: number[] = [];
   if (hindiHelp && words && words.length > 0) {
     const PARA_MIN = 55;  // don't break sooner than this
@@ -383,8 +389,23 @@ export function TranscriptView() {
         sinceBreak = 0;
       }
     }
-    // Trailing sentinel so the final segment gets an explain button too.
-    paragraphBreaks.push(words.length);
+  }
+
+  // Build paragraph segments: [{startIdx, endIdx}] from the breaks.
+  // Each segment is rendered as its own <p> with the explain button as a
+  // sibling <div> AFTER it. This keeps the words array pure (only transcript
+  // words) so highlight indices stay aligned with the audio.
+  const segments: { startIdx: number; endIdx: number }[] = [];
+  if (words && words.length > 0) {
+    let segStart = 0;
+    for (const br of paragraphBreaks) {
+      segments.push({ startIdx: segStart, endIdx: br });
+      segStart = br;
+    }
+    // Trailing segment (from last break to end)
+    if (segStart < words.length) {
+      segments.push({ startIdx: segStart, endIdx: words.length });
+    }
   }
 
   return (
@@ -395,116 +416,46 @@ export function TranscriptView() {
           tabIndex={0}
           className="transcript-scroll relative px-5 py-5 max-h-[55vh] overflow-y-auto overscroll-contain outline-none"
         >
-          <p className="font-serif text-base sm:text-[17px] leading-[2] m-0">
-            {words.map((word, i) => {
-              const isActive = i === activeWordIdx;
-              const isPast = i < activeWordIdx;
-              // Find which paragraph this word belongs to
-              let paraIdx = 0;
-              for (const br of paragraphBreaks) {
-                if (i >= br) paraIdx++;
-                else break;
-              }
-              return (
-                <span key={i}>
-                  {hindiHelp && paragraphBreaks.includes(i) && i < words.length && (
-                    <span className="block mt-3">
-                      {/* Explain button for previous paragraph */}
-                      {explainState && explainState.paragraphIdx === paraIdx - 1 && (
-                        <span
-                          className="block mt-2 mb-2 p-3 rounded-lg text-xs leading-relaxed"
-                          style={{
-                            background: "rgba(168,85,247,0.06)",
-                            borderLeft: "2px solid rgba(168,85,247,0.4)",
-                            color: "var(--aria-fg-muted)",
-                          }}
-                        >
-                          {explainState.loading ? (
-                            <span className="flex items-center gap-1.5">
-                              <Loader2 className="w-3 h-3 animate-spin" />
-                              समझाया जा रहा है…
-                            </span>
-                          ) : (
-                            <>
-                              <span className="font-serif text-sm">{explainState.result?.explanation}</span>
-                              <div className="flex items-center gap-2 mt-2">
-                                {explainState.result?.audio_url && (
-                                  <button
-                                    onClick={playExplainAudio}
-                                    className="flex items-center gap-1 text-[10px] hover:opacity-80"
-                                    style={{ color: "rgba(168,85,247,0.8)" }}
-                                  >
-                                    <Volume2 className="w-3 h-3" /> सुनें
-                                  </button>
-                                )}
-                                <button
-                                  onClick={() => setExplainState(null)}
-                                  className="flex items-center gap-1 text-[10px] hover:opacity-80"
-                                  style={{ color: "var(--aria-fg-dim)" }}
-                                >
-                                  <X className="w-3 h-3" /> बंद करें
-                                </button>
-                              </div>
-                            </>
-                          )}
-                        </span>
+          {/* Render each paragraph segment as its own <p>, with the explain
+              control as a sibling <div> AFTER the closing </p>. The explain
+              button is NEVER inside the words array — it's a separate block
+              element, so its label text can never leak into the word stream. */}
+          {segments.map((seg, segIdx) => (
+            <div key={segIdx} className={segIdx > 0 ? "mt-3" : ""}>
+              <p className="font-serif text-base sm:text-[17px] leading-[2] m-0">
+                {words.slice(seg.startIdx, seg.endIdx).map((word, j) => {
+                  const i = seg.startIdx + j;
+                  const isActive = i === activeWordIdx;
+                  const isPast = i < activeWordIdx;
+                  return (
+                    <span
+                      key={i}
+                      data-cue-index={i}
+                      onClick={() => handleWordClick(i)}
+                      onContextMenu={(e) => handleWordContextMenu(e, word, i)}
+                      onTouchStart={(e) => handleWordTouchStart(e, word, i)}
+                      onTouchMove={handleWordTouchMove}
+                      onTouchEnd={handleWordTouchEnd}
+                      className={cn(
+                        "cursor-pointer rounded px-[1px] transition-colors duration-150",
+                        isActive
+                          ? "text-[var(--aria-accent-glow)] bg-[rgba(245,158,11,0.14)]"
+                          : isPast
+                            ? "text-[var(--aria-fg)] hover:bg-[var(--aria-card)]"
+                            : "text-[var(--aria-fg-muted)] opacity-55 hover:bg-[var(--aria-card)] hover:opacity-100",
                       )}
-                      {hindiHelp && paraIdx > 0 && !(explainState && explainState.paragraphIdx === paraIdx - 1) && (
-                        <button
-                          onClick={() => {
-                            const prevBreak = paraIdx > 0 ? paragraphBreaks[paraIdx - 1] : 0;
-                            const thisBreak = paragraphBreaks[paraIdx] ?? words.length;
-                            handleExplain(words.slice(prevBreak, thisBreak).join(" "), paraIdx - 1);
-                          }}
-                          className="flex items-center gap-1 text-[10px] px-2 py-0.5 rounded mb-1 transition-opacity opacity-70 hover:opacity-100"
-                          style={{
-                            color: "rgba(168,85,247,0.8)",
-                            border: "1px solid rgba(168,85,247,0.25)",
-                            background: "transparent",
-                          }}
-                        >
-                          <Sparkles className="w-2.5 h-2.5" />
-                          हिंदी में समझाओ
-                        </button>
-                      )}
+                    >
+                      {word}{" "}
                     </span>
-                  )}
-                  <span
-                    data-cue-index={i}
-                    onClick={() => handleWordClick(i)}
-                    onContextMenu={(e) => handleWordContextMenu(e, word, i)}
-                    onTouchStart={(e) => handleWordTouchStart(e, word, i)}
-                    onTouchMove={handleWordTouchMove}
-                    onTouchEnd={handleWordTouchEnd}
-                    className={cn(
-                      "cursor-pointer rounded px-[1px] transition-colors duration-150",
-                      isActive
-                        ? "text-[var(--aria-accent-glow)] bg-[rgba(245,158,11,0.14)]"
-                        : isPast
-                          ? "text-[var(--aria-fg)] hover:bg-[var(--aria-card)]"
-                          : "text-[var(--aria-fg-muted)] opacity-55 hover:bg-[var(--aria-card)] hover:opacity-100",
-                    )}
-                  >
-                    {word}{" "}
-                  </span>
-                </span>
-              );
-            })}
-            {/* ARIA: trailing explain button for the FINAL paragraph segment.
-                paragraphBreaks always ends with a words.length sentinel, so the
-                last segment (from the last real break to the end) gets a button
-                too. Without this, the final paragraph could never be explained. */}
-            {hindiHelp && words.length > 0 && paragraphBreaks.length > 0 && (() => {
-              const lastBreak = paragraphBreaks[paragraphBreaks.length - 1];
-              if (lastBreak !== words.length) return null;
-              const prevBreak = paragraphBreaks.length > 1
-                ? paragraphBreaks[paragraphBreaks.length - 2]
-                : 0;
-              const trailingParaIdx = paragraphBreaks.length - 1;
-              const isShowing = explainState && explainState.paragraphIdx === trailingParaIdx;
-              return (
-                <span className="block mt-3">
-                  {isShowing && (
+                  );
+                })}
+              </p>
+              {/* Explain control — sibling block AFTER the paragraph's closing
+                  </p>. Never inside the words array, never between two words.
+                  The paraIdx = segIdx so clicking explains THIS segment. */}
+              {hindiHelp && (
+                <div className="mt-1 mb-1">
+                  {explainState && explainState.paragraphIdx === segIdx && (
                     <span
                       className="block mt-2 mb-2 p-3 rounded-lg text-xs leading-relaxed"
                       style={{
@@ -513,16 +464,16 @@ export function TranscriptView() {
                         color: "var(--aria-fg-muted)",
                       }}
                     >
-                      {explainState!.loading ? (
+                      {explainState.loading ? (
                         <span className="flex items-center gap-1.5">
                           <Loader2 className="w-3 h-3 animate-spin" />
                           समझाया जा रहा है…
                         </span>
                       ) : (
                         <>
-                          <span className="font-serif text-sm">{explainState!.result?.explanation}</span>
+                          <span className="font-serif text-sm">{explainState.result?.explanation}</span>
                           <div className="flex items-center gap-2 mt-2">
-                            {explainState!.result?.audio_url && (
+                            {explainState.result?.audio_url && (
                               <button
                                 onClick={playExplainAudio}
                                 className="flex items-center gap-1 text-[10px] hover:opacity-80"
@@ -543,15 +494,15 @@ export function TranscriptView() {
                       )}
                     </span>
                   )}
-                  {!isShowing && (
+                  {!(explainState && explainState.paragraphIdx === segIdx) && (
                     <button
                       onClick={() => {
                         handleExplain(
-                          words.slice(prevBreak, words.length).join(" "),
-                          trailingParaIdx,
+                          words.slice(seg.startIdx, seg.endIdx).join(" "),
+                          segIdx,
                         );
                       }}
-                      className="flex items-center gap-1 text-[10px] px-2 py-0.5 rounded mb-1 transition-opacity opacity-70 hover:opacity-100"
+                      className="flex items-center gap-1 text-[10px] px-2 py-0.5 rounded transition-opacity opacity-70 hover:opacity-100"
                       style={{
                         color: "rgba(168,85,247,0.8)",
                         border: "1px solid rgba(168,85,247,0.25)",
@@ -562,10 +513,10 @@ export function TranscriptView() {
                       हिंदी में समझाओ
                     </button>
                   )}
-                </span>
-              );
-            })()}
-          </p>
+                </div>
+              )}
+            </div>
+          ))}
           {/* Bottom spacer so the final lines can be centred */}
           <div style={{ height: "28vh" }} />
         </div>

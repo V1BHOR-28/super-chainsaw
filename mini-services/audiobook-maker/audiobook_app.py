@@ -10591,6 +10591,7 @@ def _purge_job_completely(job_id):
             for prefix in (
                 f"summaries/{job_id}/", f"summaries/v2/{job_id}/",
                 f"summaries/v3/{job_id}/", f"summaries/v4/{job_id}/",
+                f"summaries/v5/{job_id}/",
                 f"glossary/{job_id}/", f"glossary/v2/{job_id}/",
             ):
                 try:
@@ -11154,68 +11155,69 @@ def api_bgm_debug(job_id, chapter_index):
 # ARIA: Hindi comprehension endpoints (summary, glossary, explain)
 # ═══════════════════════════════════════════════════════════════════
 
-# ── Hindi summary helpers (v4: anti-repetition, extractive merge) ──
+# ── Hindi summary helpers (v5: two-pass outline → summary) ──
 # Reject any character from CJK / Hangul / Hiragana / Katakana / Arabic / Cyrillic.
 _NON_INDIC_SCRIPT_RE = re.compile(
     r"[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af\u0600-\u06ff\u0400-\u04ff]"
 )
 
-# No-repetition instruction appended to every summary prompt so the model
-# never pads by repeating the same sentence/thought.
+# ── Pass A: Extraction prompt (English, temperature 0.1) ──
+# Outputs a numbered list of EVERY distinct beat in strict narrative order.
+# The output is NOT shown to the user — it's a checklist for Pass B.
+_SUMMARY_PASS_A_PROMPT = (
+    "You are an extraction engine. Read the chapter and output a numbered list, "
+    "in strict narrative order, of EVERY distinct beat: each named character or "
+    "entity that appears, each thing said or done, each place entered, each "
+    "punishment or scene described, and each argument or explanation given at "
+    "length. Do not summarize. Do not merge beats. Do not skip a beat because it "
+    "seems minor. One line per beat, in English. If a speech or explanation runs "
+    "longer than a few lines in the source, split it into its constituent claims "
+    "as separate beats. Output nothing but the numbered list."
+)
+
+# ── Pass B: Hindi summary driven by the outline as a checklist ──
+# temperature 0.3, frequency_penalty 0.4, presence_penalty 0.3.
+_SUMMARY_PASS_B_PROMPT = (
+    "Below is a numbered outline of a chapter and its full text. Write a summary "
+    "in simple Hindi (Devanagari) for a reader who wants to understand this dense "
+    "classical literature.\n\n"
+    "HARD RULES:\n"
+    "1. EVERY numbered beat in the outline must be represented in the summary. Do "
+    "not skip any. Work through them in order.\n"
+    "2. Preserve proper nouns exactly, with the original spelling in parentheses "
+    "on first mention — e.g. प्लूटस (Plutus), स्टिक्स (Styx), फ़ॉर्च्यून (Fortune).\n"
+    "3. Do not state anything not present in the chapter text. Do not invent "
+    "dialogue, questions, or answers. If the source is ambiguous, describe it as "
+    "it appears.\n"
+    "4. Never repeat the same idea in two paragraphs. Each paragraph must advance "
+    "the narrative.\n"
+    "5. When a character delivers a long explanation or argument, summarize its "
+    "actual reasoning — not merely the fact that they explained something.\n"
+    "6. Structure: 4–7 paragraphs following the chapter's order. No preamble, no "
+    "\"इस अध्याय में...\", no closing commentary.\n"
+    "7. Use ONLY Devanagari script. No Chinese, Japanese, Korean, Arabic, or any "
+    "other script. Output only the summary."
+)
+
+# ── Coverage-repair prompt (Hinglish, one-shot) ──
+# Sent when coverage < 80%; appends missing names to the summary.
+_SUMMARY_REPAIR_PROMPT = (
+    "Ye naam/beats summary se chhoot gaye hain: {missing}. "
+    "Inhe summary mein sahi jagah par, narrative order maintain karte hue jodo. "
+    "Baaki text mat badlo."
+)
+
+# Old prompts retained for backward-compat reference (unused in v5):
 _SUMMARY_NO_REPEAT_INSTRUCTION = (
     "\nकिसी भी वाक्य या विचार को दोहराएँ नहीं। हर वाक्य में नई जानकारी होनी चाहिए। "
     "यदि कहने को कुछ नया न बचे तो वहीं रुक जाएँ।"
 )
-
-# Full-coverage system prompt (Devanagari) — used for single-pass generation.
-_SUMMARY_SYSTEM_PROMPT_V3 = (
-    "आप एक साहित्यिक अध्याय-सारांश सहायक हैं।\n\n"
-    "नियम:\n"
-    "1. पूरे अध्याय का सारांश दें — शुरुआत, मध्य और अंत तीनों। अध्याय के आखिरी हिस्से को कभी न छोड़ें।\n"
-    "2. सारांश 6 से 10 वाक्यों का हो, एक ही पैराग्राफ में नहीं — 2 या 3 छोटे पैराग्राफ में बाँटें।\n"
-    "3. घटनाओं का क्रम वही रखें जो मूल पाठ में है।\n"
-    "4. सभी मुख्य पात्रों का नाम लें जो अध्याय में आते हैं, चाहे वे अंत में ही क्यों न आएँ।\n"
-    "5. कोई महत्वपूर्ण मोड़, भविष्यवाणी, या निर्णय न छोड़ें।\n"
-    "6. केवल देवनागरी लिपि में लिखें। पात्रों और स्थानों के नाम पहली बार आने पर कोष्ठक में रोमन लिपि दें, जैसे: वर्जिल (Virgil)।\n"
-    "7. चीनी, जापानी, कोरियाई, अरबी या किसी अन्य लिपि का एक भी अक्षर प्रयोग न करें।\n"
-    "8. अपनी राय, व्याख्या या टिप्पणी न जोड़ें — केवल जो पाठ में है।\n"
-    "9. केवल सारांश लौटाएँ, कोई भूमिका या शीर्षक नहीं।"
-    + _SUMMARY_NO_REPEAT_INSTRUCTION
-)
-
-# Retry nudge appended as a user message when the first attempt fails validation.
+_SUMMARY_SYSTEM_PROMPT_V3 = _SUMMARY_PASS_B_PROMPT  # alias for any legacy ref
 _SUMMARY_RETRY_USER_MSG = (
     "पिछला सारांश अधूरा था। अध्याय के अंतिम भाग को भी शामिल करें।"
 )
-
-# Map-phase prompt: summarize one sequential chunk (4–6 sentences).
-_SUMMARY_CHUNK_PROMPT = (
-    "आप एक साहित्यिक पाठ के एक हिस्से का हिंदी सारांश लिखते हैं।\n"
-    "नियम:\n"
-    "1. केवल इस हिस्से की घटनाओं को 4 से 6 वाक्यों में देवनागरी में समेटें।\n"
-    "2. घटनाओं का क्रम बनाए रखें।\n"
-    "3. पात्रों और स्थानों के नाम पहली बार आने पर कोष्ठक में रोमन लिपि दें।\n"
-    "4. केवल देवनागरी लिपि; चीनी, जापानी, कोरियाई, अरबी या किसी अन्य लिपि का एक भी अक्षर न लिखें।\n"
-    "5. केवल सारांश लौटाएँ, कोई भूमिका या शीर्षक नहीं।"
-    + _SUMMARY_NO_REPEAT_INSTRUCTION
-)
-
-# Reduce-phase prompt: merge per-chunk summaries into one cohesive summary.
-# Only used when there are >6 chunks (otherwise the merge is extractive).
-_SUMMARY_MERGE_PROMPT = (
-    "निम्नलिखित एक अध्याय के विभिन्न क्रमिक हिस्सों के हिंदी सारांश हैं। "
-    "इन सभी को मिलाकर एक ही सुसंबद्ध अध्याय-सारांश बनाएँ जो पूरे अध्याय के "
-    "शुरुआत, मध्य और अंत को कवर करे।\n\n"
-    "नियम:\n"
-    "1. सारांश 6 से 10 वाक्यों का हो, 2 या 3 छोटे पैराग्राफ में बाँटें।\n"
-    "2. घटनाओं का क्रम वही रखें जो मूल पाठ में है।\n"
-    "3. सभी मुख्य पात्रों का नाम लें, चाहे वे अंत में ही क्यों न आएँ।\n"
-    "4. कोई महत्वपूर्ण मोड़, भविष्यवाणी, या निर्णय न छोड़ें।\n"
-    "5. केवल देवनागरी लिपि में लिखें; पात्रों और स्थानों के नाम पहली बार आने पर कोष्ठक में रोमन लिपि दें।\n"
-    "6. चीनी, जापानी, कोरियाई, अरबी या किसी अन्य लिपि का एक भी अक्षर प्रयोग न करें।\n"
-    "7. केवल सारांश लौटाएँ, कोई भूमिका या शीर्षक नहीं।"
-    + _SUMMARY_NO_REPEAT_INSTRUCTION
-)
+_SUMMARY_CHUNK_PROMPT = _SUMMARY_PASS_A_PROMPT  # alias
+_SUMMARY_MERGE_PROMPT = _SUMMARY_PASS_B_PROMPT    # alias
 
 
 def _normalize_sentence(s: str) -> str:
@@ -11246,7 +11248,7 @@ def _dedupe_summary(text: str) -> str:
 
     Splits on \\n\\n into paragraphs, then each paragraph into sentences on
     दंड (।) / . / ! / ?. Normalizes each sentence, drops exact duplicates,
-    drops near-duplicates (token Jaccard >= 0.8). Reassembles paragraphs
+    drops near-duplicates (token Jaccard >= 0.85). Reassembles paragraphs
     (dropping any left empty). If the last sentence doesn't end with ।/?/!,
     drops it (removes mid-sentence truncation).
     """
@@ -11272,10 +11274,10 @@ def _dedupe_summary(text: str) -> str:
             # Exact duplicate check
             if norm in seen_normalized:
                 continue
-            # Near-duplicate check (Jaccard >= 0.8 with any kept sentence)
+            # Near-duplicate check (Jaccard >= 0.85 with any kept sentence)
             is_dup = False
             for prev_norm in seen_normalized:
-                if _token_jaccard(norm, prev_norm) >= 0.8:
+                if _token_jaccard(norm, prev_norm) >= 0.85:
                     is_dup = True
                     break
             if is_dup:
@@ -11336,12 +11338,13 @@ def _sanitize_summary(text: str) -> str:
 def _validate_summary(summary: str, chapter_text: str):
     """Validate a generated summary. Returns (ok, reason).
 
-    Checks:
-    1. Script — reject if any CJK/Hangul/Hiragana/Katakana/Arabic/Cyrillic chars present.
-    2. Length — reject if too short (min(max(250, 4% of chapter), 900)). The old
-       8% rule rewarded padding; the new cap at 900 means a long chapter never
-       demands a huge summary.
-    3. Tail coverage — reject if proper nouns from the last 15% of the chapter are absent.
+    v5: NO minimum-length check. The old length rule padded/retried the summary
+    to hit a character count — that padding is what produced the looping
+    paragraphs. Now we only check:
+    1. Script — reject if any CJK/Hangul/Hiragana/Katakana/Arabic/Cyrillic chars.
+    2. Non-empty — must have at least one Devanagari character.
+    3. Tail coverage — reject if proper nouns from the last 15% of the chapter
+       are absent (catches a summary missing the back half of the chapter).
     """
     if not summary or not summary.strip():
         return (False, "empty")
@@ -11350,15 +11353,12 @@ def _validate_summary(summary: str, chapter_text: str):
     if _NON_INDIC_SCRIPT_RE.search(summary):
         return (False, "non_indic_script")
 
-    # 2. Length check: min(max(250, 4% of chapter), 900). The old 8% rule with
-    #    no upper cap pushed the model to pad (and loop). 4% + a 900 cap lets
-    #    short chapters demand ~250 chars while long chapters never demand >900.
-    chapter_len = max(1, len(chapter_text))
-    threshold = min(max(250, int(0.04 * chapter_len)), 900)
-    if len(summary) < threshold:
-        return (False, f"too_short({len(summary)}<{threshold})")
+    # 2. Must contain at least one Devanagari character
+    if not re.search(r"[\u0900-\u097F]", summary):
+        return (False, "no_devanagari")
 
     # 3. Tail-coverage check: last 15% of chapter, capitalized proper nouns (2+ occurrences)
+    chapter_len = max(1, len(chapter_text))
     tail_start = int(0.85 * chapter_len)
     tail = chapter_text[tail_start:]
     candidates = re.findall(r'\b[A-Z][a-z]{2,}\b', tail)
@@ -11392,16 +11392,16 @@ def _split_chapter_chunks(text: str, chunk_words: int = 3000, overlap_words: int
 
 
 def _groq_summary_call(groq_client, system_prompt: str, user_content: str,
-                       temperature: float, max_tokens: int) -> str:
+                       temperature: float, max_tokens: int,
+                       frequency_penalty: float = 0.6,
+                       presence_penalty: float = 0.3) -> str:
     """Single Groq chat call with anti-repetition sampling. Returns content or ''.
 
-    Uses frequency_penalty=0.6 + presence_penalty=0.3 + top_p=0.9 + a minimum
-    temperature of 0.35 to break the degenerate-loop failure mode where
-    llama-3.3-70b repeats the same sentence 15x. If the Groq SDK rejects any
-    of the penalty params (TypeError / 400), retries once without them —
-    never lets a sampling-param incompatibility fail the request.
+    Uses the supplied frequency_penalty + presence_penalty + top_p=0.9.
+    If the Groq SDK rejects any of the penalty params (TypeError / 400), retries
+    once without them — never lets a sampling-param incompatibility fail the
+    request.
     """
-    effective_temp = max(temperature, 0.35)
     # First attempt: full anti-repetition sampling.
     try:
         resp = groq_client.chat.completions.create(
@@ -11410,10 +11410,10 @@ def _groq_summary_call(groq_client, system_prompt: str, user_content: str,
                 {"role": "system", "content": system_prompt},
                 {"role": "user", "content": user_content},
             ],
-            temperature=effective_temp,
+            temperature=temperature,
             max_tokens=max_tokens,
-            frequency_penalty=0.6,
-            presence_penalty=0.3,
+            frequency_penalty=frequency_penalty,
+            presence_penalty=presence_penalty,
             top_p=0.9,
         )
         return (resp.choices[0].message.content or "").strip()
@@ -11432,7 +11432,7 @@ def _groq_summary_call(groq_client, system_prompt: str, user_content: str,
                         {"role": "system", "content": system_prompt},
                         {"role": "user", "content": user_content},
                     ],
-                    temperature=effective_temp,
+                    temperature=temperature,
                     max_tokens=max_tokens,
                 )
                 return (resp.choices[0].message.content or "").strip()
@@ -11443,16 +11443,67 @@ def _groq_summary_call(groq_client, system_prompt: str, user_content: str,
         return ""
 
 
+def _extract_outline_proper_nouns(outline: str) -> set:
+    """Extract proper nouns from the Pass A outline (capitalized tokens,
+    excluding sentence-initial common words). Used by the coverage gate."""
+    if not outline:
+        return set()
+    # Match capitalized words of 3+ letters (excludes "I", "A", "The" at start)
+    # Also match multi-word names like "Fortune", "Styx", "Plutus", "Virgil"
+    candidates = re.findall(r'\b[A-Z][a-z]{2,}\b', outline)
+    # Exclude common sentence-initial words that aren't proper nouns
+    _COMMON = {"The", "And", "But", "Then", "When", "While", "After", "Before",
+               "They", "He", "She", "It", "This", "That", "These", "Those",
+               "His", "Her", "Their", "Its", "Our", "Your", "My",
+               "There", "Here", "Now", "Next", "Finally", "However",
+               "Dante", "Virgil"}  # always keep these two even if sentence-initial
+    # Actually KEEP Dante/Virgil — they ARE proper nouns we want to check.
+    _EXCLUDE = {"The", "And", "But", "Then", "When", "While", "After", "Before",
+                "They", "She", "This", "That", "These", "Those",
+                "His", "Her", "Their", "Its", "Our", "Your",
+                "There", "Here", "Now", "Next", "Finally", "However"}
+    return {w for w in candidates if w not in _EXCLUDE}
+
+
+def _check_coverage(summary: str, outline_nouns: set) -> tuple:
+    """Check what fraction of outline proper nouns appear in the Hindi summary.
+
+    Matches on the Latin-script name inside parentheses in the summary
+    (e.g. प्लूटस (Plutus) → matches "Plutus"). Returns (coverage_pct, missing_set).
+    """
+    if not outline_nouns:
+        return (100.0, set())
+    summary_lower = summary.lower()
+    present = set()
+    missing = set()
+    for noun in outline_nouns:
+        if noun.lower() in summary_lower:
+            present.add(noun)
+        else:
+            missing.add(noun)
+    pct = round(len(present) / len(outline_nouns) * 100, 1) if outline_nouns else 100.0
+    return (pct, missing)
+
+
 def _generate_hindi_summary(groq_client, chapter_text: str) -> str:
-    """Generate a full-coverage Hindi chapter summary.
+    """Generate a full-coverage Hindi chapter summary via two-pass outline → summary.
 
-    Strategy:
-    - Short chapters (≤4000 words): single-pass with the coverage prompt.
-    - Long chapters: map-reduce (3000-word chunks + 200-word overlap, then merge).
-
-    Post-generation: validate (script/length/tail-coverage). On rejection, retry
-    once with lower temperature + a nudge. If retry also fails, return the
-    better of the two attempts and log a warning — never fail the request outright.
+    v5 flow (replaces the old single-pass + map-reduce):
+    - Pass A (Extraction): send the full chapter transcript with an English
+      extraction prompt at temperature 0.1. Output is a numbered list of every
+      distinct beat in narrative order. NOT shown to the user — it's a checklist.
+    - Pass B (Hindi summary): send the outline + chapter transcript with the
+      Hindi checklist prompt at temperature 0.3, frequency_penalty 0.4,
+      presence_penalty 0.3. The outline forces coverage of every beat.
+    - Coverage gate: extract proper nouns from the outline, check what fraction
+      appear in the summary. If <80%, make one repair call appending the
+      missing names.
+    - Long-chapter handling: if the chapter exceeds ~8000 words (~12k tokens),
+      split into ~2000-word segments, run Pass A on each, concatenate outlines
+      (renumbering), then run a single Pass B against the concatenated outline
+      + the full chapter text. Never run Pass B on a truncated transcript.
+    - De-duplication: if two sentences have >85% token overlap, drop the later.
+    - NO minimum-length validation (the old length rule padded/looped).
 
     Never raises — returns the best-effort summary (possibly empty on total failure).
     """
@@ -11460,101 +11511,93 @@ def _generate_hindi_summary(groq_client, chapter_text: str) -> str:
         return ""
 
     word_count = len(chapter_text.split())
-    use_mapreduce = word_count > 4000
+    # Long-chapter threshold: ~8000 words ≈ ~12k tokens.
+    # Segment size for Pass A: ~2000 words ≈ ~3k tokens.
+    LONG_CHAPTER_WORDS = 8000
+    SEGMENT_WORDS = 2000
 
-    def _attempt(temperature, extra_user_msg=None):
-        """One generation attempt. Returns (summary, path_label, dedupe_pct).
+    # ── Pass A: Extraction ──
+    if word_count > LONG_CHAPTER_WORDS:
+        # Segmented Pass A: split into ~2000-word segments, extract each,
+        # concatenate outlines in order (renumbering).
+        segments = _split_chapter_chunks(chapter_text,
+                                          chunk_words=SEGMENT_WORDS,
+                                          overlap_words=0)
+        outline_parts = []
+        beat_num = 1
+        for seg in segments:
+            raw_outline = _groq_summary_call(
+                groq_client, _SUMMARY_PASS_A_PROMPT, seg,
+                temperature=0.1, max_tokens=2048,
+                frequency_penalty=0.0, presence_penalty=0.0)
+            # Renumber the beats so the concatenated outline is sequential
+            for line in (raw_outline or "").split("\n"):
+                line = line.strip()
+                # Strip the original number prefix and re-number
+                line = re.sub(r'^\s*\d+[.)\]]\s*', '', line)
+                if line:
+                    outline_parts.append(f"{beat_num}. {line}")
+                    beat_num += 1
+        outline = "\n".join(outline_parts)
+        path = f"pass-a-segmented({len(segments)} segments, {beat_num-1} beats)"
+    else:
+        # Single Pass A on the full chapter text.
+        outline = _groq_summary_call(
+            groq_client, _SUMMARY_PASS_A_PROMPT, chapter_text,
+            temperature=0.1, max_tokens=2048,
+            frequency_penalty=0.0, presence_penalty=0.0)
+        path = f"pass-a-single({len(outline.splitlines()) if outline else 0} beats)"
 
-        Map-reduce path is EXTRACTIVE (not generative) for <=6 chunks: the
-        per-chunk summaries are already good distinct paragraphs, so we just
-        concatenate + dedupe them. Only >6 chunks triggers a generative
-        merge LLM call (capped at 1200 tokens with anti-repetition penalties),
-        because that's where the loop historically originated.
+    if not outline or not outline.strip():
+        print(f"[summary] Pass A produced empty outline (words_in={word_count})")
+        return ""
+    print(f"[summary] {path}: outline extracted")
 
-        dedupe_pct = percentage of characters removed by the final
-        _dedupe_summary pass (0.0 if nothing was removed). Used by the caller
-        to decide whether to retry: if dedupe removed >40%, the model was
-        looping, so retrying would reproduce the loop — return as-is.
-        """
-        if use_mapreduce:
-            chunks = _split_chapter_chunks(chapter_text)
-            chunk_summaries = []
-            for ch in chunks:
-                cs = _groq_summary_call(
-                    groq_client, _SUMMARY_CHUNK_PROMPT, ch,
-                    temperature=temperature, max_tokens=512)
-                cs = _clean_summary_llm_output(cs)
-                if cs:
-                    chunk_summaries.append(cs)
-            if not chunk_summaries:
-                return ("", "mapreduce(empty)", 0.0)
-            if len(chunks) > 6:
-                # Generative merge only for very long chapters (>6 chunks).
-                merged_input = "\n\n---\n\n".join(chunk_summaries)
-                if extra_user_msg:
-                    merged_input = extra_user_msg + "\n\n" + merged_input
-                raw = _groq_summary_call(
-                    groq_client, _SUMMARY_MERGE_PROMPT, merged_input,
-                    temperature=temperature, max_tokens=1200)
-                pre_dedupe = raw
-                summary = _clean_summary_llm_output(raw)
-                path = f"mapreduce-merge({len(chunks)} chunks)"
+    # ── Pass B: Hindi summary driven by the outline as a checklist ──
+    # Send the outline + the FULL chapter text (never truncated).
+    pass_b_input = f"OUTLINE:\n{outline}\n\nCHAPTER TEXT:\n{chapter_text}"
+    raw_summary = _groq_summary_call(
+        groq_client, _SUMMARY_PASS_B_PROMPT, pass_b_input,
+        temperature=0.3, max_tokens=2048,
+        frequency_penalty=0.4, presence_penalty=0.3)
+    summary = _clean_summary_llm_output(raw_summary)
+    if not summary:
+        print(f"[summary] Pass B produced empty summary")
+        return ""
+    print(f"[summary] pass-b: len={len(summary)} paras={len(summary.split(chr(10)+chr(10)))}")
+
+    # ── Coverage gate ──
+    outline_nouns = _extract_outline_proper_nouns(outline)
+    if outline_nouns:
+        pct, missing = _check_coverage(summary, outline_nouns)
+        print(f"[summary] coverage={pct}% ({len(outline_nouns)} nouns, "
+              f"{len(missing)} missing: {sorted(missing)[:8]})")
+        if pct < 80.0 and missing:
+            # One repair call: append the missing names to the summary.
+            missing_list = ", ".join(sorted(missing)[:20])
+            repair_msg = _SUMMARY_REPAIR_PROMPT.format(missing=missing_list)
+            repair_input = f"CURRENT SUMMARY:\n{summary}\n\n{repair_msg}"
+            raw_repaired = _groq_summary_call(
+                groq_client, _SUMMARY_PASS_B_PROMPT, repair_input,
+                temperature=0.2, max_tokens=2048,
+                frequency_penalty=0.4, presence_penalty=0.3)
+            repaired = _clean_summary_llm_output(raw_repaired)
+            if repaired:
+                # Re-check coverage on the repaired version
+                pct2, missing2 = _check_coverage(repaired, outline_nouns)
+                print(f"[summary] repair coverage={pct2}% ({len(missing2)} missing)")
+                if pct2 >= pct:
+                    summary = repaired
+                    pct = pct2
             else:
-                # Extractive merge: concatenate + dedupe. No LLM call — the
-                # per-chunk summaries are already distinct paragraphs.
-                concatenated = "\n\n".join(chunk_summaries)
-                pre_dedupe = concatenated
-                summary = _dedupe_summary(concatenated)
-                path = f"mapreduce-extractive({len(chunks)} chunks)"
-        else:
-            user_content = chapter_text
-            if extra_user_msg:
-                user_content = extra_user_msg + "\n\n" + chapter_text
-            raw = _groq_summary_call(
-                groq_client, _SUMMARY_SYSTEM_PROMPT_V3, user_content,
-                temperature=temperature, max_tokens=1600)
-            pre_dedupe = raw
-            summary = _clean_summary_llm_output(raw)
-            path = "single-pass"
-        # Measure how much the final dedupe pass removed.
-        pre_len = len((pre_dedupe or "").strip())
-        post_len = len((summary or "").strip())
-        dedupe_pct = round((1 - post_len / pre_len) * 100, 1) if pre_len > 0 else 0.0
-        return (summary, path, dedupe_pct)
+                print(f"[summary] repair call produced empty output, keeping original")
 
-    # First attempt
-    summary1, path1, dedupe_pct1 = _attempt(0.3)
-    ok1, reason1 = _validate_summary(summary1, chapter_text)
-    print(f"[summary] attempt 1: path={path1} words_in={word_count} "
-          f"len={len(summary1)} dedupe_removed={dedupe_pct1}% ok={ok1} reason={reason1}")
-    if ok1:
-        return summary1
-    # ARIA: if dedupe removed >40% of the text, the model was looping.
-    # Retrying reproduces the loop, so return the deduped version as-is
-    # (do NOT retry) — it's the best we can get.
-    if dedupe_pct1 > 40.0:
-        print(f"[summary] dedupe_removed={dedupe_pct1}% > 40% — skipping retry "
-              f"(retrying would reproduce the loop), returning deduped result")
-        return summary1
-
-    # Retry once with lower temperature + nudge
-    summary2, path2, dedupe_pct2 = _attempt(0.2, extra_user_msg=_SUMMARY_RETRY_USER_MSG)
-    ok2, reason2 = _validate_summary(summary2, chapter_text)
-    print(f"[summary] attempt 2 (retry): path={path2} len={len(summary2)} "
-          f"dedupe_removed={dedupe_pct2}% ok={ok2} reason={reason2}")
-    if ok2:
-        return summary2
-
-    # Both failed — return the better of the two (longer, fewer leaked chars).
-    def _score(s):
-        if not s:
-            return -1
-        leaked = len(_NON_INDIC_SCRIPT_RE.findall(s))
-        return len(s) - leaked * 50  # penalize leaked chars heavily
-    s1, s2 = _score(summary1), _score(summary2)
-    print(f"[summary] both attempts failed validation — returning best-effort "
-          f"(s1={s1} reason1={reason1}, s2={s2} reason2={reason2})")
-    return summary2 if s2 > s1 else summary1
+    # ── Final validation (script + tail-coverage only, NO length check) ──
+    ok, reason = _validate_summary(summary, chapter_text)
+    print(f"[summary] final: path={path} words_in={word_count} "
+          f"len={len(summary)} coverage={pct if outline_nouns else 'n/a'}% "
+          f"ok={ok} reason={reason}")
+    return summary
 
 
 @app.route("/api/chapter/summary", methods=["POST"])
@@ -11591,10 +11634,11 @@ def api_chapter_summary():
     chapter_text = " ".join(str(c[2]) for c in _tc_list if len(c) >= 3)
 
     # Check R2 cache
-    # ARIA: v4 cache namespace — invalidates all v3 summaries (which contain
-    # the repetition loop) + their Swara audio so they're regenerated fresh.
-    summary_cache_key = f"summaries/v4/{book_id}/{chapter_index}.hi.json"
-    audio_cache_key = f"summaries/v4/{book_id}/{chapter_index}.hi.mp3"
+    # ARIA: v5 cache namespace — invalidates all v4 summaries (which used the
+    # old single-pass/map-reduce flow with under-coverage + hallucination) +
+    # their Swara audio so they're regenerated fresh with the two-pass flow.
+    summary_cache_key = f"summaries/v5/{book_id}/{chapter_index}.hi.json"
+    audio_cache_key = f"summaries/v5/{book_id}/{chapter_index}.hi.mp3"
 
     try:
         import storage_backend
