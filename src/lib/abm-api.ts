@@ -493,6 +493,35 @@ export async function getBgmCues(
   return (body?.cues ?? []) as BgmCue[];
 }
 
+/* ──── Health / readiness ──── */
+
+export interface HealthResponse {
+  process: string;
+  ready: boolean;
+  storage_ready: boolean;
+  recovery_complete: boolean;
+  jobs_loaded: number;
+  tokens_loaded: number;
+  registry_loaded: number;
+  version: string;
+  timestamp: number;
+}
+
+/** Poll the backend health endpoint. Returns quickly. The frontend uses this
+ *  during cold-start to wait for `ready=true` before entering the library. */
+export async function checkHealth(signal?: AbortSignal): Promise<HealthResponse> {
+  const res = await fetch(`${ABM_BASE}/health`, {
+    credentials: "include",
+    headers: cidHeaders(),
+    cache: "no-store",
+    signal,
+  });
+  if (!res.ok) {
+    throw new Error(`Health check failed (${res.status})`);
+  }
+  return (await res.json()) as HealthResponse;
+}
+
 /** Returns the relative URL for a BGM loop asset MP3 by mood name.
  *  Served by Flask /api/bgm_asset/<mood> with 30-day immutable cache headers.
  *  Used as the `src` of hidden <audio loop> elements in the runtime mixer. */

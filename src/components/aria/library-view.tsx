@@ -29,6 +29,7 @@ import {
   getJobChapters,
   deleteJob,
   isPollingStatus,
+  checkHealth,
   type MyJob,
   type AnalyzeResponse,
   type AnalyzeChapter,
@@ -151,7 +152,7 @@ export function LibraryView() {
   // Scope localStorage by userId so admin's library doesn't leak to new users
   // on the same browser. Falls back to "anon" if user isn't loaded yet.
   const userId = useAriaStore((s) => s.user?.id) || "anon";
-  const STORAGE_KEY = `aria-audiobook-library:${userId}`;
+  const STORAGE_KEY = `aria-audiobook-library-v3:${userId}`;
   const DELETED_KEY = `aria-audiobook-deleted:${userId}`;
 
   // ── Tombstone helpers (module-level, pure) ──
@@ -247,6 +248,8 @@ export function LibraryView() {
   // Set when the first fetch exceeds ~8s OR fails with 502/timeout/network
   // error (then we retry with backoff before surfacing the real error).
   const [wakingUp, setWakingUp] = useState(false);
+  const [healthReady, setHealthReady] = useState(false);
+  const healthAbortRef = useRef<AbortController | null>(null);
   const [hoveredJob, setHoveredJob] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
   const [analyzeResponse, setAnalyzeResponse] = useState<AnalyzeResponse | null>(null);
@@ -317,7 +320,22 @@ export function LibraryView() {
           const staleCards = prev.filter(
             (c) => !apiIds.has(c.jobId) && !tomb.has(c.jobId) && !_ACTIVE.has(c.status),
           );
-          return [...apiCards, ...staleCards];
+          // Merge: for each API card, if a previous card had a richer
+          // chapter_catalog (more entries), preserve it — a partial API
+          // response (e.g. after cold start, missing catalog) must NOT
+          // overwrite a complete cached catalog.
+          const merged = apiCards.map((apiCard) => {
+            const prevCard = prev.find((c) => c.jobId === apiCard.jobId);
+            if (prevCard) {
+              const apiCatLen = apiCard.chapterCatalog?.length ?? 0;
+              const prevCatLen = prevCard.chapterCatalog?.length ?? 0;
+              if (prevCatLen > apiCatLen) {
+                return { ...apiCard, chapterCatalog: prevCard.chapterCatalog };
+              }
+            }
+            return apiCard;
+          });
+          return [...merged, ...staleCards];
         });
         setError(null);
         return; // success — exit the retry loop
@@ -357,26 +375,49 @@ export function LibraryView() {
     await fetchJobsWithRetry(false);
   }, [fetchJobsWithRetry]);
 
+  // ── Health polling: wait for backend readiness before fetching jobs ──
+  // The backend sets ready=true only after storage is loaded + stale jobs
+  // are reconciled. We poll every 2-3s until ready, then fetch jobs.
   useEffect(() => {
-    // Don't fetch until the real userId is available (not "anon").
-    // Without this, the component fetches with "anon" first (returns 0 jobs
-    // immediately), sets loading=false, then when the session loads and
-    // userId changes to the real ID, loading is set to true again but the
-    // fetch may return quickly with 0 jobs for a new user — the user sees
-    // "No audiobooks yet" instead of the loading/waking-up UI.
     if (userId === "anon") return;
+    setHealthReady(false);
+    // Abort any previous health-poll cycle
+    if (healthAbortRef.current) healthAbortRef.current.abort();
+    const ac = new AbortController();
+    healthAbortRef.current = ac;
+
+    let stopped = false;
+    const poll = async () => {
+      while (!stopped && !ac.signal.aborted) {
+        try {
+          const h = await checkHealth(ac.signal);
+          if (h.ready) {
+            setHealthReady(true);
+            return;
+          }
+          setWakingUp(true);
+        } catch {
+          setWakingUp(true);
+        }
+        await new Promise((r) => setTimeout(r, 2500));
+      }
+    };
+    poll();
+    return () => { stopped = true; ac.abort(); };
+  }, [userId]);
+
+  useEffect(() => {
+    // Don't fetch until the real userId is available (not "anon") AND
+    // the backend health check says ready=true.
+    if (userId === "anon") return;
+    if (!healthReady) return;
     // Initial fetch with cold-start retry logic.
-    // Re-runs when userId changes (login/logout/switch) so the new user's
-    // library is fetched fresh.
-    // Enforce a minimum 1.5s loading time so the user always sees the loading
-    // UI (not a jarring flash of "No audiobooks yet" when the backend is
-    // responsive but the user has 0 jobs).
     const minLoadTimer = new Promise<void>((r) => setTimeout(r, 1500));
     Promise.all([
       fetchJobsWithRetry(true),
       minLoadTimer,
     ]).finally(() => setLoading(false));
-  }, [fetchJobsWithRetry, userId]);
+  }, [fetchJobsWithRetry, userId, healthReady]);
 
   // Poll while any job is still generating / optimizing / translating.
   // Also send heartbeats to keep generating jobs alive (the Flask app cancels

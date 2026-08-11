@@ -765,7 +765,7 @@ def _check_job_owner(job_id):
     endpoints can still serve data after a restart.
     """
     if job_id not in jobs:
-        # ARIA fallback: check download tokens (persisted to disk, survive restart)
+        # ARIA fallback 1: check download tokens (persisted to disk, survive restart)
         for tok, rec in _download_tokens.items():
             if isinstance(rec, dict) and rec.get("job_id") == job_id:
                 caller = _get_client_id()
@@ -775,6 +775,20 @@ def _check_job_owner(job_id):
                         return None, jsonify({"error": "Forbidden"}), 403
                 # Construct a minimal job dict from the token snapshot
                 return rec, None, 0
+        # ARIA fallback 2: check durable registry (survives restart even if
+        # the token was lost). Construct a minimal dict from the registry entry
+        # so the caller can attempt _reconstruct_job_from_storj.
+        with _job_registry_lock:
+            reg_rec = _job_registry.get(job_id)
+        if reg_rec and isinstance(reg_rec, dict):
+            caller = _get_client_id()
+            owner = reg_rec.get("client_id", "")
+            if owner and caller and caller != owner:
+                if not _admin_auth_ok(_admin_auth_from_request()):
+                    return None, jsonify({"error": "Forbidden"}), 403
+            # Return the registry record — callers that need info will call
+            # _reconstruct_job_from_storj with this as the fallback_record.
+            return reg_rec, None, 0
         return None, jsonify({"error": "Job not found"}), 404
     job = jobs[job_id]
     owner = job.get("client_id", "")
@@ -11201,6 +11215,42 @@ def api_bgm_debug(job_id, chapter_index):
 # ARIA: Hindi comprehension endpoints (summary, glossary, explain)
 # ═══════════════════════════════════════════════════════════════════
 
+# ── ARIA: Health/readiness endpoint ──
+# The frontend polls this during cold-start to distinguish "process alive"
+# from "app ready". Only set ready=true after storage is loaded + stale jobs
+# are reconciled. Does NOT parse EPUBs or load audio files.
+_RECOVERY_COMPLETE = False
+
+def _mark_recovery_complete():
+    """Called after startup recovery finishes."""
+    global _RECOVERY_COMPLETE
+    _RECOVERY_COMPLETE = True
+    print("[health] recovery complete — ready=true", flush=True)
+
+@app.route("/api/health", methods=["GET"])
+def api_health():
+    """Lightweight readiness check. Returns quickly without loading audio/EPUBs."""
+    storage_ready = True
+    try:
+        import storage_backend
+        storage_ready = storage_backend.is_enabled()
+    except Exception:
+        storage_ready = False
+
+    resp = jsonify({
+        "process": "alive",
+        "ready": _RECOVERY_COMPLETE,
+        "storage_ready": storage_ready,
+        "recovery_complete": _RECOVERY_COMPLETE,
+        "jobs_loaded": len(jobs),
+        "tokens_loaded": len(_download_tokens),
+        "registry_loaded": len(_job_registry),
+        "version": "10.0",
+        "timestamp": int(time.time()),
+    })
+    resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+    return resp
+
 @app.route("/api/ai/health", methods=["GET"])
 def api_ai_health():
     """Quick health check for the Groq AI backend.
@@ -18023,6 +18073,11 @@ def _ensure_background_threads():
 
 _init_log_dedup()
 _ensure_background_threads()
+
+# ARIA: Mark recovery complete AFTER all startup tasks are done.
+# The frontend polls GET /api/health and waits for ready=true before
+# entering the library. This prevents interacting with a half-restored app.
+_mark_recovery_complete()
 
 if __name__ == "__main__":
     # Render provides $PORT (typically 10000) and requires binding to 0.0.0.0.
