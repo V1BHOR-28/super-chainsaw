@@ -3,14 +3,14 @@
 import { useState, useRef, useCallback, useEffect } from "react";
 import { Loader2, Pause, BookOpen, Volume2 } from "lucide-react";
 import { usePlayerStore } from "@/lib/player-store";
-import { getChapterSummary, type HindiSummary } from "@/lib/abm-api";
+import { getChapterSummary, type HindiSummary, type HindiApiError } from "@/lib/abm-api";
 import { getAudioElement } from "@/lib/audio-element-registry";
 import { toast } from "sonner";
 
 // ── ARIA: per-chapter summary cache ──
 // Keyed by a schema version so any change to the summary shape invalidates
 // old entries. Only valid (non-empty) responses are cached.
-const SUMMARY_CACHE_VERSION = "v4";
+const SUMMARY_CACHE_VERSION = "v6";
 const _summaryCache = new Map<string, HindiSummary>();
 
 function _cacheKey(bookId: string, chapterIndex: number) {
@@ -22,8 +22,10 @@ function _isValidSummary(s: unknown): s is HindiSummary {
     !!s &&
     typeof s === "object" &&
     typeof (s as HindiSummary).summary === "string" &&
-    (s as HindiSummary).summary.trim().length > 0 &&
-    typeof (s as HindiSummary).audio_url === "string"
+    (s as HindiSummary).summary.trim().length > 0
+    // audio_url is optional — a text summary that exists is still valid even
+    // when TTS or the R2 upload failed. The frontend hides the Listen button
+    // when audio_url is empty/missing.
   );
 }
 
@@ -161,6 +163,7 @@ export function HindiSummaryCard({
         return;
       }
       if (!_isValidSummary(result)) {
+        console.error("[summary] invalid response", result);
         toast.error("अभी उपलब्ध नहीं है, बाद में कोशिश करें");
         setState("collapsed");
         return;
@@ -168,7 +171,8 @@ export function HindiSummaryCard({
       _summaryCache.set(key, result);
       setSummary(result);
       setState("loaded");
-    } catch {
+    } catch (err) {
+      console.error("[summary] fetch failed", err);
       if (
         generation !== requestGenerationRef.current ||
         requestedBookId !== latestBookIdRef.current ||
@@ -176,7 +180,15 @@ export function HindiSummaryCard({
       ) {
         return;
       }
-      toast.error("अभी उपलब्ध नहीं है, बाद में कोशिश करें");
+      // Toast the server's message; fall back to generic Hindi only when
+      // there is none. Show a rate-limit-specific toast when code matches.
+      const code = (err as HindiApiError)?.code;
+      const msg = err instanceof Error ? err.message : "";
+      if (code === "rate_limited" || code === "groq_rate_limited") {
+        toast.error("थोड़ी देर रुकें — बहुत सारे अनुरोध");
+      } else {
+        toast.error(msg || "अभी उपलब्ध नहीं है, बाद में कोशिश करें");
+      }
       setState("collapsed");
     }
   }, [bookId, chapterIndex]);
@@ -204,8 +216,8 @@ export function HindiSummaryCard({
     audio
       .play()
       .then(() => setAudioPlaying(true))
-      .catch(() => {
-        toast.error("अभी उपलब्ध नहीं है, बाद में कोशिश करें");
+      .catch((err) => {
+        console.error("[summary] audio play failed", err);
       });
   }, [summary, pause, createSummaryAudio]);
 

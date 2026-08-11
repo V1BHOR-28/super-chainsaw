@@ -1189,3 +1189,83 @@ Files modified:
 No git push — implementation + verification only, per the task spec.
 
 Regenerating Canto VII will now: (1) extract every beat into a numbered outline (Pass A), (2) write a Hindi summary that must represent EVERY beat in the outline (Pass B), (3) check coverage of proper nouns and repair if <80%, (4) cache under v5. The transcript will render explain buttons as sibling blocks between paragraphs — the label "हिंदी में समझाओ" can never leak into the word stream because it's in a separate DOM element, not in the words array.
+
+---
+Task ID: GOD-PROMPT-HINDI-FIX
+Agent: main (Fix ALL Hindi AI features — summary + explain — root cause: 5 hardcoded model ids, opaque errors, discarded results, free-tier failure)
+Task: Fix both Hindi AI features (chapter summary + explain paragraph) that are dead due to: (A) five hardcoded copies of one model id with no fallback, (B) every failure collapsing into one opaque toast, (C) successful responses thrown away when TTS fails, (D) cost/limits guaranteeing failure at scale.
+
+Work Log:
+- Read prior worklog (COVERAGE-FIX, REPETITION-FIX, REGRESSION-FIX-2) for architecture context.
+- Read all 5 hardcoded call sites: audiobook_app.py (_groq_summary_call, api_glossary, api_explain) + translate.py (_call_groq). Confirmed all pin model="llama-3.3-70b-versatile" with no fallback.
+
+PART 1 — One Groq call site with model fallback (fixes A):
+- Created mini-services/audiobook-maker/groq_client.py:
+  - GROQ_MODELS: de-duped ordered list [env GROQ_MODEL, "llama-3.3-70b-versatile", "llama-3.1-8b-instant", "openai/gpt-oss-120b"].
+  - groq_chat(system, user, *, temperature, max_tokens, frequency_penalty, presence_penalty) → (text, error_code). Never raises.
+  - Walks GROQ_MODELS in order. 404/decommissioned → log + next model. 429 → retry same model with backoff [2s, 5s, 10s] (3 attempts), then next model. Success → log [groq] used model=<id> in_tokens≈<n>.
+  - Error codes: groq_no_key, groq_rate_limited, groq_all_models_failed, groq_empty.
+  - groq_health(): one tiny 5-token completion for /api/ai/health.
+- Replaced all 5 call sites:
+  - _groq_summary_call → now returns (text, error_code) via groq_chat().
+  - api_glossary → uses groq_chat() directly.
+  - api_explain → uses groq_chat() directly.
+  - translate.py _call_groq → uses groq_chat() directly.
+- RG PROOF: rg 'llama-3\.3' mini-services/ → matches ONLY groq_client.py (verified).
+
+PART 2 — Real errors end to end (fixes B):
+- Backend: both api_chapter_summary + api_explain + api_glossary now return {"error": <Hindi>, "code": <machine code>} on failure. Codes: no_transcript, job_not_found, groq_no_key, groq_rate_limited, groq_all_models_failed, empty_summary, rate_limited (with retry_after), internal, bad_request. Outer except uses traceback.print_exc().
+- Frontend abm-api.ts: new HindiApiError class carries code + retry_after. getChapterSummary + explainParagraph + getGlossaryEntry throw HindiApiError on !res.ok.
+- hindi-summary-card.tsx: catch (err) with console.error("[summary]...", err). Toasts the server's message; rate_limited code → "थोड़ी देर रुकें — बहुत सारे अनुरोध".
+- transcript-view.tsx: handleExplain catch (err) with console.error("[explain]...", err). Same rate-limited toast. playExplainAudio catch with console.error.
+
+PART 3 — Never discard a working result (fixes C):
+- HindiSummary.audio_url + HindiGlossary.audio_url now optional (audio_url?: string).
+- _isValidSummary checks ONLY typeof summary === "string" && summary.trim().length > 0. No audio_url check.
+- When audio_url is empty: text renders, Listen/सुनें button hidden (already conditional on audio_url), no toast.
+- playExplainAudio: destroy + rebuild when URL differs (pause → removeAttribute("src") → load() → new Audio(url)). A second explain can't replay the first one's audio.
+
+PART 4 — Make generation survive the free tier (fixes D):
+- _generate_hindi_summary now returns (summary, error_code) and is wrapped in try/except + traceback.print_exc().
+- Degradation ladder (first non-empty result wins, logged with [summary] degraded_to=):
+  a. Two-pass (Pass A outline → Pass B checklist) — as before.
+  b. Single-pass: chapter text straight to _SUMMARY_PASS_B_PROMPT, no outline.
+  c. Truncated single-pass: first 3000 words.
+- Coverage-repair call SKIPPED if any previous call was rate-limited (4th call guarantees another 429).
+- Pass B input capped at 6000 words (outline + first 6000 words of chapter text). The outline already carries the tail beats.
+- chapter_text fallback chain in api_chapter_summary (errors no_transcript only if ALL three empty):
+  1. job["transcript_cues"][chapter_index] (int + str keys).
+  2. Parsed book's chapter text (info.chapters[chapter_index].text).
+  3. R2-stored transcript JSON (chapters/{book_id}/{chapter_index}.transcript.json).
+- /api/explain rate limit raised from 20/hr to 60/hr per client id.
+- Cache namespace bumped summaries/v5/ → summaries/v6/ (both JSON + MP3 keys).
+- SUMMARY_CACHE_VERSION = "v6" in hindi-summary-card.tsx.
+- Deletion cleanup updated to include v6.
+
+PART 5 — Health endpoint:
+- GET /api/ai/health → {"groq_key_present": bool, "models_tried": [...], "working_model": str|null, "error": str|null}. One tiny 5-token completion through groq_chat. no-store cache header.
+
+VERIFICATION:
+- python3 -m py_compile: audiobook_app.py + groq_client.py + translate.py all PASS.
+- npx tsc --noEmit: zero errors in any modified file (hindi-summary-card, transcript-view, abm-api).
+- bun run lint: 0 errors, 0 warnings.
+- rg 'llama-3\.3' mini-services/audiobook-maker/ → matches ONLY groq_client.py ✓
+- Inline logic tests (4 cases): default model list, env override, de-dupe, backoff schedule. All passed.
+- agent-browser: page loads cleanly (HTTP 200, title "ARIA"), no console errors, no hydration crashes. Dev log shows all-200 responses, clean compilation.
+
+CONSTRAINTS honored:
+- Did NOT touch transcript sync offset, manual-scroll override, chapter catalog builder, analyze/chaptering, BGM mixing, cover persistence, deletion tombstones, or the voice registry.
+- Did NOT touch bgm_cues.py, generation_engine.py, community_*.py, translation_core.py (pre-existing chat.completions.create call sites for non-Hindi features — out of scope).
+
+Stage Summary:
+Files created:
+- mini-services/audiobook-maker/groq_client.py (155 lines: GROQ_MODELS, groq_chat with fallback + 429 backoff, groq_health)
+
+Files modified:
+- mini-services/audiobook-maker/audiobook_app.py (+180/-90 lines: _groq_summary_call routes through groq_chat, _generate_hindi_summary degradation ladder + try/except + (summary, code) return + Pass B cap 6000 words + skip repair on rate-limit, api_chapter_summary transcript fallback chain + structured errors + traceback + v6 cache, api_glossary uses groq_chat + structured errors, api_explain rate limit 60/hr + groq_chat + structured errors, /api/ai/health endpoint, v6 in deletion cleanup)
+- mini-services/audiobook-maker/translate.py (+15/-10 lines: _call_groq routes through groq_chat, comment cleanup)
+- src/lib/abm-api.ts (+40 lines: HindiApiError class, audio_url optional, getChapterSummary/explainParagraph/getGlossaryEntry throw HindiApiError with code/retry_after, cache:no-store on explain)
+- src/components/aria/hindi-summary-card.tsx (+20 lines: SUMMARY_CACHE_VERSION v6, _isValidSummary only checks summary, console.error + specific toasts, audio play catch logs)
+- src/components/aria/transcript-view.tsx (+15 lines: handleExplain console.error + specific toast, playExplainAudio destroy+rebuild on URL change, audio play catch logs)
+
+No git push — implementation + verification only, per the task spec.

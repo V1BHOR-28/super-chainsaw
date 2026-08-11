@@ -561,12 +561,26 @@ export function getCoverUrl(jobId: string, hasCover: boolean): string {
 
 export interface HindiSummary {
   summary: string;
-  audio_url: string;
+  audio_url?: string;
 }
 
 export interface HindiGlossary {
   explanation: string;
-  audio_url: string;
+  audio_url?: string;
+}
+
+/** Error thrown by getChapterSummary / explainParagraph on !res.ok.
+ *  Carries the server's machine-readable `code` + optional `retry_after`
+ *  (seconds) so the frontend can show a specific toast. */
+export class HindiApiError extends Error {
+  code?: string;
+  retry_after?: number;
+  constructor(message: string, code?: string, retry_after?: number) {
+    super(message);
+    this.name = "HindiApiError";
+    this.code = code;
+    this.retry_after = retry_after;
+  }
 }
 
 export async function getChapterSummary(bookId: string, chapterIndex: number): Promise<HindiSummary> {
@@ -579,7 +593,11 @@ export async function getChapterSummary(bookId: string, chapterIndex: number): P
   });
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
-    throw new Error(body.error || `Summary failed (${res.status})`);
+    throw new HindiApiError(
+      body.error || `Summary failed (${res.status})`,
+      body.code,
+      body.retry_after,
+    );
   }
   return (await res.json()) as HindiSummary;
 }
@@ -593,7 +611,11 @@ export async function getGlossaryEntry(bookId: string, term: string, contextSnip
   });
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
-    throw new Error(body.error || `Glossary failed (${res.status})`);
+    throw new HindiApiError(
+      body.error || `Glossary failed (${res.status})`,
+      body.code,
+      body.retry_after,
+    );
   }
   return (await res.json()) as HindiGlossary;
 }
@@ -604,10 +626,15 @@ export async function explainParagraph(bookId: string, chapterIndex: number, par
     headers: cidHeaders({ "Content-Type": "application/json" }),
     body: JSON.stringify({ book_id: bookId, chapter_index: chapterIndex, paragraph_text: paragraphText }),
     credentials: "include",
+    cache: "no-store",
   });
   if (!res.ok) {
     const body = await res.json().catch(() => ({}));
-    throw new Error(body.error || `Explain failed (${res.status})`);
+    throw new HindiApiError(
+      body.error || `Explain failed (${res.status})`,
+      body.code,
+      body.retry_after,
+    );
   }
   return (await res.json()) as HindiGlossary;
 }

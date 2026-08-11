@@ -10591,7 +10591,7 @@ def _purge_job_completely(job_id):
             for prefix in (
                 f"summaries/{job_id}/", f"summaries/v2/{job_id}/",
                 f"summaries/v3/{job_id}/", f"summaries/v4/{job_id}/",
-                f"summaries/v5/{job_id}/",
+                f"summaries/v5/{job_id}/", f"summaries/v6/{job_id}/",
                 f"glossary/{job_id}/", f"glossary/v2/{job_id}/",
             ):
                 try:
@@ -11155,6 +11155,27 @@ def api_bgm_debug(job_id, chapter_index):
 # ARIA: Hindi comprehension endpoints (summary, glossary, explain)
 # ═══════════════════════════════════════════════════════════════════
 
+@app.route("/api/ai/health", methods=["GET"])
+def api_ai_health():
+    """Quick health check for the Groq AI backend.
+
+    Returns { groq_key_present, models_tried, working_model, error }.
+    Implemented as one tiny 5-token completion through groq_chat. This is the
+    first thing to hit whenever a Hindi feature breaks — it tells you whether
+    the API key is present and which model is actually working.
+    """
+    try:
+        import groq_client as _gc
+        result = _gc.groq_health()
+        resp = jsonify(result)
+        resp.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+        return resp
+    except Exception:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"groq_key_present": False, "models_tried": [],
+                        "working_model": None, "error": "internal"}), 500
+
 # ── Hindi summary helpers (v5: two-pass outline → summary) ──
 # Reject any character from CJK / Hangul / Hiragana / Katakana / Arabic / Cyrillic.
 _NON_INDIC_SCRIPT_RE = re.compile(
@@ -11394,53 +11415,26 @@ def _split_chapter_chunks(text: str, chunk_words: int = 3000, overlap_words: int
 def _groq_summary_call(groq_client, system_prompt: str, user_content: str,
                        temperature: float, max_tokens: int,
                        frequency_penalty: float = 0.6,
-                       presence_penalty: float = 0.3) -> str:
-    """Single Groq chat call with anti-repetition sampling. Returns content or ''.
+                       presence_penalty: float = 0.3) -> tuple:
+    """Single Groq chat call via the centralized groq_client.groq_chat().
 
-    Uses the supplied frequency_penalty + presence_penalty + top_p=0.9.
-    If the Groq SDK rejects any of the penalty params (TypeError / 400), retries
-    once without them — never lets a sampling-param incompatibility fail the
-    request.
+    Returns (text, error_code). Never raises.
+    - Success: (text, None)
+    - Failure: ("", code) where code is one of:
+      groq_no_key, groq_rate_limited, groq_all_models_failed, groq_empty
+
+    The old implementation hardcoded a single model id with no fallback — if
+    Groq decommissioned that model, every Hindi feature died. Now it routes
+    through groq_chat() which walks GROQ_MODELS with 429 backoff.
     """
-    # First attempt: full anti-repetition sampling.
-    try:
-        resp = groq_client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_content},
-            ],
-            temperature=temperature,
-            max_tokens=max_tokens,
-            frequency_penalty=frequency_penalty,
-            presence_penalty=presence_penalty,
-            top_p=0.9,
-        )
-        return (resp.choices[0].message.content or "").strip()
-    except (TypeError, Exception) as e:
-        msg = str(e)
-        # If the SDK rejected the penalty/top_p params, retry plain.
-        if any(k in msg.lower() for k in ("frequency_penalty", "presence_penalty",
-                                          "top_p", "unexpected keyword",
-                                          "400", "invalid")):
-            print(f"[summary] anti-repetition params rejected ({type(e).__name__}), "
-                  f"retrying plain: {e}")
-            try:
-                resp = groq_client.chat.completions.create(
-                    model="llama-3.3-70b-versatile",
-                    messages=[
-                        {"role": "system", "content": system_prompt},
-                        {"role": "user", "content": user_content},
-                    ],
-                    temperature=temperature,
-                    max_tokens=max_tokens,
-                )
-                return (resp.choices[0].message.content or "").strip()
-            except Exception as e2:
-                print(f"[summary] Groq call (plain retry) failed: {e2}")
-                return ""
-        print(f"[summary] Groq call failed: {e}")
-        return ""
+    import groq_client as _gc
+    return _gc.groq_chat(
+        system_prompt, user_content,
+        temperature=temperature,
+        max_tokens=max_tokens,
+        frequency_penalty=frequency_penalty,
+        presence_penalty=presence_penalty,
+    )
 
 
 def _extract_outline_proper_nouns(outline: str) -> set:
@@ -11485,55 +11479,69 @@ def _check_coverage(summary: str, outline_nouns: set) -> tuple:
     return (pct, missing)
 
 
-def _generate_hindi_summary(groq_client, chapter_text: str) -> str:
-    """Generate a full-coverage Hindi chapter summary via two-pass outline → summary.
+def _generate_hindi_summary(groq_client, chapter_text: str) -> tuple:
+    """Generate a full-coverage Hindi chapter summary.
 
-    v5 flow (replaces the old single-pass + map-reduce):
-    - Pass A (Extraction): send the full chapter transcript with an English
-      extraction prompt at temperature 0.1. Output is a numbered list of every
-      distinct beat in narrative order. NOT shown to the user — it's a checklist.
-    - Pass B (Hindi summary): send the outline + chapter transcript with the
-      Hindi checklist prompt at temperature 0.3, frequency_penalty 0.4,
-      presence_penalty 0.3. The outline forces coverage of every beat.
-    - Coverage gate: extract proper nouns from the outline, check what fraction
-      appear in the summary. If <80%, make one repair call appending the
-      missing names.
-    - Long-chapter handling: if the chapter exceeds ~8000 words (~12k tokens),
-      split into ~2000-word segments, run Pass A on each, concatenate outlines
-      (renumbering), then run a single Pass B against the concatenated outline
-      + the full chapter text. Never run Pass B on a truncated transcript.
-    - De-duplication: if two sentences have >85% token overlap, drop the later.
-    - NO minimum-length validation (the old length rule padded/looped).
+    v6 flow with degradation ladder — takes the first non-empty result:
+    a. Two-pass (Pass A outline → Pass B checklist summary), as today.
+    b. Single-pass: chapter text straight to _SUMMARY_PASS_B_PROMPT.
+    c. Truncated single-pass: first 3000 words, same prompt.
 
-    Never raises — returns the best-effort summary (possibly empty on total failure).
+    v6 changes:
+    - Wrapped in try/except + traceback.print_exc() — never raises.
+    - _groq_summary_call now returns (text, error_code); rate-limit is
+      detected so the coverage-repair call is SKIPPED (a 4th call on a
+      rate-limited account guarantees another 429).
+    - Pass B input capped at 6000 words (outline + first 6000 words of
+      chapter text). The outline already carries the tail beats.
+    - Returns (summary, error_code) so the endpoint can return a structured
+      error instead of an opaque 503.
     """
+    import traceback
+    try:
+        return _generate_hindi_summary_inner(groq_client, chapter_text)
+    except Exception:
+        traceback.print_exc()
+        return ("", "internal")
+
+
+def _generate_hindi_summary_inner(groq_client, chapter_text: str) -> tuple:
+    """Inner implementation — see _generate_hindi_summary for the wrapper."""
     if not chapter_text or not chapter_text.strip():
-        return ""
+        return ("", "empty_summary")
 
     word_count = len(chapter_text.split())
-    # Long-chapter threshold: ~8000 words ≈ ~12k tokens.
-    # Segment size for Pass A: ~2000 words ≈ ~3k tokens.
     LONG_CHAPTER_WORDS = 8000
     SEGMENT_WORDS = 2000
+    PASS_B_INPUT_CAP = 6000  # words — outline + first 6000 words of chapter
+
+    # Track whether we hit a rate limit so we skip the coverage-repair call.
+    was_rate_limited = False
+
+    # ═══════════════════════════════════════════════════════════════
+    # DEGRADATION LADDER STEP A: Two-pass (outline → checklist summary)
+    # ═══════════════════════════════════════════════════════════════
+    outline = ""
+    path = ""
 
     # ── Pass A: Extraction ──
     if word_count > LONG_CHAPTER_WORDS:
-        # Segmented Pass A: split into ~2000-word segments, extract each,
-        # concatenate outlines in order (renumbering).
         segments = _split_chapter_chunks(chapter_text,
                                           chunk_words=SEGMENT_WORDS,
                                           overlap_words=0)
         outline_parts = []
         beat_num = 1
         for seg in segments:
-            raw_outline = _groq_summary_call(
+            raw_outline, code_a = _groq_summary_call(
                 groq_client, _SUMMARY_PASS_A_PROMPT, seg,
                 temperature=0.1, max_tokens=2048,
                 frequency_penalty=0.0, presence_penalty=0.0)
-            # Renumber the beats so the concatenated outline is sequential
-            for line in (raw_outline or "").split("\n"):
+            if code_a == "groq_rate_limited":
+                was_rate_limited = True
+            if not raw_outline:
+                continue
+            for line in raw_outline.split("\n"):
                 line = line.strip()
-                # Strip the original number prefix and re-number
                 line = re.sub(r'^\s*\d+[.)\]]\s*', '', line)
                 if line:
                     outline_parts.append(f"{beat_num}. {line}")
@@ -11541,63 +11549,124 @@ def _generate_hindi_summary(groq_client, chapter_text: str) -> str:
         outline = "\n".join(outline_parts)
         path = f"pass-a-segmented({len(segments)} segments, {beat_num-1} beats)"
     else:
-        # Single Pass A on the full chapter text.
-        outline = _groq_summary_call(
+        raw_outline, code_a = _groq_summary_call(
             groq_client, _SUMMARY_PASS_A_PROMPT, chapter_text,
             temperature=0.1, max_tokens=2048,
             frequency_penalty=0.0, presence_penalty=0.0)
+        if code_a == "groq_rate_limited":
+            was_rate_limited = True
+        outline = raw_outline or ""
         path = f"pass-a-single({len(outline.splitlines()) if outline else 0} beats)"
 
-    if not outline or not outline.strip():
-        print(f"[summary] Pass A produced empty outline (words_in={word_count})")
-        return ""
-    print(f"[summary] {path}: outline extracted")
+    summary = ""
+    if outline and outline.strip():
+        print(f"[summary] {path}: outline extracted")
+        # ── Pass B: Hindi summary driven by the outline as a checklist ──
+        # Cap input: outline + first PASS_B_INPUT_CAP words of chapter text.
+        chapter_words = chapter_text.split()
+        if len(chapter_words) > PASS_B_INPUT_CAP:
+            capped_chapter = " ".join(chapter_words[:PASS_B_INPUT_CAP])
+        else:
+            capped_chapter = chapter_text
+        pass_b_input = f"OUTLINE:\n{outline}\n\nCHAPTER TEXT:\n{capped_chapter}"
+        raw_summary, code_b = _groq_summary_call(
+            groq_client, _SUMMARY_PASS_B_PROMPT, pass_b_input,
+            temperature=0.3, max_tokens=2048,
+            frequency_penalty=0.4, presence_penalty=0.3)
+        if code_b == "groq_rate_limited":
+            was_rate_limited = True
+        summary = _clean_summary_llm_output(raw_summary)
+        if summary:
+            print(f"[summary] pass-b: len={len(summary)} paras={len(summary.split(chr(10)+chr(10)))}")
 
-    # ── Pass B: Hindi summary driven by the outline as a checklist ──
-    # Send the outline + the FULL chapter text (never truncated).
-    pass_b_input = f"OUTLINE:\n{outline}\n\nCHAPTER TEXT:\n{chapter_text}"
-    raw_summary = _groq_summary_call(
-        groq_client, _SUMMARY_PASS_B_PROMPT, pass_b_input,
-        temperature=0.3, max_tokens=2048,
-        frequency_penalty=0.4, presence_penalty=0.3)
-    summary = _clean_summary_llm_output(raw_summary)
     if not summary:
-        print(f"[summary] Pass B produced empty summary")
-        return ""
-    print(f"[summary] pass-b: len={len(summary)} paras={len(summary.split(chr(10)+chr(10)))}")
+        # Pass A or Pass B failed — log and fall through to degradation step B.
+        print(f"[summary] two-pass failed (outline_empty={not outline}, "
+              f"summary_empty={not summary}) → degrading to single-pass")
 
-    # ── Coverage gate ──
-    outline_nouns = _extract_outline_proper_nouns(outline)
-    if outline_nouns:
-        pct, missing = _check_coverage(summary, outline_nouns)
-        print(f"[summary] coverage={pct}% ({len(outline_nouns)} nouns, "
-              f"{len(missing)} missing: {sorted(missing)[:8]})")
-        if pct < 80.0 and missing:
-            # One repair call: append the missing names to the summary.
-            missing_list = ", ".join(sorted(missing)[:20])
-            repair_msg = _SUMMARY_REPAIR_PROMPT.format(missing=missing_list)
-            repair_input = f"CURRENT SUMMARY:\n{summary}\n\n{repair_msg}"
-            raw_repaired = _groq_summary_call(
-                groq_client, _SUMMARY_PASS_B_PROMPT, repair_input,
-                temperature=0.2, max_tokens=2048,
-                frequency_penalty=0.4, presence_penalty=0.3)
-            repaired = _clean_summary_llm_output(raw_repaired)
-            if repaired:
-                # Re-check coverage on the repaired version
-                pct2, missing2 = _check_coverage(repaired, outline_nouns)
-                print(f"[summary] repair coverage={pct2}% ({len(missing2)} missing)")
-                if pct2 >= pct:
-                    summary = repaired
-                    pct = pct2
-            else:
-                print(f"[summary] repair call produced empty output, keeping original")
+    # ═══════════════════════════════════════════════════════════════
+    # DEGRADATION LADDER STEP B: Single-pass (no outline)
+    # ═══════════════════════════════════════════════════════════════
+    if not summary:
+        # Cap input at PASS_B_INPUT_CAP words to stay within token budget.
+        chapter_words = chapter_text.split()
+        if len(chapter_words) > PASS_B_INPUT_CAP:
+            single_input = " ".join(chapter_words[:PASS_B_INPUT_CAP])
+        else:
+            single_input = chapter_text
+        raw_single, code_single = _groq_summary_call(
+            groq_client, _SUMMARY_PASS_B_PROMPT, single_input,
+            temperature=0.3, max_tokens=2048,
+            frequency_penalty=0.4, presence_penalty=0.3)
+        if code_single == "groq_rate_limited":
+            was_rate_limited = True
+        summary = _clean_summary_llm_output(raw_single)
+        if summary:
+            print(f"[summary] degraded_to=b (single-pass) len={len(summary)}")
+            path = "single-pass"
+
+    # ═══════════════════════════════════════════════════════════════
+    # DEGRADATION LADDER STEP C: Truncated single-pass (first 3000 words)
+    # ═══════════════════════════════════════════════════════════════
+    if not summary:
+        chapter_words = chapter_text.split()
+        truncated = " ".join(chapter_words[:3000])
+        raw_trunc, code_trunc = _groq_summary_call(
+            groq_client, _SUMMARY_PASS_B_PROMPT, truncated,
+            temperature=0.3, max_tokens=2048,
+            frequency_penalty=0.4, presence_penalty=0.3)
+        if code_trunc == "groq_rate_limited":
+            was_rate_limited = True
+        summary = _clean_summary_llm_output(raw_trunc)
+        if summary:
+            print(f"[summary] degraded_to=c (truncated 3000 words) len={len(summary)}")
+            path = "truncated-single-pass"
+
+    if not summary:
+        # All three steps failed.
+        if was_rate_limited:
+            return ("", "groq_rate_limited")
+        return ("", "empty_summary")
+
+    # ── Coverage gate (only if two-pass succeeded AND not rate-limited) ──
+    if outline and not was_rate_limited:
+        outline_nouns = _extract_outline_proper_nouns(outline)
+        if outline_nouns:
+            pct, missing = _check_coverage(summary, outline_nouns)
+            print(f"[summary] coverage={pct}% ({len(outline_nouns)} nouns, "
+                  f"{len(missing)} missing: {sorted(missing)[:8]})")
+            if pct < 80.0 and missing:
+                # One repair call — but SKIP if we were rate-limited earlier
+                # (a 4th call guarantees another 429).
+                missing_list = ", ".join(sorted(missing)[:20])
+                repair_msg = _SUMMARY_REPAIR_PROMPT.format(missing=missing_list)
+                repair_input = f"CURRENT SUMMARY:\n{summary}\n\n{repair_msg}"
+                raw_repaired, code_repair = _groq_summary_call(
+                    groq_client, _SUMMARY_PASS_B_PROMPT, repair_input,
+                    temperature=0.2, max_tokens=2048,
+                    frequency_penalty=0.4, presence_penalty=0.3)
+                if code_repair == "groq_rate_limited":
+                    print(f"[summary] repair call rate-limited — skipping, keeping original")
+                elif raw_repaired:
+                    repaired = _clean_summary_llm_output(raw_repaired)
+                    if repaired:
+                        pct2, missing2 = _check_coverage(repaired, outline_nouns)
+                        print(f"[summary] repair coverage={pct2}% ({len(missing2)} missing)")
+                        if pct2 >= pct:
+                            summary = repaired
+                            pct = pct2
+                else:
+                    print(f"[summary] repair call produced empty output, keeping original")
+    else:
+        pct = "n/a"
+        print(f"[summary] coverage gate skipped (outline={bool(outline)}, "
+              f"rate_limited={was_rate_limited})")
 
     # ── Final validation (script + tail-coverage only, NO length check) ──
     ok, reason = _validate_summary(summary, chapter_text)
     print(f"[summary] final: path={path} words_in={word_count} "
-          f"len={len(summary)} coverage={pct if outline_nouns else 'n/a'}% "
-          f"ok={ok} reason={reason}")
-    return summary
+          f"len={len(summary)} coverage={pct}% ok={ok} reason={reason}")
+    return (summary, None)
 
 
 @app.route("/api/chapter/summary", methods=["POST"])
@@ -11605,40 +11674,94 @@ def api_chapter_summary():
     """Generate a Hindi chapter summary + synthesize audio.
 
     POST { book_id, chapter_index }
-    Returns { summary: str, audio_url: str }
+    Returns { summary: str, audio_url: str } on success.
+    Returns { error: str, code: str } on failure (code is machine-readable).
     """
+    import traceback
     data = request.json or {}
     book_id = (data.get("book_id") or "").strip()
     chapter_index = data.get("chapter_index")
     if not book_id or chapter_index is None:
-        return jsonify({"error": "book_id and chapter_index required"}), 400
+        return jsonify({"error": "book_id and chapter_index required", "code": "bad_request"}), 400
 
     job, err, sc = _check_job_owner(book_id)
     if err is not None:
-        return jsonify({"error": "Job not found"}), 404
+        return jsonify({"error": "पुस्तक नहीं मिली", "code": "job_not_found"}), 404
 
     # Reconstruct if needed
     if book_id not in jobs:
         try:
             job = _reconstruct_job_from_storj(book_id, fallback_record=job)
         except Exception:
-            return jsonify({"error": "Could not load book data"}), 500
+            return jsonify({"error": "पुस्तक डेटा लोड नहीं हो सका", "code": "job_not_found"}), 404
 
-    # Get chapter text
+    # ── ARIA: chapter text fallback chain ──
+    # job["transcript_cues"] is frequently absent after a Render restart +
+    # registry reconstruction. Fall back to the parsed book's chapter text,
+    # then to R2-stored transcript JSON. Error only if ALL three are empty.
+    chapter_text = ""
+
+    # Source 1: transcript_cues (in-memory or restored from token)
     _tc = job.get("transcript_cues") or {}
     _tc_list = _tc.get(chapter_index) or _tc.get(str(chapter_index)) or []
-    if not _tc_list:
-        return jsonify({"error": "No transcript data for this chapter"}), 400
+    if _tc_list:
+        chapter_text = " ".join(str(c[2]) for c in _tc_list if len(c) >= 3)
 
-    # Reconstruct text from word cues
-    chapter_text = " ".join(str(c[2]) for c in _tc_list if len(c) >= 3)
+    # Source 2: the parsed book's chapter text
+    if not chapter_text or not chapter_text.strip():
+        try:
+            info = job.get("info")
+            if info and info.chapters:
+                _ch = None
+                for c in info.chapters:
+                    if c.index == chapter_index:
+                        _ch = c
+                        break
+                if _ch and getattr(_ch, "text", None):
+                    chapter_text = _ch.text
+                    print(f"[summary] using parsed book text for chapter {chapter_index} "
+                          f"(transcript_cues was empty)")
+        except Exception as _e:
+            print(f"[summary] parsed-book fallback failed: {_e}")
+
+    # Source 3: R2-stored transcript JSON
+    if not chapter_text or not chapter_text.strip():
+        try:
+            import storage_backend
+            if storage_backend.is_enabled():
+                _tc_r2_key = f"chapters/{book_id}/{chapter_index}.transcript.json"
+                if storage_backend.object_exists(_tc_r2_key):
+                    import tempfile as _tf, json as _json
+                    fd, tmp = _tf.mkstemp(suffix=".json")
+                    os.close(fd)
+                    try:
+                        storage_backend.download_file(_tc_r2_key, tmp)
+                        with open(tmp, "r", encoding="utf-8") as f:
+                            _tc_data = _json.load(f)
+                        _cues = _tc_data.get("cues") or _tc_data.get("transcript_cues") or []
+                        if _cues:
+                            chapter_text = " ".join(
+                                str(c[2]) if isinstance(c, (list, tuple)) and len(c) >= 3
+                                else str(c.get("w", "")) if isinstance(c, dict)
+                                else ""
+                                for c in _cues
+                            )
+                            print(f"[summary] using R2 transcript JSON for chapter {chapter_index}")
+                    finally:
+                        try: os.remove(tmp)
+                        except: pass
+        except Exception as _e:
+            print(f"[summary] R2 transcript fallback failed: {_e}")
+
+    if not chapter_text or not chapter_text.strip():
+        return jsonify({"error": "इस अध्याय का ट्रांसक्रिप्ट डेटा उपलब्ध नहीं है",
+                        "code": "no_transcript"}), 400
 
     # Check R2 cache
-    # ARIA: v5 cache namespace — invalidates all v4 summaries (which used the
-    # old single-pass/map-reduce flow with under-coverage + hallucination) +
-    # their Swara audio so they're regenerated fresh with the two-pass flow.
-    summary_cache_key = f"summaries/v5/{book_id}/{chapter_index}.hi.json"
-    audio_cache_key = f"summaries/v5/{book_id}/{chapter_index}.hi.mp3"
+    # ARIA: v6 cache namespace — invalidates all v5 summaries + their Swara
+    # audio so they're regenerated fresh with the degradation-ladder flow.
+    summary_cache_key = f"summaries/v6/{book_id}/{chapter_index}.hi.json"
+    audio_cache_key = f"summaries/v6/{book_id}/{chapter_index}.hi.mp3"
 
     try:
         import storage_backend
@@ -11665,24 +11788,27 @@ def api_chapter_summary():
 
     # Generate summary via Groq
     try:
-        import translate as _translate_mod
-        groq_client = _translate_mod.get_groq_client()
-        if groq_client is None:
-            return jsonify({"error": "अभी उपलब्ध नहीं है, बाद में कोशिश करें"}), 503
-
-        summary = _generate_hindi_summary(groq_client, chapter_text)
+        summary, gen_code = _generate_hindi_summary(None, chapter_text)
         if not summary:
-            return jsonify({"error": "अभी उपलब्ध नहीं है, बाद में कोशिश करें"}), 503
+            # Map the generation error code to a Hindi message + HTTP status.
+            _err_map = {
+                "groq_no_key": ("AI सेवा अभी उपलब्ध नहीं है", 503),
+                "groq_rate_limited": ("थोड़ी देर रुकें — बहुत सारे अनुरोध", 429),
+                "groq_all_models_failed": ("AI सेवा अभी उपलब्ध नहीं है", 503),
+                "empty_summary": ("सारांश खाली आया — बाद में कोशिश करें", 503),
+                "internal": ("कुछ गलत हुआ — बाद में कोशिश करें", 500),
+            }
+            _msg, _sc = _err_map.get(gen_code or "empty_summary",
+                                     ("अभी उपलब्ध नहीं है, बाद में कोशिश करें", 503))
+            return jsonify({"error": _msg, "code": gen_code or "empty_summary"}), _sc
 
-        # Final last-resort sanitize before caching/returning (strip any leaked
-        # non-Indic chars, collapse triple+ newlines).
+        # Final last-resort sanitize before caching/returning.
         summary = _sanitize_summary(summary)
         if not summary:
-            return jsonify({"error": "अभी उपलब्ध नहीं है, बाद में कोशिश करें"}), 503
+            return jsonify({"error": "सारांश खाली आया — बाद में कोशिश करें",
+                            "code": "empty_summary"}), 503
 
-        # ARIA: TTS guard — log the final summary shape + warn if a sentence
-        # still repeats 3+ times (makes a surviving loop visible in Render logs
-        # instead of silent). Reuses the normalizer from _dedupe_summary.
+        # TTS guard — log the final summary shape.
         try:
             _paras = [p for p in summary.split("\n\n") if p.strip()]
             _all_sents = []
@@ -11702,7 +11828,9 @@ def api_chapter_summary():
         except Exception:
             pass
 
-        # Synthesize audio
+        # Synthesize audio (fail-soft — empty audio_url is fine, the text
+        # summary is still returned and the frontend shows it without a
+        # Listen button).
         audio_url = ""
         try:
             import hindi_tts
@@ -11711,7 +11839,6 @@ def api_chapter_summary():
             work_dir.mkdir(parents=True, exist_ok=True)
             audio_path = str(work_dir / f"summary_{chapter_index}.hi.mp3")
             if hindi_tts.synthesize_hindi(summary, audio_path):
-                # Upload to R2
                 try:
                     import storage_backend
                     if storage_backend.is_enabled():
@@ -11741,9 +11868,10 @@ def api_chapter_summary():
         _r.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
         return _r
 
-    except Exception as e:
-        print(f"[summary] failed: {e}")
-        return jsonify({"error": "अभी उपलब्ध नहीं है, बाद में कोशिश करें"}), 503
+    except Exception:
+        traceback.print_exc()
+        return jsonify({"error": "कुछ गलत हुआ — बाद में कोशिश करें",
+                        "code": "internal"}), 500
 
 
 @app.route("/api/glossary", methods=["POST"])
@@ -11789,32 +11917,26 @@ def api_glossary():
 
     # Generate via Groq
     try:
-        import translate as _translate_mod
-        groq_client = _translate_mod.get_groq_client()
-        if groq_client is None:
-            return jsonify({"error": "अभी उपलब्ध नहीं है, बाद में कोशिश करें"}), 503
-
+        import groq_client as _gc
         _GLOSSARY_PROMPT = (
             "Explain the given term from a work of literature in simple Hindi "
             "(Devanagari), in 40-70 words.\n"
             "Say who or what it is, and why it matters in this book.\n"
             "No spoilers beyond the provided context. Plain text only."
         )
-
         user_content = f"Term: {term}\nContext: {context[:500]}"
-
-        resp = groq_client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=[
-                {"role": "system", "content": _GLOSSARY_PROMPT},
-                {"role": "user", "content": user_content},
-            ],
-            temperature=0.3,
-            max_tokens=512,
+        explanation, gcode = _gc.groq_chat(
+            _GLOSSARY_PROMPT, user_content,
+            temperature=0.3, max_tokens=512,
         )
-        explanation = (resp.choices[0].message.content or "").strip()
         if not explanation:
-            return jsonify({"error": "अभी उपलब्ध नहीं है, बाद में कोशिश करें"}), 503
+            _err_map = {
+                "groq_no_key": "AI सेवा अभी उपलब्ध नहीं है",
+                "groq_rate_limited": "थोड़ी देर रुकें — बहुत सारे अनुरोध",
+                "groq_all_models_failed": "AI सेवा अभी उपलब्ध नहीं है",
+            }
+            return jsonify({"error": _err_map.get(gcode or "", "अभी उपलब्ध नहीं है, बाद में कोशिश करें"),
+                            "code": gcode or "empty"}), 503
 
         # Clean LLM output: drop non-Devanagari lines
         import re as _re_clean
@@ -11822,7 +11944,7 @@ def api_glossary():
         _clean_lines = [_ln.strip() for _ln in _lines if _ln.strip() and _re_clean.search(r"[\u0900-\u097F]", _ln)]
         explanation = "\n".join(_clean_lines) if _clean_lines else explanation
 
-        # Synthesize audio
+        # Synthesize audio (fail-soft)
         audio_url = ""
         try:
             import hindi_tts, tempfile as _tf
@@ -11856,9 +11978,11 @@ def api_glossary():
 
         return jsonify({"explanation": explanation, "audio_url": audio_url})
 
-    except Exception as e:
-        print(f"[glossary] failed: {e}")
-        return jsonify({"error": "अभी उपलब्ध नहीं है, बाद में कोशिश करें"}), 503
+    except Exception:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": "कुछ गलत हुआ — बाद में कोशिश करें",
+                        "code": "internal"}), 503
 
 
 @app.route("/api/explain", methods=["POST"])
@@ -11866,26 +11990,25 @@ def api_explain():
     """Explain a paragraph in Hindi.
 
     POST { book_id, chapter_index, paragraph_text }
-    Returns { explanation: str, audio_url: str }
+    Returns { explanation: str, audio_url: str } on success.
+    Returns { error: str, code: str, retry_after?: int } on failure.
     """
-    # Rate limit: 20 requests/hour per client id
+    # Rate limit: 60 requests/hour per client id (raised from 20 — a reader
+    # tapping explain across one canto exceeds 20 in minutes).
     cid = _get_client_id() or _client_ip()
     _rl_key = f"explain_{cid}"
-    _allowed, _retry = _ip_rl_check(_rl_key, cid, 20, 20)
+    _allowed, _retry = _ip_rl_check(_rl_key, cid, 60, 60)
     if not _allowed:
-        return jsonify({"error": "Rate limit. बाद में कोशिश करें।"}), 429
+        return jsonify({"error": "थोड़ी देर रुकें — बहुत सारे अनुरोध",
+                        "code": "rate_limited", "retry_after": _retry}), 429
 
     data = request.json or {}
     paragraph = (data.get("paragraph_text") or "").strip()
     if not paragraph or len(paragraph) < 10:
-        return jsonify({"error": "paragraph_text required"}), 400
+        return jsonify({"error": "paragraph_text required", "code": "bad_request"}), 400
 
     try:
-        import translate as _translate_mod
-        groq_client = _translate_mod.get_groq_client()
-        if groq_client is None:
-            return jsonify({"error": "अभी उपलब्ध नहीं है, बाद में कोशिश करें"}), 503
-
+        import groq_client as _gc
         _EXPLAIN_PROMPT = (
             "Explain this passage of English literature in plain Hindi "
             "(Devanagari), 80-120 words.\n"
@@ -11894,19 +12017,19 @@ def api_explain():
             "Do not translate word-for-word — explain the meaning.\n"
             "Plain text only."
         )
-
-        resp = groq_client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=[
-                {"role": "system", "content": _EXPLAIN_PROMPT},
-                {"role": "user", "content": paragraph[:2000]},
-            ],
-            temperature=0.3,
-            max_tokens=1024,
+        explanation, gcode = _gc.groq_chat(
+            _EXPLAIN_PROMPT, paragraph[:2000],
+            temperature=0.3, max_tokens=1024,
         )
-        explanation = (resp.choices[0].message.content or "").strip()
         if not explanation:
-            return jsonify({"error": "अभी उपलब्ध नहीं है, बाद में कोशिश करें"}), 503
+            _err_map = {
+                "groq_no_key": "AI सेवा अभी उपलब्ध नहीं है",
+                "groq_rate_limited": "थोड़ी देर रुकें — बहुत सारे अनुरोध",
+                "groq_all_models_failed": "AI सेवा अभी उपलब्ध नहीं है",
+            }
+            _sc = 429 if gcode == "groq_rate_limited" else 503
+            return jsonify({"error": _err_map.get(gcode or "", "अभी उपलब्ध नहीं है, बाद में कोशिश करें"),
+                            "code": gcode or "empty"}), _sc
 
         # Clean LLM output: drop non-Devanagari lines
         import re as _re_clean
@@ -11914,14 +12037,13 @@ def api_explain():
         _clean_lines = [_ln.strip() for _ln in _lines if _ln.strip() and _re_clean.search(r"[\u0900-\u097F]", _ln)]
         explanation = "\n".join(_clean_lines) if _clean_lines else explanation
 
-        # Synthesize audio (no cache for explain)
+        # Synthesize audio (no cache for explain; fail-soft)
         audio_url = ""
         try:
             import hindi_tts, tempfile as _tf
             fd, audio_path = _tf.mkstemp(suffix=".mp3")
             os.close(fd)
             if hindi_tts.synthesize_hindi(explanation, audio_path):
-                # Upload to R2 temporarily (1-hour TTL via presigned URL)
                 try:
                     import storage_backend
                     if storage_backend.is_enabled():
@@ -11938,9 +12060,11 @@ def api_explain():
 
         return jsonify({"explanation": explanation, "audio_url": audio_url})
 
-    except Exception as e:
-        print(f"[explain] failed: {e}")
-        return jsonify({"error": "अभी उपलब्ध नहीं है, बाद में कोशिश करें"}), 503
+    except Exception:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": "कुछ गलत हुआ — बाद में कोशिश करें",
+                        "code": "internal"}), 503
 
 
 @app.route("/api/reset_to_chapters/<job_id>", methods=["POST"])

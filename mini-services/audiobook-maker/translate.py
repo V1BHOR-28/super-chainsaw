@@ -5,7 +5,7 @@ with code-mixed English words) using the existing Groq LLM client.
 
 Pipeline:
   1. Split text into ~800-word blocks on sentence boundaries.
-  2. Call Groq (llama-3.3-70b-versatile) with a strict Hinglish prompt.
+  2. Call Groq (via the centralized groq_client) with a strict Hinglish prompt.
   3. Reject any output containing Devanagari (retry once, fall back to English).
   4. Cache to R2 (key: translations/{sha256}.txt) — never re-translate a hit.
 
@@ -58,18 +58,19 @@ def _split_into_blocks(text: str, max_words: int = _BLOCK_WORDS) -> list[str]:
 
 
 def _call_groq(text: str, client) -> str | None:
-    """Call Groq with the Hinglish prompt. Returns translated text or None."""
+    """Call Groq with the Hinglish prompt via the centralized groq_client.
+
+    Returns translated text or None. Never raises.
+    """
     try:
-        resp = client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=[
-                {"role": "system", "content": _HINGLISH_SYSTEM_PROMPT},
-                {"role": "user", "content": text},
-            ],
-            temperature=0.3,
-            max_tokens=4096,
+        import groq_client as _gc
+        result, code = _gc.groq_chat(
+            _HINGLISH_SYSTEM_PROMPT, text,
+            temperature=0.3, max_tokens=4096,
         )
-        return (resp.choices[0].message.content or "").strip()
+        if code:
+            print(f"[hinglish] Groq call failed: {code}")
+        return result or None
     except Exception as e:
         print(f"[hinglish] Groq call failed: {e}")
         return None

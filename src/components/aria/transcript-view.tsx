@@ -282,8 +282,15 @@ export function TranscriptView() {
     try {
       const result = await explainParagraph(jobId, chapterIndex, paragraphText);
       setExplainState({ paragraphIdx: paraIdx, result, loading: false });
-    } catch {
-      toast.error("अभी उपलब्ध नहीं है, बाद में कोशिश करें");
+    } catch (err) {
+      console.error("[explain] fetch failed", err);
+      const code = (err as { code?: string })?.code;
+      const msg = err instanceof Error ? err.message : "";
+      if (code === "rate_limited" || code === "groq_rate_limited") {
+        toast.error("थोड़ी देर रुकें — बहुत सारे अनुरोध");
+      } else {
+        toast.error(msg || "अभी उपलब्ध नहीं है, बाद में कोशिश करें");
+      }
       setExplainState(null);
     }
   }, [jobId, chapterIndex, pause]);
@@ -292,13 +299,25 @@ export function TranscriptView() {
     if (!explainState?.result?.audio_url) return;
     const mainAudio = getAudioElement();
     if (mainAudio && !mainAudio.paused) { mainAudio.pause(); }
-    if (!explainAudioRef.current) {
-      explainAudioRef.current = new Audio(explainState.result.audio_url);
+    // Destroy + rebuild the audio element whenever the URL differs — so a
+    // second explain on a different paragraph can't replay the first one's
+    // audio. Matches the summary card's element lifecycle.
+    const url = explainState.result.audio_url;
+    const prev = explainAudioRef.current;
+    if (prev) {
+      if (prev.src !== url) {
+        prev.pause();
+        prev.removeAttribute("src");
+        prev.load();
+        explainAudioRef.current = new Audio(url);
+      }
     } else {
-      explainAudioRef.current.src = explainState.result.audio_url;
+      explainAudioRef.current = new Audio(url);
     }
-    explainAudioRef.current.play().catch(() => {
-      toast.error("अभी उपलब्ध नहीं है, बाद में कोशिश करें");
+    const audio = explainAudioRef.current;
+    if (!audio) return;
+    audio.play().catch((err) => {
+      console.error("[explain] audio play failed", err);
     });
   }, [explainState]);
 
