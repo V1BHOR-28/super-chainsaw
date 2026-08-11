@@ -10,7 +10,7 @@ import { toast } from "sonner";
 // ── ARIA: per-chapter summary cache ──
 // Keyed by a schema version so any change to the summary shape invalidates
 // old entries. Only valid (non-empty) responses are cached.
-const SUMMARY_CACHE_VERSION = "v7";
+const SUMMARY_CACHE_VERSION = "v8";
 const _summaryCache = new Map<string, HindiSummary>();
 
 function _cacheKey(bookId: string, chapterIndex: number) {
@@ -316,6 +316,34 @@ export function HindiSummaryCard({
             >
               <AlertCircle className="w-3 h-3 flex-shrink-0" style={{ color: "rgba(245,158,11,0.7)" }} />
               <span className="flex-1">यह सारांश अधूरा हो सकता है</span>
+              <button
+                onClick={handleRegenerate}
+                className="flex items-center gap-1 text-[10px] px-2 py-0.5 rounded transition-opacity hover:opacity-80"
+                style={{
+                  color: "var(--aria-accent-glow)",
+                  border: "1px solid var(--aria-border)",
+                  background: "transparent",
+                }}
+              >
+                <RefreshCw className="w-2.5 h-2.5" />
+                फिर से बनाएँ
+              </button>
+            </div>
+          )}
+          {/* Degraded badge: all regenerations failed, the outline was rendered
+              as a Hindi bulleted list. A correct outline beats a fluent-but-wrong
+              paragraph. Show a "संक्षिप्त रूप" badge + regenerate button. */}
+          {(summary.degraded || summary.quality === "degraded") && (
+            <div
+              className="flex items-center gap-2 mt-3 mb-1 px-3 py-2 rounded-lg text-xs"
+              style={{
+                background: "rgba(168,85,247,0.06)",
+                borderLeft: "2px solid rgba(168,85,247,0.4)",
+                color: "var(--aria-fg-muted)",
+              }}
+            >
+              <AlertCircle className="w-3 h-3 flex-shrink-0" style={{ color: "rgba(168,85,247,0.7)" }} />
+              <span className="flex-1">संक्षिप्त रूप</span>
               <button
                 onClick={handleRegenerate}
                 className="flex items-center gap-1 text-[10px] px-2 py-0.5 rounded transition-opacity hover:opacity-80"

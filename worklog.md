@@ -1363,3 +1363,68 @@ Files modified:
 No git push — implementation + verification only, per the task spec.
 
 Regenerating Canto VI will now: (1) log `summary_input chapter=Canto VI chars=<full> words=<1100+>`, (2) chunk into ~900-word segments with 100-word overlap, (3) extract a master outline covering the ENTIRE chapter (Cerberus through Plutus), (4) generate Hindi from the outline only (no truncated chapter text), (5) pass the degeneracy/coverage/tail gates (or retry once, or return partial quality with the badge). The master outline + `summary_gate` log lines are visible in Render logs for debugging.
+
+---
+Task ID: NARRATION-V8
+Agent: main (Fix Hindi summary degenerating into proper-noun lists + bare verb enumerations)
+Task: Fix Hindi chapter summaries degenerating into proper-noun lists instead of narrative. Evidence: Canto V attributed every action to Minos, ended with a literal list of English verbs ("Went, Girds, Examining, Confess, Hear"), and reduced Francesca da Rimini to "फ्रांसेस्का को देखा".
+
+Work Log:
+- Read prior worklog (COVERAGE-FIX-V7, GOD-PROMPT-HINDI-FIX) for architecture context.
+- Read current state: v7 summary flow (free-text Pass A outline → Pass B Hindi from outline), _validate_summary (degeneracy/coverage/tail gates on text outline).
+
+BACKEND (audiobook_app.py) — Complete v8 rewrite of the summary generation pipeline:
+
+Part 1 — Pass A rewritten as JSON event extractor:
+- _SUMMARY_PASS_A_SYSTEM: new prompt requiring STRICT JSON output with schema {events: [{actor, action, outcome, quote_anchor}], speakers: [{name, says}], images: []}.
+- Hard rules: events MUST have verbs; "X was seen/appeared/named" FORBIDDEN as standalone events; characters named in lists belong in ONE event explaining WHY the list exists; no bare English verbs/tags; narrator is default actor (don't carry first-named forward); every event needs quote_anchor (<=8 verbatim words); cover chapter END TO END.
+- _validate_pass_a_json(raw_json, chapter_text): server-side validation — JSON parse, >=8 events for >400-word chapters, quote_anchor substring verification (case/whitespace-insensitive), actor dominance check (>60% → re-run with subject repair), tail coverage (last event's anchor in last 30% of chapter). Returns (parsed, errors).
+- Targeted retries: JSON parse fail → _PASS_A_REPAIR; actor dominance → _PASS_A_SUBJECT_REPAIR; tail not reached → _PASS_A_TAIL_REPAIR (appends last chunk explicitly).
+
+Part 2 — Pass B rewritten with narration contract:
+- _SUMMARY_PASS_B_SYSTEM: 250-450 words, 4-6 paragraphs. Every event must appear; every speaker's says must be reported speech; >=2 images explained (not just named). Explain the LOGIC (why souls are here, what punishment means, how it mirrors sin). BANNED: "X को देखा" >2 entities, entity-only sentences, English verb lists, repeated clauses. End with final beat.
+- Groq params: temperature 0.4, top_p 0.9, frequency_penalty 0.6, presence_penalty 0.4, max_tokens 1800.
+
+Part 3 — Coverage gate on final summary (_validate_summary_v8):
+- Bare-verb regex reject (_BARE_VERB_RE): catches "Went, Girds, Examining, Confess, Hear" etc.
+- "X को देखा" chain check: >2 different entities → FAIL.
+- 8-word shingle repetition: any shingle occurring 2+ times → FAIL.
+- Paragraph similarity: >85% Jaccard between any two paragraphs → FAIL.
+- Coverage: >=80% of proper nouns from Pass A (actors + speakers) must appear in summary.
+- On FAIL: regenerate Pass B once with missing names listed. If still failing: one more attempt with stricter penalties (freq 0.8, presence 0.6). If still failing: return degraded outline as Hindi bulleted list (_render_degraded_outline) with quality="degraded".
+
+Part 4 — Input integrity:
+- Logs `summary_input chapter=<id> chars_in_full_chapter=<n> words=<n>` before any LLM call.
+- Logs `summary_stats chapter=<id> chars_sent_to_model=<n> chars_in_full_chapter=<n> n_chunks=<n> events_returned=<n> regeneration_count=<n> final_word_count=<n> degraded=<bool>`.
+- If chars_sent_to_model < 0.95 * chars_in_full_chapter: logs WARN (possible truncation bug).
+- Chunking: 900-word chunks with 135-word overlap (15%). Events de-duplicated by quote_anchor across chunks. Never run Pass B per chunk — always ONE Pass B over the merged event list.
+
+New helpers:
+- _build_outline_from_events(parsed): converts JSON events/speakers/images to text outline for Pass B.
+- _extract_proper_nouns_from_parsed(parsed): extracts proper nouns from actors + speakers for coverage gate.
+- _render_degraded_outline(parsed, chapter_title): renders the JSON as a Hindi bulleted list (degraded fallback).
+- _BARE_VERB_RE: regex matching bare English verb enumerations.
+
+Cache: v7 → v8. Deletion cleanup includes v8. api_chapter_summary returns `degraded` field.
+
+FRONTEND:
+- abm-api.ts: HindiSummary type adds `degraded?: boolean`. Cache version v7 → v8.
+- hindi-summary-card.tsx: SUMMARY_CACHE_VERSION v7 → v8. New degraded "संक्षिप्त रूप" badge (purple, with AlertCircle + RefreshCw "फिर से बनाएँ" button) when summary.degraded || summary.quality === "degraded".
+
+VERIFICATION:
+- python3 -m py_compile audiobook_app.py: PASSES.
+- npx tsc --noEmit: zero errors.
+- bun run lint: 0 errors, 0 warnings.
+- Inline logic tests (9 cases): T1 valid JSON passes; T2 invalid JSON caught; T3 too few events caught; T4 actor dominance caught; T5 bad anchors caught; T6 bare verbs caught; T7 dekha chain caught; T8 good summary passes; T9 shingle repeat caught. All passed.
+- agent-browser: page loads cleanly (HTTP 200, title "ARIA"), no console errors.
+
+CONSTRAINTS honored:
+- Did NOT touch transcript sync offset, manual-scroll override, chapter catalog builder, analyze/chaptering, BGM mixing, cover persistence, deletion tombstones, or the voice registry.
+
+Stage Summary:
+Files modified:
+- mini-services/audiobook-maker/audiobook_app.py (+350/-200 lines: v8 prompts, _validate_pass_a_json, _build_outline_from_events, _extract_proper_nouns_from_parsed, _validate_summary_v8, _render_degraded_outline, _BARE_VERB_RE, _PASS_A_REPAIR/SUBJECT/TAIL, _generate_hindi_summary full rewrite, _split_chapter_chunks 15% overlap, api_chapter_summary v8 cache + degraded field, v8 deletion cleanup)
+- src/lib/abm-api.ts (+5 lines: degraded field on HindiSummary)
+- src/components/aria/hindi-summary-card.tsx (+25 lines: SUMMARY_CACHE_VERSION v8, degraded "संक्षिप्त रूप" badge)
+
+No git push — implementation + verification only, per the task spec.

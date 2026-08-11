@@ -562,13 +562,15 @@ export function getCoverUrl(jobId: string, hasCover: boolean): string {
 export interface HindiSummary {
   summary: string;
   audio_url?: string;
-  /** "ok" | "partial" — partial means the gates failed twice and flagged
-   *  sentences were stripped. The frontend shows a "यह सारांश अधूरा हो सकता है"
-   *  badge + a "फिर से बनाएँ" button when quality === "partial". */
+  /** "ok" | "partial" | "degraded" — partial means the gates failed twice
+   *  and flagged sentences were stripped. degraded means all regenerations
+   *  failed and the outline was rendered as a Hindi bulleted list. */
   quality?: string;
   /** Proper nouns from the outline that are missing from the summary
    *  (only present when quality === "partial"). */
   missing?: string[];
+  /** True when the summary is a degraded outline fallback (quality=degraded). */
+  degraded?: boolean;
 }
 
 export interface HindiGlossary {
