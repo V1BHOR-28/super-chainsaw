@@ -10445,6 +10445,7 @@ def _purge_job_completely(job_id):
         if storage_backend.is_enabled():
             for prefix in (
                 f"summaries/{job_id}/", f"summaries/v2/{job_id}/",
+                f"summaries/v3/{job_id}/",
                 f"glossary/{job_id}/", f"glossary/v2/{job_id}/",
             ):
                 try:
@@ -11011,6 +11012,254 @@ def api_bgm_debug(job_id, chapter_index):
 # ARIA: Hindi comprehension endpoints (summary, glossary, explain)
 # ═══════════════════════════════════════════════════════════════════
 
+# ── Hindi summary helpers (v3: full-coverage, no input truncation) ──
+# Reject any character from CJK / Hangul / Hiragana / Katakana / Arabic / Cyrillic.
+_NON_INDIC_SCRIPT_RE = re.compile(
+    r"[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af\u0600-\u06ff\u0400-\u04ff]"
+)
+
+# Full-coverage system prompt (Devanagari) — used for single-pass generation.
+_SUMMARY_SYSTEM_PROMPT_V3 = (
+    "आप एक साहित्यिक अध्याय-सारांश सहायक हैं।\n\n"
+    "नियम:\n"
+    "1. पूरे अध्याय का सारांश दें — शुरुआत, मध्य और अंत तीनों। अध्याय के आखिरी हिस्से को कभी न छोड़ें।\n"
+    "2. सारांश 6 से 10 वाक्यों का हो, एक ही पैराग्राफ में नहीं — 2 या 3 छोटे पैराग्राफ में बाँटें।\n"
+    "3. घटनाओं का क्रम वही रखें जो मूल पाठ में है।\n"
+    "4. सभी मुख्य पात्रों का नाम लें जो अध्याय में आते हैं, चाहे वे अंत में ही क्यों न आएँ।\n"
+    "5. कोई महत्वपूर्ण मोड़, भविष्यवाणी, या निर्णय न छोड़ें।\n"
+    "6. केवल देवनागरी लिपि में लिखें। पात्रों और स्थानों के नाम पहली बार आने पर कोष्ठक में रोमन लिपि दें, जैसे: वर्जिल (Virgil)।\n"
+    "7. चीनी, जापानी, कोरियाई, अरबी या किसी अन्य लिपि का एक भी अक्षर प्रयोग न करें।\n"
+    "8. अपनी राय, व्याख्या या टिप्पणी न जोड़ें — केवल जो पाठ में है।\n"
+    "9. केवल सारांश लौटाएँ, कोई भूमिका या शीर्षक नहीं।"
+)
+
+# Retry nudge appended as a user message when the first attempt fails validation.
+_SUMMARY_RETRY_USER_MSG = (
+    "पिछला सारांश अधूरा था। अध्याय के अंतिम भाग को भी शामिल करें।"
+)
+
+# Map-phase prompt: summarize one sequential chunk (4–6 sentences).
+_SUMMARY_CHUNK_PROMPT = (
+    "आप एक साहित्यिक पाठ के एक हिस्से का हिंदी सारांश लिखते हैं।\n"
+    "नियम:\n"
+    "1. केवल इस हिस्से की घटनाओं को 4 से 6 वाक्यों में देवनागरी में समेटें।\n"
+    "2. घटनाओं का क्रम बनाए रखें।\n"
+    "3. पात्रों और स्थानों के नाम पहली बार आने पर कोष्ठक में रोमन लिपि दें।\n"
+    "4. केवल देवनागरी लिपि; चीनी, जापानी, कोरियाई, अरबी या किसी अन्य लिपि का एक भी अक्षर न लिखें।\n"
+    "5. केवल सारांश लौटाएँ, कोई भूमिका या शीर्षक नहीं।"
+)
+
+# Reduce-phase prompt: merge per-chunk summaries into one cohesive summary.
+_SUMMARY_MERGE_PROMPT = (
+    "निम्नलिखित एक अध्याय के विभिन्न क्रमिक हिस्सों के हिंदी सारांश हैं। "
+    "इन सभी को मिलाकर एक ही सुसंबद्ध अध्याय-सारांश बनाएँ जो पूरे अध्याय के "
+    "शुरुआत, मध्य और अंत को कवर करे।\n\n"
+    "नियम:\n"
+    "1. सारांश 6 से 10 वाक्यों का हो, 2 या 3 छोटे पैराग्राफ में बाँटें।\n"
+    "2. घटनाओं का क्रम वही रखें जो मूल पाठ में है।\n"
+    "3. सभी मुख्य पात्रों का नाम लें, चाहे वे अंत में ही क्यों न आएँ।\n"
+    "4. कोई महत्वपूर्ण मोड़, भविष्यवाणी, या निर्णय न छोड़ें।\n"
+    "5. केवल देवनागरी लिपि में लिखें; पात्रों और स्थानों के नाम पहली बार आने पर कोष्ठक में रोमन लिपि दें।\n"
+    "6. चीनी, जापानी, कोरियाई, अरबी या किसी अन्य लिपि का एक भी अक्षर प्रयोग न करें।\n"
+    "7. केवल सारांश लौटाएँ, कोई भूमिका या शीर्षक नहीं।"
+)
+
+
+def _clean_summary_llm_output(text: str) -> str:
+    """Strip markdown, drop non-Devanagari leading lines, collapse newlines."""
+    if not text:
+        return ""
+    # Strip markdown: **bold**, *italic*, # headings, [text](url), `code`
+    text = re.sub(r'\*\*(.+?)\*\*', r'\1', text)
+    text = re.sub(r'\*(.+?)\*', r'\1', text)
+    text = re.sub(r'^#+\s*', '', text, flags=re.MULTILINE)
+    text = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', text)
+    text = re.sub(r'`([^`]+)`', r'\1', text)
+    text = re.sub(r'^[\s]*[-•·]\s+', '', text, flags=re.MULTILINE)
+    # Drop lines with no Devanagari (English preamble, "Here is...", etc.)
+    lines = text.split("\n")
+    kept = []
+    for ln in lines:
+        ln = ln.strip()
+        if not ln:
+            if kept and kept[-1] != "":
+                kept.append("")  # preserve one blank line between paragraphs
+            continue
+        if not re.search(r"[\u0900-\u097F]", ln):
+            continue
+        kept.append(ln)
+    text = "\n".join(kept).strip()
+    # Collapse 3+ newlines to double
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    return text
+
+
+def _sanitize_summary(text: str) -> str:
+    """Last-resort cleanup before caching: strip leaked non-Indic chars, collapse newlines."""
+    if not text:
+        return ""
+    text = _NON_INDIC_SCRIPT_RE.sub('', text)
+    text = re.sub(r'\n{3,}', '\n\n', text)
+    return text.strip()
+
+
+def _validate_summary(summary: str, chapter_text: str):
+    """Validate a generated summary. Returns (ok, reason).
+
+    Checks:
+    1. Script — reject if any CJK/Hangul/Hiragana/Katakana/Arabic/Cyrillic chars present.
+    2. Length — reject if too short relative to chapter size (floor 250, 400 for normal chapters).
+    3. Tail coverage — reject if proper nouns from the last 15% of the chapter are absent.
+    """
+    if not summary or not summary.strip():
+        return (False, "empty")
+
+    # 1. Script check
+    if _NON_INDIC_SCRIPT_RE.search(summary):
+        return (False, "non_indic_script")
+
+    # 2. Length check: under 400 chars OR under 8% of chapter length,
+    #    whichever threshold is larger; 250-char floor for genuinely short chapters.
+    chapter_len = max(1, len(chapter_text))
+    relative_threshold = int(0.08 * chapter_len)
+    if chapter_len < 5000:  # genuinely short chapter → 250-char floor
+        threshold = max(250, relative_threshold)
+    else:
+        threshold = max(400, relative_threshold)
+    if len(summary) < threshold:
+        return (False, f"too_short({len(summary)}<{threshold})")
+
+    # 3. Tail-coverage check: last 15% of chapter, capitalized proper nouns (2+ occurrences)
+    tail_start = int(0.85 * chapter_len)
+    tail = chapter_text[tail_start:]
+    candidates = re.findall(r'\b[A-Z][a-z]{2,}\b', tail)
+    counts = {}
+    for w in candidates:
+        counts[w] = counts.get(w, 0) + 1
+    proper_nouns = {w for w, c in counts.items() if c >= 2}
+    if proper_nouns:
+        summary_lower = summary.lower()
+        if not any(w.lower() in summary_lower for w in proper_nouns):
+            sample = ",".join(sorted(proper_nouns)[:5])
+            return (False, f"tail_missing({sample})")
+
+    return (True, "ok")
+
+
+def _split_chapter_chunks(text: str, chunk_words: int = 3000, overlap_words: int = 200):
+    """Split chapter text into sequential chunks with word overlap. Returns list of strings."""
+    words = text.split()
+    if len(words) <= chunk_words:
+        return [text]
+    chunks = []
+    start = 0
+    while start < len(words):
+        end = min(start + chunk_words, len(words))
+        chunks.append(" ".join(words[start:end]))
+        if end >= len(words):
+            break
+        start = end - overlap_words  # overlap for continuity
+    return chunks
+
+
+def _groq_summary_call(groq_client, system_prompt: str, user_content: str,
+                       temperature: float, max_tokens: int) -> str:
+    """Single Groq chat call. Returns content string or '' on failure."""
+    try:
+        resp = groq_client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": user_content},
+            ],
+            temperature=temperature,
+            max_tokens=max_tokens,
+        )
+        return (resp.choices[0].message.content or "").strip()
+    except Exception as e:
+        print(f"[summary] Groq call failed: {e}")
+        return ""
+
+
+def _generate_hindi_summary(groq_client, chapter_text: str) -> str:
+    """Generate a full-coverage Hindi chapter summary.
+
+    Strategy:
+    - Short chapters (≤4000 words): single-pass with the coverage prompt.
+    - Long chapters: map-reduce (3000-word chunks + 200-word overlap, then merge).
+
+    Post-generation: validate (script/length/tail-coverage). On rejection, retry
+    once with lower temperature + a nudge. If retry also fails, return the
+    better of the two attempts and log a warning — never fail the request outright.
+
+    Never raises — returns the best-effort summary (possibly empty on total failure).
+    """
+    if not chapter_text or not chapter_text.strip():
+        return ""
+
+    word_count = len(chapter_text.split())
+    use_mapreduce = word_count > 4000
+
+    def _attempt(temperature, extra_user_msg=None):
+        """One generation attempt. Returns (summary, path_label)."""
+        if use_mapreduce:
+            chunks = _split_chapter_chunks(chapter_text)
+            chunk_summaries = []
+            for ch in chunks:
+                cs = _groq_summary_call(
+                    groq_client, _SUMMARY_CHUNK_PROMPT, ch,
+                    temperature=temperature, max_tokens=512)
+                cs = _clean_summary_llm_output(cs)
+                if cs:
+                    chunk_summaries.append(cs)
+            if not chunk_summaries:
+                return ("", "mapreduce(empty)")
+            merged_input = "\n\n---\n\n".join(chunk_summaries)
+            if extra_user_msg:
+                merged_input = extra_user_msg + "\n\n" + merged_input
+            raw = _groq_summary_call(
+                groq_client, _SUMMARY_MERGE_PROMPT, merged_input,
+                temperature=temperature, max_tokens=1600)
+            path = f"mapreduce({len(chunks)} chunks)"
+        else:
+            user_content = chapter_text
+            if extra_user_msg:
+                user_content = extra_user_msg + "\n\n" + chapter_text
+            raw = _groq_summary_call(
+                groq_client, _SUMMARY_SYSTEM_PROMPT_V3, user_content,
+                temperature=temperature, max_tokens=1600)
+            path = "single-pass"
+        summary = _clean_summary_llm_output(raw)
+        return (summary, path)
+
+    # First attempt
+    summary1, path1 = _attempt(0.3)
+    ok1, reason1 = _validate_summary(summary1, chapter_text)
+    print(f"[summary] attempt 1: path={path1} words_in={word_count} "
+          f"len={len(summary1)} ok={ok1} reason={reason1}")
+    if ok1:
+        return summary1
+
+    # Retry once with lower temperature + nudge
+    summary2, path2 = _attempt(0.2, extra_user_msg=_SUMMARY_RETRY_USER_MSG)
+    ok2, reason2 = _validate_summary(summary2, chapter_text)
+    print(f"[summary] attempt 2 (retry): path={path2} len={len(summary2)} "
+          f"ok={ok2} reason={reason2}")
+    if ok2:
+        return summary2
+
+    # Both failed — return the better of the two (longer, fewer leaked chars).
+    def _score(s):
+        if not s:
+            return -1
+        leaked = len(_NON_INDIC_SCRIPT_RE.findall(s))
+        return len(s) - leaked * 50  # penalize leaked chars heavily
+    s1, s2 = _score(summary1), _score(summary2)
+    print(f"[summary] both attempts failed validation — returning best-effort "
+          f"(s1={s1} reason1={reason1}, s2={s2} reason2={reason2})")
+    return summary2 if s2 > s1 else summary1
+
+
 @app.route("/api/chapter/summary", methods=["POST"])
 def api_chapter_summary():
     """Generate a Hindi chapter summary + synthesize audio.
@@ -11045,8 +11294,8 @@ def api_chapter_summary():
     chapter_text = " ".join(str(c[2]) for c in _tc_list if len(c) >= 3)
 
     # Check R2 cache
-    summary_cache_key = f"summaries/v2/{book_id}/{chapter_index}.hi.json"
-    audio_cache_key = f"summaries/v2/{book_id}/{chapter_index}.hi.mp3"
+    summary_cache_key = f"summaries/v3/{book_id}/{chapter_index}.hi.json"
+    audio_cache_key = f"summaries/v3/{book_id}/{chapter_index}.hi.mp3"
 
     try:
         import storage_backend
@@ -11076,49 +11325,15 @@ def api_chapter_summary():
         if groq_client is None:
             return jsonify({"error": "अभी उपलब्ध नहीं है, बाद में कोशिश करें"}), 503
 
-        _SUMMARY_PROMPT = (
-            "You write Hindi chapter summaries for English literature audiobooks.\n"
-            "Rules:\n"
-            "- Output natural Hindi in Devanagari script. No Hinglish, no romanization.\n"
-            "- 120-180 words. Plain, clear, conversational Hindi — not literary Hindi.\n"
-            "- Keep proper nouns in their original form (Odysseus, Heathcliff, Dante) "
-            "written in Devanagari transliteration with the English spelling in "
-            "parentheses on first mention.\n"
-            "- Cover: what happened, who was involved, why it matters to the larger story.\n"
-            "- Do NOT add interpretation, morals, or spoilers beyond this chapter.\n"
-            "- Return only plain Hindi prose in Devanagari. No markdown, no bullet "
-            "points, no headings, no URLs, no English preamble."
-        )
-
-        # Take first ~2000 chars of chapter text for context
-        context = chapter_text[:2000] if len(chapter_text) > 2000 else chapter_text
-
-        resp = groq_client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
-            messages=[
-                {"role": "system", "content": _SUMMARY_PROMPT},
-                {"role": "user", "content": context},
-            ],
-            temperature=0.3,
-            max_tokens=1024,
-        )
-        summary = (resp.choices[0].message.content or "").strip()
+        summary = _generate_hindi_summary(groq_client, chapter_text)
         if not summary:
             return jsonify({"error": "अभी उपलब्ध नहीं है, बाद में कोशिश करें"}), 503
 
-        # Clean LLM output: strip markdown, drop non-Devanagari leading lines
-        import re as _re_clean
-        _lines = summary.split("\n")
-        _clean_lines = []
-        for _ln in _lines:
-            _ln = _ln.strip()
-            if not _ln:
-                continue
-            # Drop lines with no Devanagari (English preamble, "Here is...", etc)
-            if not _re_clean.search(r"[\u0900-\u097F]", _ln):
-                continue
-            _clean_lines.append(_ln)
-        summary = "\n".join(_clean_lines) if _clean_lines else summary
+        # Final last-resort sanitize before caching/returning (strip any leaked
+        # non-Indic chars, collapse triple+ newlines).
+        summary = _sanitize_summary(summary)
+        if not summary:
+            return jsonify({"error": "अभी उपलब्ध नहीं है, बाद में कोशिश करें"}), 503
 
         # Synthesize audio
         audio_url = ""

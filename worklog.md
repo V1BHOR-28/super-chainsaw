@@ -812,3 +812,63 @@ CONSTRAINTS honored:
 - Did NOT modify use-word-sync.ts, transcript-view.tsx, transcript-store.ts, or the cue/timing format.
 - No new Python dependencies — reused storage_backend + ffmpeg CLI.
 - Every new code path fails soft: missing R2 → disk fallback → monogram; missing IndexedDB → network URL; failed cover upload → non-fatal; failed progress write → non-fatal.
+
+---
+Task ID: HINDI-SUMMARY-FIX
+Agent: main (Fix Hindi chapter summary truncation + leaked-script contamination)
+Task: Fix /api/chapter/summary truncating after the first 1-2 plot beats (Dante's Inferno Canto I stopped at the she-wolf, never mentioning Virgil/Mantua/Hound/follow-through) and emitting a stray Chinese character (迷) inside Hindi text. Implement full-coverage generation, map-reduce for long chapters, script/length/tail validation + retry, v3 cache invalidation, and multi-paragraph frontend rendering.
+
+Work Log:
+- Read prior worklog (BGM-1, BUGFIX-1-2, TRANSCRIPT tasks) for ARIA architecture context.
+- Read current state: hindi_tts.py (SSML fix from prior task already in place — plain text + rate/pitch kwargs), text_preprocess.py (plain_text_for_tts + deprecated wrap_in_hindi_ssml already in place), audiobook_app.py summary endpoint (v2 cache, chapter_text[:2000] truncation, max_tokens=1024, English prompt, simple line-drop cleaning), hindi-summary-card.tsx (single <p> rendering).
+- Audited all edge_tts.Communicate() call sites: audiobook_app.py:9124 (preview), tts_split.py:497+523 (main narration), hindi_tts.py:49 (Hindi) — ALL already pass plain text + native kwargs, no SSML anywhere. Prior SSML task confirmed complete.
+
+BACKEND (audiobook_app.py) — added 9 module-level helpers before /api/chapter/summary:
+- _NON_INDIC_SCRIPT_RE: regex matching CJK/Hangul/Hiragana/Katakana/Arabic/Cyrillic (for reject + sanitize).
+- _SUMMARY_SYSTEM_PROMPT_V3: the full-coverage Devanagari prompt (9 rules) from the spec — covers beginning/middle/end, 6-10 sentences in 2-3 paragraphs, all main characters named, no skipped turns/prophecies/decisions, Devanagari-only with parenthesized Roman proper nouns on first mention, explicit ban on CJK/Japanese/Korean/Arabic/other scripts, no interpretation, summary-only output.
+- _SUMMARY_RETRY_USER_MSG: "पिछला सारांश अधूरा था। अध्याय के अंतिम भाग को भी शामिल करें।"
+- _SUMMARY_CHUNK_PROMPT: map-phase prompt (4-6 Devanagari sentences per chunk, order preserved, parenthesized Roman names, script ban).
+- _SUMMARY_MERGE_PROMPT: reduce-phase prompt (merge chunk summaries into one cohesive 6-10 sentence summary covering full arc, script ban).
+- _clean_summary_llm_output(text): strips markdown (**bold**, *italic*, # headings, [text](url), `code`, bullets), drops non-Devanagari leading lines (English preamble), collapses 3+ newlines to double.
+- _sanitize_summary(text): last-resort cleanup — strips leaked non-Indic chars, collapses 3+ newlines. Runs before caching.
+- _validate_summary(summary, chapter_text) → (ok, reason): 3 checks — (1) script (reject CJK/Hangul/Arabic/Cyrillic), (2) length (reject <400 chars for normal chapters, <250 for genuinely short chapters, OR <8% of chapter length, whichever threshold is larger), (3) tail-coverage (last 15% of chapter, capitalized proper nouns appearing 2+ times, reject if NONE appear in summary — catches a Canto I summary missing "Virgil").
+- _split_chapter_chunks(text, chunk_words=3000, overlap_words=200): sequential word-split chunks with 200-word overlap for continuity. Returns [text] if ≤3000 words.
+- _groq_summary_call(client, system, user, temp, max_tokens): single Groq chat call wrapper (model llama-3.3-70b-versatile). Returns '' on failure.
+- _generate_hindi_summary(groq_client, chapter_text): orchestrator — single-pass if ≤4000 words (max_tokens=1600, temp=0.3), map-reduce if >4000 words (per-chunk 512 tokens, merge 1600 tokens). Validates attempt 1; on rejection retries once (temp=0.2 + nudge). If both fail, returns the better of the two (longer, fewer leaked chars) and logs a warning. Never raises. Logs path (single-pass vs mapreduce(N chunks)) + word count + validation result for each attempt.
+
+BACKEND (audiobook_app.py) — rewrote /api/chapter/summary route body:
+- Bumped cache keys summaries/v2/ → summaries/v3/ (invalidates all existing truncated summaries in R2).
+- REMOVED chapter_text[:2000] input truncation — full chapter text now sent to the model.
+- Replaced inline English prompt + max_tokens=1024 + manual line-drop cleaning with _generate_hindi_summary() call (max_tokens=1600, Devanagari coverage prompt) + _sanitize_summary() final pass.
+- Audio synthesis + R2 cache write unchanged (hindi_tts.synthesize_hindi already handles multi-paragraph text via plain_text_for_tts converting \n\n → danda pauses).
+
+BACKEND (audiobook_app.py) — updated deletion cleanup (_purge_job_completely):
+- Added f"summaries/v3/{job_id}/" to the prefix list alongside existing v1/v2/glossary prefixes so deleting a book also purges its v3 summaries.
+
+FRONTEND (hindi-summary-card.tsx):
+- Replaced single <p>{summary.summary}</p> with a split-on-\n{2,} multi-paragraph layout: each paragraph renders as its own <p> inside a space-y-3 container. Preserves the 2-3 paragraph structure the new prompt produces (previously collapsed into a wall of text).
+- Audio button gets mt-4 for spacing from the last paragraph.
+
+VERIFICATION:
+- python3 -m py_compile audiobook_app.py: PASSES.
+- bun run lint: 0 errors, 0 warnings.
+- npx tsc --noEmit: zero errors in hindi-summary-card.tsx (or any related file).
+- Inline logic test (6 cases, no test file created): T1 truncated summary → rejected too_short(55<387); T2 good summary (mentions Virgil, 908 chars) → accepted; T3 leaked CJK 迷 → rejected non_indic_script; T4 sanitize strips CJK + preserves Devanagari; T5 chunking 7500 words → 3 chunks [3000,3000,1900] with verified 200-word overlap; T6 short chapter → 1 chunk. All passed.
+- agent-browser: page loads cleanly (HTTP 200, title "ARIA"), no console errors, no hydration crashes, Fast Refresh picked up the frontend change. Dev log shows all-200 responses, no runtime errors.
+- Flask backend not runnable in sandbox (no flask module installed — runs on Render in production); backend correctness verified via py_compile + inline logic tests.
+
+CONSTRAINTS honored:
+- Did NOT touch use-word-sync.ts, transcript-view.tsx, timing/offset logic, or the audio engine.
+- Did NOT change the voice count (stays 11).
+- Did NOT touch BGM cue logic or the tombstone/deletion system (only added v3 prefix to existing Hindi cleanup loop).
+- Did NOT change glossary or explain-paragraph endpoints' token budgets (summary-only change).
+- SSML-free TTS handling for Swara already in place from prior task — multi-paragraph text flows through plain_text_for_tts (\n\n → danda pauses) with no changes needed.
+
+Stage Summary:
+Files modified:
+- mini-services/audiobook-maker/audiobook_app.py (+210 lines: 9 helper functions + 4 prompt constants + regex before the route, rewritten /api/chapter/summary generation block, v3 cache keys, v3 prefix in deletion cleanup)
+- src/components/aria/hindi-summary-card.tsx (+12/-3 lines: multi-paragraph split rendering with space-y-3 container)
+
+No git push — implementation + verification only, per the task spec.
+
+Regenerating the summary for Inferno Canto I will now: (1) send the FULL chapter text to Groq (no [:2000] slice), (2) use max_tokens=1600 (not 1024), (3) use the Devanagari full-coverage prompt that explicitly requires naming all main characters + covering beginning/middle/end + no skipped prophecies, (4) validate that Virgil (from the last 15% of the chapter) appears in the summary, (5) reject + retry if any CJK/Arabic/Cyrillic chars leak through, (6) cache under summaries/v3/ so the old truncated v2 summary is bypassed. The stray 迷 character is caught by both the validation (reject → retry) and the final _sanitize_summary pass (strip).

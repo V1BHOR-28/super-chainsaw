@@ -138,16 +138,28 @@ export function HindiSummaryCard({
 
       {state === "loaded" && summary && (
         <div>
-          <p
-            className="font-serif text-sm leading-[1.8] mb-3"
-            style={{ color: "var(--aria-fg)" }}
-          >
-            {summary.summary}
-          </p>
+          {/* Render multi-paragraph summaries preserving \n\n breaks so the
+              text doesn't collapse into a single wall of text. The backend
+              prompt asks for 2–3 short paragraphs. */}
+          <div className="space-y-3">
+            {summary.summary
+              .split(/\n{2,}/)
+              .map((p) => p.trim())
+              .filter(Boolean)
+              .map((para, i) => (
+                <p
+                  key={i}
+                  className="font-serif text-sm leading-[1.8]"
+                  style={{ color: "var(--aria-fg)" }}
+                >
+                  {para}
+                </p>
+              ))}
+          </div>
           {summary.audio_url && (
             <button
               onClick={audioPlaying ? handleStopAudio : handlePlayAudio}
-              className="flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg transition-colors"
+              className="flex items-center gap-1.5 text-xs px-3 py-1.5 rounded-lg transition-colors mt-4"
               style={{
                 color: "var(--aria-accent-glow)",
                 border: "1px solid var(--aria-border)",
