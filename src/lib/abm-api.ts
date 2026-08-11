@@ -100,6 +100,16 @@ export interface AnalyzeResponse {
    *  "off" → no BGM at all. */
   bgm_mode?: "off" | "runtime" | "prerender";
   narration_language?: "en" | "hinglish";
+  /** ARIA: present when the backend detects this exact file already has a
+   *  live generation (same client_id + file_hash, status generating/optimizing).
+   *  The frontend uses this to show an "already converting" toast instead of
+   *  opening an empty chapter selector. When true, job_id + chapters are still
+   *  present so the UI can render something useful. */
+  existing_job_id?: string;
+  is_running?: boolean;
+  status?: string;
+  progress_current?: number;
+  progress_total?: number;
 }
 
 /** A single BGM time cue — when to start/stop a mood loop and at what gain.
@@ -306,6 +316,12 @@ export async function analyzeEpub(file: File): Promise<AnalyzeResponse> {
   // Parse the JSON response
   try {
     const json = (await res.json()) as AnalyzeResponse;
+    // ARIA: normalize the busy-shape response. The backend returns
+    // existing_job_id (not job_id) when this file already has a live
+    // generation. Copy it to job_id so callers only ever see one contract.
+    if (!json.job_id && json.existing_job_id) {
+      json.job_id = json.existing_job_id;
+    }
     if (json.client_id) setStoredClientId(json.client_id);
     return json;
   } catch {

@@ -2084,6 +2084,37 @@ def _generated_chapter_indices(chapter_mp3s):
     })
 
 
+# ARIA: no progress heartbeat for 3 min ⇒ the worker thread is dead.
+# A Render dyno shutdown kills worker threads without ever flipping the job
+# status, so a persisted 'generating' status is NOT evidence of a live run.
+_STALE_RUN_SECS = 180
+
+
+def _job_is_actually_running(job):
+    """True only if a generation/optimization thread is still alive.
+
+    A Render dyno shutdown kills worker threads without ever flipping the
+    job status, so a persisted 'generating' status is NOT evidence of a
+    live run. Require a recent heartbeat (or a live thread handle).
+    """
+    if not isinstance(job, dict):
+        return False
+    if job.get("status") not in ("generating", "optimizing"):
+        return False
+    th = job.get("worker_thread")
+    if th is not None:
+        try:
+            return bool(th.is_alive())
+        except Exception:
+            pass
+    hb = job.get("last_progress_at") or job.get("started_at") or 0
+    try:
+        hb = float(hb)
+    except Exception:
+        hb = 0.0
+    return hb > 0 and (time.time() - hb) < _STALE_RUN_SECS
+
+
 def _lookup_job_by_file_hash(client_id, file_hash):
     """Find a registry entry matching (client_id, file_hash).
 
@@ -8526,15 +8557,38 @@ def api_analyze():
     if existing_job:
         status = existing_job.get("status", "")
         if status in ("optimizing", "generating"):
-            return jsonify({
-                "existing_job_id": existing_jid,
-                "status": status,
-                "is_running": True,
-                "progress_current": existing_job.get("progress_current", 0),
-                "progress_total": existing_job.get("progress_total", 0),
-                "opt_progress_current": existing_job.get("opt_progress_current", 0),
-                "opt_progress_total": existing_job.get("opt_progress_total", 0),
-            })
+            if _job_is_actually_running(existing_job):
+                # Genuinely running — return the is_running payload WITH the
+                # full catalog so the frontend can render something useful
+                # instead of an empty selector.
+                _run_info = existing_job.get("info")
+                _run_chapters = (_build_chapter_catalog(_run_info)
+                                 if _run_info else [])
+                return jsonify({
+                    "existing_job_id": existing_jid,
+                    "job_id": existing_jid,
+                    "title": (getattr(_run_info, "title", None)
+                              or existing_job.get("original_filename", "")),
+                    "author": getattr(_run_info, "author", "") if _run_info else "",
+                    "total_chapters": (len(_run_info.chapters)
+                                       if _run_info else 0),
+                    "chapters": _run_chapters,
+                    "client_id": existing_job.get("client_id", ""),
+                    "status": status,
+                    "is_running": True,
+                    "progress_current": existing_job.get("progress_current", 0),
+                    "progress_total": existing_job.get("progress_total", 0),
+                    "opt_progress_current": existing_job.get("opt_progress_current", 0),
+                    "opt_progress_total": existing_job.get("opt_progress_total", 0),
+                })
+            # Stale: the worker died with the dyno. Demote to analyzed/optimized
+            # and fall through to the normal reuse path so the selector gets
+            # real chapters instead of a permanently-generating dead end.
+            with _jobs_lock:
+                existing_job["status"] = ("optimized"
+                                          if existing_job.get("ai_optimized")
+                                          else "analyzed")
+            status = existing_job["status"]
         if status in ("analyzed", "optimized"):
             # Reuse existing analyzed/optimized job
             info = existing_job["info"]
@@ -8590,15 +8644,38 @@ def api_analyze():
                 if _reg_job:
                     _reg_status = _reg_job.get("status", "")
                     if _reg_status in ("optimizing", "generating"):
-                        return jsonify({
-                            "existing_job_id": _reg_jid,
-                            "status": _reg_status,
-                            "is_running": True,
-                            "progress_current": _reg_job.get("progress_current", 0),
-                            "progress_total": _reg_job.get("progress_total", 0),
-                            "opt_progress_current": _reg_job.get("opt_progress_current", 0),
-                            "opt_progress_total": _reg_job.get("opt_progress_total", 0),
-                        })
+                        if _job_is_actually_running(_reg_job):
+                            # Genuinely running — return is_running WITH the
+                            # full catalog so the frontend can render something.
+                            _reg_run_info = _reg_job.get("info")
+                            _reg_run_chapters = (_build_chapter_catalog(_reg_run_info)
+                                                 if _reg_run_info else [])
+                            return jsonify({
+                                "existing_job_id": _reg_jid,
+                                "job_id": _reg_jid,
+                                "title": (getattr(_reg_run_info, "title", None)
+                                          or _reg_job.get("original_filename", "")),
+                                "author": (getattr(_reg_run_info, "author", "")
+                                           if _reg_run_info else ""),
+                                "total_chapters": (len(_reg_run_info.chapters)
+                                                   if _reg_run_info else 0),
+                                "chapters": _reg_run_chapters,
+                                "client_id": _reg_job.get("client_id", ""),
+                                "status": _reg_status,
+                                "is_running": True,
+                                "progress_current": _reg_job.get("progress_current", 0),
+                                "progress_total": _reg_job.get("progress_total", 0),
+                                "opt_progress_current": _reg_job.get("opt_progress_current", 0),
+                                "opt_progress_total": _reg_job.get("opt_progress_total", 0),
+                            })
+                        # Stale: the worker died with the dyno. Demote to
+                        # analyzed/optimized and fall through to the
+                        # reconstructed-chapters response below.
+                        with _jobs_lock:
+                            _reg_job["status"] = ("optimized"
+                                                  if _reg_job.get("ai_optimized")
+                                                  else "analyzed")
+                        _reg_status = _reg_job["status"]
                     _reg_info = _reg_job["info"]
                     _lang_reg = (getattr(_reg_info, "language", None) or "it")[:2].lower()
                     _reg_chapters = []

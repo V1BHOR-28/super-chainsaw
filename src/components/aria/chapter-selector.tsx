@@ -334,7 +334,10 @@ export function ChapterSelector({
             {chapters.length === 0 ? (
               <div className="text-center py-12">
                 <p className="text-sm" style={{ color: "var(--aria-fg-muted)" }}>
-                  No chapters found. Try re-uploading the EPUB.
+                  No chapters found for this book.
+                </p>
+                <p className="text-xs opacity-70 mt-2" style={{ color: "var(--aria-fg-muted)" }}>
+                  job {analyzeResponse?.job_id ?? "—"} · status {analyzeResponse?.status ?? "unknown"}
                 </p>
               </div>
             ) : (
@@ -442,24 +445,24 @@ export function ChapterSelector({
             </button>
             <button
               onClick={handleConvert}
-              disabled={converting || (!!analyzeResponse && selected.size === 0)}
+              disabled={converting || (!!analyzeResponse && selected.size === 0) || chapters.length === 0}
               className="flex-[2] px-4 py-2.5 rounded-lg text-sm font-medium transition-all flex items-center justify-center gap-2 disabled:opacity-50 disabled:cursor-not-allowed"
               style={{
                 background:
-                  converting || (!!analyzeResponse && selected.size === 0)
+                  converting || (!!analyzeResponse && selected.size === 0) || chapters.length === 0
                     ? "transparent"
                     : estimate.reconvertCount > 0
                       ? "rgba(245,158,11,0.15)"
                       : "var(--aria-accent-glow)",
                 border: `1px solid ${
-                  converting || (!!analyzeResponse && selected.size === 0)
+                  converting || (!!analyzeResponse && selected.size === 0) || chapters.length === 0
                     ? "var(--aria-border)"
                     : estimate.reconvertCount > 0
                       ? "rgba(245,158,11,0.5)"
                       : "var(--aria-accent-glow)"
                 }`,
                 color:
-                  converting || (!!analyzeResponse && selected.size === 0)
+                  converting || (!!analyzeResponse && selected.size === 0) || chapters.length === 0
                     ? "var(--aria-fg-muted)"
                     : estimate.reconvertCount > 0
                       ? "var(--aria-accent-glow)"

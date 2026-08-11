@@ -422,19 +422,48 @@ export function LibraryView() {
     });
     try {
       const resp = await analyzeEpub(file);
+
+      // ARIA: the backend returns a busy-shape response (is_running=true)
+      // when this exact file already has a live generation. Don't open an
+      // empty chapter selector — tell the user and let the library poller
+      // pick the job up as it finishes.
+      if (resp.is_running) {
+        toast({
+          title: "This book is already converting",
+          description: "It's in your library — we'll update it as it finishes.",
+        });
+        fetchJobs();
+        return;
+      }
+
+      // Defensive: if the payload came back without chapters (older backend,
+      // or a reuse path that omitted the catalog), fetch them explicitly
+      // rather than rendering "No chapters found".
+      let effective = resp;
+      if (!resp.chapters || resp.chapters.length === 0) {
+        if (!resp.job_id) {
+          throw new Error("The server did not return a job for this file. Please try again.");
+        }
+        try {
+          effective = await getJobChapters(resp.job_id);
+        } catch {
+          throw new Error("Book was analyzed but its chapter list could not be loaded. Try re-uploading.");
+        }
+      }
+
       // If the user previously deleted this job_id (e.g. the old backend
       // resurrected it via file_hash dedup), un-delete it so it shows in
       // the library again. The user explicitly re-uploaded the EPUB, so
       // they want it back.
-      if (deletedRef.current.has(resp.job_id)) {
-        deletedRef.current.delete(resp.job_id);
+      if (deletedRef.current.has(effective.job_id)) {
+        deletedRef.current.delete(effective.job_id);
         persistTombstones(`aria-audiobook-deleted:${userId}`, deletedRef.current);
         setDeletedVersion((v) => v + 1);
       }
-      setAnalyzeResponse(resp);
+      setAnalyzeResponse(effective);
       toast({
         title: "Book analyzed",
-        description: `${resp.title} — ${resp.total_chapters} chapters detected`,
+        description: `${effective.title} — ${effective.total_chapters} chapters detected`,
       });
     } catch (err) {
       console.error("[library-view] analyze failed", err);

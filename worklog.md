@@ -1052,3 +1052,75 @@ Files modified:
 No git push — implementation + verification only, per the task spec.
 
 Regenerating Canto VII will now: (1) use anti-repetition sampling (freq_penalty=0.6 + presence_penalty=0.3 + top_p=0.9 + min temp 0.35), (2) dedupe the output (exact + Jaccard>=0.8), (3) use extractive merge for <=6 chunks (no generative merge loop), (4) cache under v4 (invalidating the looping v3), (5) log the final shape + warn if repetition survived. The transcript will show "हिंदी में समझाओ" buttons every 55-110 words including the first and last segments.
+
+---
+Task ID: EMPTY-CHAPTERS-FIX
+Agent: main (Fix "0 chapters total / No chapters found" after uploading an EPUB)
+Task: Fix the regression where re-uploading an EPUB that has a persisted "generating" status (from a worker that died with the Render dyno) returns a shape-3 is_running payload with no job_id/title/author/chapters, causing the chapter selector to render "Author unknown · 0 chapters total" + "No chapters found" with a dead Convert button.
+
+Work Log:
+- Read prior worklog (REPETITION-FIX, REGRESSION-FIX-2) for architecture context.
+- Confirmed root cause via grep: api_analyze() returns 3 shapes — (1) fresh analyze, (2) dedup reuse, (3) duplicate-while-busy is_running payload. Shape 3 had no job_id/chapters. `grep -r "existing_job_id" src/` returned zero matches — the frontend never handled it. This regressed now because the durable _job_registry + _reconstruct_job_from_storj dedup path made re-uploads resolve to existing jobs far more often, and interrupted jobs stay "generating" forever.
+
+BACKEND (audiobook_app.py) — Fix 1: never report a dead job as running
+
+New helper (after _generated_chapter_indices):
+- _STALE_RUN_SECS = 180 (3 min with no heartbeat ⇒ worker is dead)
+- _job_is_actually_running(job): True only if (a) status is generating/optimizing AND (b) either a worker_thread handle is alive, OR a last_progress_at/started_at heartbeat is within _STALE_RUN_SECS. A Render dyno shutdown kills worker threads without flipping the status, so a persisted "generating" status alone is NOT evidence of a live run.
+
+api_analyze() — in-memory existing_job branch:
+- Replaced `if status in ("optimizing", "generating"): return jsonify({...is_running...})` with:
+  - If _job_is_actually_running(existing_job): return is_running payload WITH the full catalog (job_id, title, author, total_chapters, chapters, client_id) so the UI can render something useful.
+  - Else (stale): demote existing_job["status"] to "optimized" (if ai_optimized) or "analyzed", set status = the new value, and fall through to the normal reuse path (which returns the full chapter list).
+
+api_analyze() — _reg_job branch (durable-registry dedup):
+- Identical treatment: if _job_is_actually_running(_reg_job), return is_running WITH catalog. Else demote _reg_job["status"] and fall through to the reconstructed-chapters response.
+- Invariant: every analyze payload now carries job_id + chapters, even the is_running shape.
+
+FRONTEND (abm-api.ts) — Fix 2a: normalize the shape
+
+AnalyzeResponse type:
+- Added optional fields: existing_job_id?, is_running?, status?, progress_current?, progress_total?.
+
+analyzeEpub():
+- After `const json = (await res.json()) as AnalyzeResponse;`: if `!json.job_id && json.existing_job_id`, copy existing_job_id → job_id. Callers only ever see one contract.
+
+FRONTEND (library-view.tsx) — Fix 2b: handle is_running + defensive chapter fetch
+
+handleFileSelected (rewrote the try block):
+- If resp.is_running: toast "This book is already converting" + fetchJobs() (refresh the library so the poller picks it up) + return. Never opens an empty selector.
+- Defensive: if `!resp.chapters || resp.chapters.length === 0`: if no job_id, throw "The server did not return a job for this file." Otherwise fetch via getJobChapters(resp.job_id); on failure throw "Book was analyzed but its chapter list could not be loaded." The throw surfaces in the existing "Could not analyze book" catch block.
+- Un-delete + setAnalyzeResponse + success toast now use `effective` (the getJobChapters result when the original had no chapters).
+
+FRONTEND (chapter-selector.tsx) — Fix 3: make the failure visible
+
+Empty-state:
+- Changed "No chapters found. Try re-uploading the EPUB." to "No chapters found for this book." + a second line showing `job {job_id} · status {status}` so the failure is diagnosable instead of silent.
+
+Convert button:
+- Added `|| chapters.length === 0` to all 4 disabled/style conditions (disabled, background, border, color). The button is now disabled when there are no chapters, not just when the selection is empty.
+
+VERIFICATION:
+- python3 -m py_compile audiobook_app.py: PASSES.
+- npx tsc --noEmit: zero errors in any modified file (abm-api, library-view, chapter-selector).
+- bun run lint: 0 errors, 0 warnings.
+- grep -rn "existing_job_id" src/: matches in abm-api.ts (type def + normalization) ✓
+- grep -rn "is_running" src/: matches in abm-api.ts (type) + library-view.tsx (handleFileSelected) ✓
+- Inline logic tests (9 cases): live heartbeat, stale heartbeat (5min), no heartbeat, analyzed status, live thread handle, dead thread handle, non-dict input, optimizing stale, started_at fallback. All passed.
+- agent-browser: page loads cleanly (HTTP 200, title "ARIA"), no console errors, no hydration crashes. Dev log shows all-200 responses, clean compilation.
+
+CONSTRAINTS honored:
+- Did NOT touch transcript sync offset, manual-scroll override, or timing logic.
+- Did NOT touch chapter catalog builder semantics (_build_chapter_catalog unchanged).
+- Did NOT touch BGM mixing, cover persistence, deletion tombstones, Hindi summary/explain features, or the voice registry.
+
+Stage Summary:
+Files modified:
+- mini-services/audiobook-maker/audiobook_app.py (+65 lines: _STALE_RUN_SECS + _job_is_actually_running helper, both is_running branches now check liveness + demote stale + carry full catalog)
+- src/lib/abm-api.ts (+12 lines: existing_job_id/is_running/status/progress_* fields on AnalyzeResponse, shape normalization in analyzeEpub)
+- src/components/aria/library-view.tsx (+30 lines: is_running toast + fetchJobs refresh, defensive getJobChapters fallback, effective-response pattern)
+- src/components/aria/chapter-selector.tsx (+5 lines: empty-state shows job_id/status, Convert button disabled when chapters.length===0)
+
+No git push — implementation + verification only, per the task spec.
+
+Re-uploading an EPUB that had a persisted "generating" status (from a dead worker) will now: (1) detect the stale heartbeat, (2) demote the job to analyzed/optimized, (3) return the full chapter catalog, (4) open the selector with all chapters. A genuinely running job returns the is_running shape WITH the catalog so the frontend shows an "already converting" toast instead of an empty selector.
