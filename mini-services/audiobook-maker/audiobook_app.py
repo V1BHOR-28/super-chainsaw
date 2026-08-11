@@ -10652,7 +10652,7 @@ def _purge_job_completely(job_id):
                 f"summaries/v5/{job_id}/", f"summaries/v6/{job_id}/",
                 f"summaries/v7/{job_id}/", f"summaries/v8/{job_id}/",
                 f"summaries/v9/{job_id}/", f"summaries/v10/{job_id}/",
-                f"summaries/v11/{job_id}/",
+                f"summaries/v11/{job_id}/", f"summaries/v12/{job_id}/",
                 f"glossary/{job_id}/", f"glossary/v2/{job_id}/",
             ):
                 try:
@@ -11273,197 +11273,281 @@ def api_ai_health():
         return jsonify({"groq_key_present": False, "models_tried": [],
                         "working_model": None, "error": "internal"}), 500
 
-# ── Chapter summary helpers (v10: English prose, retuned gates) ──
-# Reject any character from CJK / Hangul / Hiragana / Katakana / Arabic / Cyrillic.
+# ═══════════════════════════════════════════════════════════════════
+# ARIA: Chapter summary — windowed map-reduce (v12)
+# ═══════════════════════════════════════════════════════════════════
+
 _NON_INDIC_SCRIPT_RE = re.compile(
     r"[\u4e00-\u9fff\u3040-\u30ff\uac00-\ud7af\u0600-\u06ff\u0400-\u04ff]"
 )
 
-# Regex: numbered list lines or bullet chars or meta headings (format gate).
 _OUTLINE_LEAK_RE = re.compile(r'(^\s*\d+\.\s|^\s*[-•·]\s|कथन:|रूपक:)', re.MULTILINE)
-
-# Regex: meta-commentary opening phrases.
 _META_PHRASE_RE = re.compile(r'^(This chapter|This passage|Summary of|Overview of)', re.IGNORECASE | re.MULTILINE)
 
-# ── Pass A: Speaker-tagged event extraction (returns STRICT JSON) ──
-_SUMMARY_PASS_A_SYSTEM = (
-    "You are an event extraction engine for classical literature. "
-    "You output ONLY valid JSON — no prose, no commentary, no markdown fences.\n\n"
-    "The JSON schema:\n"
-    '{\n'
-    '  "events": [\n'
-    '    {"id": 1, "speaker": "<who is uttering/acting: narrator | proper name | \'unnamed lady\'>", '
-    '"addressee": "<who they speak to, or null>", '
-    '"nesting": "<0 = narration, 1 = quoted speech, 2 = speech inside speech, 3 = deeper>", '
-    '"action": "<one clause, plain past tense, third person>", '
-    '"quote": "<verbatim <=12 words from source proving this event>"}\n'
-    '  ],\n'
-    '  "named_entities": ["Minos", "Semiramis", "Dido", ...],\n'
-    '  "key_quotes": ["<=8 words verbatim from the chapter", ...],\n'
-    '  "similes": ["starlings in winter", "cranes in long-drawn company", ...]\n'
-    '}\n\n'
-    "HARD RULES:\n"
-    "1. The first-person 'I' in the source is NOT always the same person. "
-    "When a character begins speaking, every 'I' inside that speech belongs to "
-    "THAT character until their speech ends. Track the speaker stack.\n"
-    "2. Never merge two speakers into one event.\n"
-    "3. Every event MUST have a verbatim quote from the source. No quote = drop the event.\n"
-    "4. 10-18 events, covering the chapter END TO END. The final event must come from the last ~10%.\n"
-    "5. named_entities: every named person, creature, place, or concept that appears.\n"
-    "6. key_quotes: 3-6 short verbatim phrases that anchor the chapter's key moments.\n"
-    "7. similes: all similes/metaphors that carry meaning.\n"
-    "8. ALL fields in English.\n"
-    "9. If the source describes a character without naming them (e.g. 'a noble lady "
-    "in Heaven'), use a descriptive label like 'unnamed lady in Heaven' as the speaker."
-)
 
-# ── Pass B: Third-person, attribution-preserving English ──
-_SUMMARY_PASS_B_SYSTEM = (
-    "You are a literary summarizer. Given a verified event list (JSON), "
-    "write a summary in plain modern English prose.\n"
+def _summary_groq_call(system, user, *, temperature, max_tokens,
+                       frequency_penalty=0.0, presence_penalty=0.0):
+    """Thin wrapper over groq_client.groq_chat. Returns (text, error_code)."""
+    import groq_client as _gc
+    return _gc.groq_chat(system, user, temperature=temperature,
+                         max_tokens=max_tokens, frequency_penalty=frequency_penalty,
+                         presence_penalty=presence_penalty)
+
+
+# ── STEP 0: Segment ──
+
+def _segment_windows(chapter_text, target_words=350, overlap_words=50):
+    """Split chapter into overlapping windows on sentence boundaries.
+
+    Returns list of (window_num, text). Never drops the tail.
+    """
+    import hashlib
+    words = chapter_text.split()
+    n = len(words)
+    if n == 0:
+        return []
+
+    # Find sentence boundary positions (indices into words list)
+    sentence_ends = []
+    for i, w in enumerate(words):
+        if w and w[-1] in '.!?;:"\')\u201d\u2019':
+            sentence_ends.append(i + 1)  # end of sentence = start of next
+    if not sentence_ends or sentence_ends[-1] < n:
+        sentence_ends.append(n)
+
+    windows = []
+    start = 0
+    win_num = 1
+    while start < n:
+        # Target end position
+        target_end = start + target_words
+        # Find the sentence boundary closest to (but not before) target_end
+        best_end = n
+        for se in sentence_ends:
+            if se >= start + 50 and se <= target_end + 50:
+                best_end = se
+                break
+            if se > target_end + 50:
+                best_end = se
+                break
+        if best_end <= start:
+            best_end = min(start + target_words, n)
+
+        window_text = " ".join(words[start:best_end])
+        windows.append((win_num, window_text))
+        win_num += 1
+
+        if best_end >= n:
+            break
+        start = best_end - overlap_words
+        if start < 0:
+            start = 0
+
+    # Merge final window if too small
+    if len(windows) >= 2:
+        last_num, last_text = windows[-1]
+        if len(last_text.split()) < 150:
+            prev_num, prev_text = windows[-2]
+            windows[-2] = (prev_num, prev_text + " " + last_text)
+            windows.pop()
+
+    # Cap at 40 windows
+    if len(windows) > 40:
+        merged = []
+        chunk_size = len(windows) // 40 + 1
+        for i in range(0, len(windows), chunk_size):
+            batch = windows[i:i+chunk_size]
+            merged_text = " ".join(t for _, t in batch)
+            merged.append((len(merged) + 1, merged_text))
+        windows = merged
+
+    return windows
+
+
+# ── STEP 1: Map (per-window LLM extraction) ──
+
+_MAP_SYSTEM_PROMPT = (
+    "You are an event extraction engine. You output ONLY valid JSON.\n\n"
+    "Schema:\n"
+    '{"window": <int>, "events": [{"what": "<one sentence, past tense, what happened>", '
+    '"speaker": "<name or \'narrator\' or \'unknown\'>", "addressee": "<name or \'unknown\'>", '
+    '"quote": "<verbatim substring from the window, <=15 words>", '
+    '"names_present": ["..."]}]}\n\n'
     "Rules:\n"
-    "- WRITE IN THIRD PERSON. Do not use 'I' for the protagonist. "
-    "Use 'Dante' or 'the narrator' — never first person.\n"
-    "- Every reported speech MUST name its speaker: 'Virgil told him that "
-    "Beatrice had come down from Heaven', never 'I heard that...'.\n"
-    "- When speech is nested (nesting >= 2), preserve the chain explicitly: "
-    "'X said that Y had told her that Z...'.\n"
-    "- Cover every event in the outline, in order. Do not skip any.\n"
-    "- Use plain modern English, not archaic or poetic register.\n"
-    "- Preserve all proper nouns exactly as spelled in the source.\n"
-    "- Do not invent names, dialogue, companions, or destinations not in the events.\n"
-    "- Do not explain, interpret, or moralize. Report only.\n"
-    "- Output ONLY English prose. No bullets, no numbered lists, no headings.\n"
-    "- Target 250-450 words, 4-6 paragraphs.\n"
-    "- Output only the summary, nothing else."
+    "- Use ONLY this window. Do not summarize, do not interpret, do not add context.\n"
+    "- 1-5 events per window. If nothing happens, return empty events array.\n"
+    '- "quote" MUST be an exact substring of the window text.\n'
+    "- CRITICAL: if a character is reading a book, telling a story, or recounting a "
+    "dream, people inside that inner story are listed in names_present with a "
+    '"(in-story)" suffix and must NEVER be used as speaker or addressee of the outer scene.\n'
+    "- If a character begins speaking, every 'I' inside that speech belongs to THAT character."
 )
 
-# Repair instruction for Pass A JSON failures.
-_PASS_A_REPAIR = (
-    "Your previous output was not valid JSON. "
-    "Output ONLY a JSON object with keys: events, named_entities, key_quotes, similes. "
-    "Each event must have: id, speaker, addressee, nesting, action, quote. "
-    "The quote must be a verbatim substring of the source."
-)
+def _map_window(window_num, window_text):
+    """Extract events from one window. Returns (events_list, error_or_none)."""
+    import json as _json
 
-# Subject-misattribution repair.
-_PASS_A_SUBJECT_REPAIR = (
-    "You collapsed speakers. Re-read the text: when a character begins speaking, "
-    "every 'I' inside that speech belongs to THAT character. Track the speaker stack. "
-    "List the proper nouns found in the source and assign each event to the correct "
-    "speaker. Output the corrected JSON."
-)
+    user_msg = f"Window {window_num}:\n<<<{window_text}>>>"
+    raw, code = _summary_groq_call(
+        _MAP_SYSTEM_PROMPT, user_msg,
+        temperature=0.1, max_tokens=1024,
+        frequency_penalty=0.0, presence_penalty=0.0)
 
-# Tail repair.
-_PASS_A_TAIL_REPAIR = (
-    "Your last event was from the first 70% of the text — you did not reach the end. "
-    "Re-read the FINAL portion and add events from it. Output the corrected JSON."
-)
+    if not raw:
+        return [], code or "map_empty"
 
-# Speaker collapse repair.
-_PASS_A_SPEAKER_REPAIR = (
-    "SPEAKER_COLLAPSE detected: the source contains multiple speech-introduction cues "
-    "but your events have too few distinct speakers. The source contains these proper "
-    "nouns: {names}. Re-read the text, track who is speaking at each point, and "
-    "output the corrected JSON with proper speaker attribution."
-)
+    # Strip markdown fences
+    raw = raw.strip()
+    if raw.startswith("```"):
+        raw = re.sub(r'^```(?:json)?\s*', '', raw)
+        raw = re.sub(r'\s*```$', '', raw)
 
+    try:
+        parsed = _json.loads(raw)
+    except Exception:
+        # Retry at temp 0
+        raw2, code2 = _summary_groq_call(
+            _MAP_SYSTEM_PROMPT, user_msg,
+            temperature=0.0, max_tokens=1024)
+        if not raw2:
+            return [], code2 or "map_parse_failed"
+        raw2 = raw2.strip()
+        if raw2.startswith("```"):
+            raw2 = re.sub(r'^```(?:json)?\s*', '', raw2)
+            raw2 = re.sub(r'\s*```$', '', raw2)
+        try:
+            parsed = _json.loads(raw2)
+        except Exception:
+            # Placeholder: first sentence of window
+            first_sent = window_text.split('.')[0][:200] + "."
+            return [{"what": first_sent, "speaker": "unknown", "addressee": "unknown",
+                     "quote": first_sent, "names_present": []}], None
 
-def _normalize_sentence(s: str) -> str:
-    """Normalize a Hindi sentence for de-dup comparison.
+    events = parsed.get("events", [])
+    if not isinstance(events, list):
+        events = []
 
-    Strips whitespace, Devanagari + Latin punctuation, and collapses spaces
-    so that "वर्जिल ने कहा।" and "वर्जिल ने कहा " compare equal.
-    """
-    if not s:
-        return ""
-    # Strip Devanagari danda + Latin punctuation + quotes + brackets
-    s = re.sub(r'[।.!?;:,"\'`\u0964\u0965()\[\]{}]', '', s)
-    s = re.sub(r'\s+', ' ', s)
-    return s.strip().lower()
-
-
-def _token_jaccard(a: str, b: str) -> float:
-    """Token-level Jaccard similarity between two normalized sentences."""
-    ta = set(a.split())
-    tb = set(b.split())
-    if not ta or not tb:
-        return 0.0
-    return len(ta & tb) / len(ta | tb)
-
-
-def _dedupe_summary(text: str) -> str:
-    """Remove repeated sentences/paragraphs from a generated summary.
-
-    Splits on \\n\\n into paragraphs, then each paragraph into sentences on
-    दंड (।) / . / ! / ?. Normalizes each sentence, drops exact duplicates,
-    drops near-duplicates (token Jaccard >= 0.85). Reassembles paragraphs
-    (dropping any left empty). If the last sentence doesn't end with ।/?/!,
-    drops it (removes mid-sentence truncation).
-    """
-    if not text:
-        return ""
-    seen_normalized: set = set()
-    kept_sentences: list = []  # list of (original_sentence)
-    paragraphs = re.split(r'\n{2,}', text)
-    out_paragraphs = []
-    for para in paragraphs:
-        para = para.strip()
-        if not para:
+    # Validate quotes: drop events whose quote is not in the window
+    window_norm = re.sub(r'\s+', ' ', window_text.lower())
+    valid = []
+    for ev in events:
+        if not isinstance(ev, dict):
             continue
-        # Split into sentences on danda/.!? followed by space or end.
-        # Keep the delimiter attached to the sentence.
-        sentences = re.findall(r'[^।.!?]+[।.!?]*', para)
-        sentences = [s.strip() for s in sentences if s.strip()]
-        kept = []
-        for sent in sentences:
-            norm = _normalize_sentence(sent)
-            if not norm:
-                continue
-            # Exact duplicate check
-            if norm in seen_normalized:
-                continue
-            # Near-duplicate check (Jaccard >= 0.85 with any kept sentence)
-            is_dup = False
-            for prev_norm in seen_normalized:
-                if _token_jaccard(norm, prev_norm) >= 0.85:
-                    is_dup = True
-                    break
-            if is_dup:
-                continue
-            seen_normalized.add(norm)
-            kept.append(sent)
-        # Drop trailing incomplete sentence (no terminal punctuation)
-        if kept:
-            last = kept[-1].rstrip()
-            if last and last[-1] not in '।.!?':
-                kept = kept[:-1]
-        if kept:
-            out_paragraphs.append(' '.join(kept))
-    return '\n\n'.join(out_paragraphs).strip()
+        quote = (ev.get("quote") or "").strip()
+        if not quote:
+            continue
+        quote_norm = re.sub(r'\s+', ' ', quote.lower())
+        if quote_norm not in window_norm:
+            continue
+        if not ev.get("speaker"):
+            ev["speaker"] = "unknown"
+        if not ev.get("addressee"):
+            ev["addressee"] = "unknown"
+        if not ev.get("names_present"):
+            ev["names_present"] = []
+        valid.append(ev)
+
+    # Placeholder if zero valid events
+    if not valid:
+        first_sent = window_text.split('.')[0][:200]
+        if first_sent and not first_sent.endswith('.'):
+            first_sent += "."
+        valid = [{"what": first_sent or window_text[:200], "speaker": "unknown",
+                  "addressee": "unknown", "quote": first_sent or window_text[:200],
+                  "names_present": []}]
+
+    return valid, None
 
 
-def _clean_summary_llm_output(text: str) -> str:
-    """Strip markdown, drop LLM preamble lines, dedupe, collapse newlines.
+# ── STEP 2: Ledger ──
 
-    Language-agnostic — works on both English and Hindi summaries.
-    Drops ONLY:
-    - lines matching ^(Here is|Here's|Sure|Certainly|Below is|Summary:)\\b
-    - lines that are pure markdown fences (``` ...)
-    - empty-after-strip lines (collapse to one blank line between paragraphs)
-    """
+def _build_ledger(all_events):
+    """Build a numbered ledger from all window events + entity sets."""
+    ledger = []
+    entity_set = set()
+    in_story_set = set()
+
+    for ev in all_events:
+        ledger_num = len(ledger) + 1
+        ledger.append({
+            "num": ledger_num,
+            "what": ev.get("what", ""),
+            "speaker": ev.get("speaker", "unknown"),
+            "addressee": ev.get("addressee", "unknown"),
+            "names_present": ev.get("names_present", []),
+        })
+        for name in ev.get("names_present", []):
+            name = name.strip()
+            if "(in-story)" in name.lower():
+                clean = name.replace("(in-story)", "").strip()
+                if clean:
+                    in_story_set.add(clean)
+            elif name:
+                entity_set.add(name)
+        # Also add speaker and addressee to entity_set if they're proper names
+        for field in ("speaker", "addressee"):
+            val = ev.get(field, "").strip()
+            if val and val not in ("narrator", "unknown", "None", "null"):
+                entity_set.add(val)
+
+    return ledger, entity_set, in_story_set
+
+
+# ── STEP 3: Reduce (single LLM call from ledger) ──
+
+_REDUCE_SYSTEM_PROMPT = (
+    "You are a literary summarizer. Given a numbered event ledger, "
+    "write a summary in plain English prose.\n"
+    "Rules:\n"
+    "- Write 4-7 paragraphs of plain English narrative summary.\n"
+    "- Cover EVERY numbered event in order. Do not skip, do not reorder.\n"
+    "- Names marked as in-story characters are from a book/story being read "
+    "inside the chapter; mention them as such, never as participants in the main action.\n"
+    "- WRITE IN THIRD PERSON. Never use 'I' for the protagonist. Use 'the narrator' or 'Dante'.\n"
+    "- Every reported speech MUST name its speaker.\n"
+    "- When speech is nested, preserve the chain: 'X said that Y had told her that Z...'.\n"
+    "- No analysis, no moralizing, no 'this symbolizes'. Just what happened.\n"
+    "- Never begin two sentences with the same three words.\n"
+    "- The final paragraph must cover the highest-numbered events.\n"
+    "- Output ONLY the summary, nothing else."
+)
+
+def _reduce_summary(ledger, entity_set, in_story_set, chapter_title=""):
+    """Generate the final English summary from the ledger. Returns (summary, error_or_none)."""
+    import json as _json
+
+    ledger_text = _json.dumps(ledger, ensure_ascii=False, indent=2)
+    user_msg = (
+        f"Chapter: {chapter_title or 'unknown'}\n\n"
+        f"Event ledger:\n{ledger_text}\n\n"
+    )
+    if in_story_set:
+        user_msg += f"In-story characters (from a book being read inside the chapter, "
+        user_msg += f"NOT participants in the main action): {', '.join(sorted(in_story_set))}\n\n"
+    user_msg += "Write the summary."
+
+    raw, code = _summary_groq_call(
+        _REDUCE_SYSTEM_PROMPT, user_msg,
+        temperature=0.4, max_tokens=2048,
+        frequency_penalty=0.4, presence_penalty=0.0)
+
+    if not raw:
+        return "", code or "reduce_empty"
+
+    # Clean: strip markdown, preamble, fences
+    summary = _clean_summary_text(raw)
+    return summary, None
+
+
+def _clean_summary_text(text):
+    """Strip markdown, preamble lines, fences. Language-agnostic."""
     if not text:
         return ""
-    # Strip markdown: **bold**, *italic*, # headings, [text](url), `code`
     text = re.sub(r'\*\*(.+?)\*\*', r'\1', text)
     text = re.sub(r'\*(.+?)\*', r'\1', text)
     text = re.sub(r'^#+\s*', '', text, flags=re.MULTILINE)
-    text = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', text)
     text = re.sub(r'`([^`]+)`', r'\1', text)
-    text = re.sub(r'^[\s]*[-•·]\s+', '', text, flags=re.MULTILINE)
-    # Language-agnostic preamble filter: drop ONLY LLM meta-lines
-    _PREAMBLE_RE = re.compile(r'^(Here is|Here\'s|Sure|Certainly|Below is|Summary:)\b',
-                              re.IGNORECASE)
+    _PREAMBLE_RE = re.compile(r'^(Here is|Here\'s|Sure|Certainly|Below is|Summary:)\b', re.IGNORECASE)
     _FENCE_RE = re.compile(r'^```')
     lines = text.split("\n")
     kept = []
@@ -11471,7 +11555,7 @@ def _clean_summary_llm_output(text: str) -> str:
         ln = ln.strip()
         if not ln:
             if kept and kept[-1] != "":
-                kept.append("")  # preserve one blank line between paragraphs
+                kept.append("")
             continue
         if _FENCE_RE.match(ln):
             continue
@@ -11479,175 +11563,49 @@ def _clean_summary_llm_output(text: str) -> str:
             continue
         kept.append(ln)
     text = "\n".join(kept).strip()
-    # Collapse 3+ newlines to double
     text = re.sub(r'\n{3,}', '\n\n', text)
-    # De-duplicate sentences/paragraphs BEFORE validation.
-    text = _dedupe_summary(text)
     return text
 
 
-def _sanitize_summary(text: str) -> str:
-    """Last-resort cleanup before caching: strip leaked non-Indic chars, collapse newlines."""
-    if not text:
-        return ""
-    text = _NON_INDIC_SCRIPT_RE.sub('', text)
-    text = re.sub(r'\n{3,}', '\n\n', text)
-    return text.strip()
+# ── STEP 4: Verify (deterministic, no LLM) ──
 
-
-def _validate_pass_a_json(raw_json, chapter_text):
-    """Validate the Pass A JSON output. Returns (parsed, errors_list).
-
-    v11 checks:
-    - JSON parses
-    - >= 8 events for a chapter over 400 words
-    - each event has speaker, addressee, nesting, action, quote
-    - quote is a verbatim substring of the normalized source (case/whitespace-insensitive)
-    - no single speaker owns >60% of events
-    - named_entities present and non-empty
-    """
-    import json as _json
-    errors = []
-
-    raw = raw_json.strip()
-    if raw.startswith("```"):
-        raw = re.sub(r'^```(?:json)?\s*', '', raw)
-        raw = re.sub(r'\s*```$', '', raw)
-
-    try:
-        parsed = _json.loads(raw)
-    except Exception as e:
-        return (None, [f"json_parse_error: {e}"])
-
-    if not isinstance(parsed, dict):
-        return (None, ["not_a_dict"])
-    events = parsed.get("events", [])
-    if not isinstance(events, list):
-        errors.append("events_not_list")
-        events = []
-
-    chapter_words = len(chapter_text.split())
-    if chapter_words > 400 and len(events) < 8:
-        errors.append(f"too_few_events({len(events)}<8)")
-
-    # Normalize source for quote verification (case-insensitive, whitespace-collapsed)
-    source_norm = re.sub(r'\s+', ' ', chapter_text.lower())
-
-    # Validate each event has required fields + verify quote
-    valid_events = []
-    quotes_dropped = 0
-    for ev in events:
-        if not isinstance(ev, dict):
-            quotes_dropped += 1
-            continue
-        quote = (ev.get("quote") or "").strip()
-        if not quote:
-            quotes_dropped += 1
-            continue
-        # Verify quote is a verbatim substring of the source
-        quote_norm = re.sub(r'\s+', ' ', quote.lower())
-        if quote_norm not in source_norm:
-            quotes_dropped += 1
-            continue
-        # Ensure speaker field exists
-        if not ev.get("speaker"):
-            ev["speaker"] = "narrator"
-        valid_events.append(ev)
-
-    if events and quotes_dropped / len(events) > 0.25:
-        errors.append(f"too_many_quotes_dropped({quotes_dropped}/{len(events)})")
-
-    parsed["events"] = valid_events
-
-    # Check speaker distribution
-    speaker_counts = {}
-    for ev in valid_events:
-        speaker = (ev.get("speaker") or "").strip()
-        if speaker:
-            speaker_counts[speaker] = speaker_counts.get(speaker, 0) + 1
-
-    if valid_events and speaker_counts:
-        max_speaker = max(speaker_counts.values())
-        if max_speaker / len(valid_events) > 0.6:
-            dominant = max(speaker_counts, key=speaker_counts.get)
-            errors.append(f"speaker_dominance({dominant}:{max_speaker}/{len(valid_events)})")
-
-    # Speaker collapse detection: source has 3+ speech cues but Pass A has <3 distinct speakers
-    speech_cues = len(re.findall(r'\b(said|began|replied|answered|addressed|spoke|cried|exclaimed)\b',
-                                 chapter_text, re.IGNORECASE))
-    distinct_speakers = len(speaker_counts)
-    if speech_cues >= 3 and distinct_speakers < 3:
-        errors.append(f"speaker_collapse({distinct_speakers}_speakers_{speech_cues}_cues)")
-
-    # Check named_entities present
-    named_entities = parsed.get("named_entities", [])
-    if not isinstance(named_entities, list) or len(named_entities) == 0:
-        errors.append("no_named_entities")
-
-    return (parsed, errors)
-
-
-def _build_outline_for_pass_b(parsed):
-    """Build a text outline string from the validated Pass A JSON for Pass B.
-
-    This is INTERNAL — it's input to Pass B, never returned to the client.
-    """
-    if not parsed:
-        return ""
-    import json as _json
-    # Pass the raw JSON to Pass B so it has structured data to work with.
-    return _json.dumps(parsed, ensure_ascii=False, indent=2)
-
-
-def _extract_named_entities(parsed):
-    """Extract the named_entities list from the validated Pass A JSON."""
-    if not parsed:
-        return set()
-    entities = parsed.get("named_entities", [])
-    if isinstance(entities, list):
-        return set(str(e) for e in entities if e)
-    return set()
-
-
-def _validate_summary_v11(summary, parsed_outline, chapter_text=""):
-    """Validate the final English summary against the Pass A JSON.
-
-    v11 gates:
-    a) Format gate: reject if numbered list, bullet chars, or meta-commentary opening.
-    b) Degeneracy gate: 6-word shingle 3+ times, 3+ sentences same first 3 tokens.
-    c) Hallucination gate: first-person pronouns outside quotes, invented proper nouns.
-    d) Entity gate: >= 65% of named_entities from Pass A (retuned from 80%).
-    e) Tail gate: >= 70% of final 15% of events represented.
-    f) Paragraph similarity > 85%.
-
-    Returns (ok, reason, coverage, missing).
-    """
-    if not summary or not summary.strip():
-        return (False, "empty", 0.0, set())
-
-    if _NON_INDIC_SCRIPT_RE.search(summary):
-        return (False, "non_indic_script", 0.0, set())
-
+def _verify_summary(summary, ledger, entity_set):
+    """Verify the summary against the ledger. Returns (ok, metrics_dict, uncovered_events)."""
     summary_lower = summary.lower()
 
-    # a) Format gate
-    if _OUTLINE_LEAK_RE.search(summary):
-        return (False, "format_leak", 0.0, set())
-    if _META_PHRASE_RE.search(summary.strip().split('\n')[0]):
-        return (False, "meta_opening", 0.0, set())
+    # Coverage: for each ledger event, check if its content words appear in the summary
+    covered = 0
+    uncovered = []
+    for ev in ledger:
+        what = ev.get("what", "")
+        speaker = ev.get("speaker", "")
+        # Extract content words (len > 3, not stop words)
+        content_words = [w.lower() for w in (what + " " + speaker).split()
+                         if len(w) > 3 and w.lower() not in
+                         {"the", "and", "but", "with", "from", "that", "this", "they",
+                          "their", "them", "then", "when", "were", "what", "have",
+                          "been", "into", "upon", "narrator", "unknown"}]
+        if any(w in summary_lower for w in content_words):
+            covered += 1
+        else:
+            uncovered.append(ev["num"])
 
-    # b) Degeneracy: 6-word shingle 3+ times
-    words = summary.split()
-    if len(words) >= 6:
-        shingles = {}
-        for i in range(len(words) - 5):
-            sh = " ".join(words[i:i+6]).lower()
-            shingles[sh] = shingles.get(sh, 0) + 1
-        for sh, count in shingles.items():
-            if count >= 3:
-                return (False, f"shingle_repeat({sh[:30]}...)", 0.0, set())
+    coverage_pct = round(covered / len(ledger) * 100, 1) if ledger else 100.0
 
-    # b2) 3+ sentences same first 3 tokens
+    # Tail: last ledger event covered in the final paragraph
+    last_ev = ledger[-1] if ledger else None
+    tail_ok = False
+    if last_ev:
+        paras = [p.strip() for p in summary.split("\n\n") if p.strip()]
+        final_para = paras[-1].lower() if paras else ""
+        what_words = [w.lower() for w in last_ev.get("what", "").split()
+                      if len(w) > 3 and w.lower() not in
+                      {"the", "and", "but", "with", "from", "that", "this", "they",
+                       "their", "them", "then", "when", "were", "what", "have",
+                       "been", "into", "upon", "narrator", "unknown"}]
+        tail_ok = any(w in final_para for w in what_words) if what_words else True
+
+    # Degeneracy: sentence-opening 3-gram more than twice
     sentences = re.findall(r'[^.!?]+[.!?]*', summary)
     sentences = [s.strip() for s in sentences if s.strip()]
     first_3 = {}
@@ -11656,437 +11614,139 @@ def _validate_summary_v11(summary, parsed_outline, chapter_text=""):
         if len(toks) == 3:
             key = " ".join(toks)
             first_3[key] = first_3.get(key, 0) + 1
-    for key, count in first_3.items():
-        if count >= 3:
-            return (False, f"sentence_start_repeat({key[:30]}...)", 0.0, set())
+    degeneracy_failed = any(c > 2 for c in first_3.values())
 
-    # f) Paragraph similarity
-    paragraphs = [p.strip() for p in summary.split("\n\n") if p.strip()]
-    for i in range(len(paragraphs)):
-        for j in range(i + 1, len(paragraphs)):
-            sim = _token_jaccard(_normalize_sentence(paragraphs[i]),
-                                 _normalize_sentence(paragraphs[j]))
-            if sim > 0.85:
-                return (False, f"para_similarity({sim:.2f})", 0.0, set())
+    # Entity coverage
+    entities_present = sum(1 for e in entity_set if e.lower() in summary_lower)
+    entity_pct = round(entities_present / len(entity_set) * 100, 1) if entity_set else 100.0
 
-    # c) Hallucination gate: first-person pronouns outside quotes
-    # Strip quoted strings (anything between " or ' or « »)
-    _text_outside_quotes = re.sub(r'[""\'«»].*?[""\'«»]', '', summary)
-    if re.search(r'\b(I |I\'|my |we )\b', _text_outside_quotes):
-        return (False, "first_person_outside_quotes", 0.0, set())
+    metrics = {
+        "coverage_pct": coverage_pct,
+        "tail_ok": tail_ok,
+        "degeneracy_failed": degeneracy_failed,
+        "entity_pct": entity_pct,
+        "total_events": len(ledger),
+        "covered_events": covered,
+    }
 
-    # c2) Invented proper nouns: check capitalized tokens in summary not in source
-    if chapter_text:
-        source_lower = chapter_text.lower()
-        summary_caps = re.findall(r'\b[A-Z][a-z]{2,}\b', summary)
-        _COMMON = {"The", "And", "But", "Then", "When", "While", "After", "Before",
-                   "They", "His", "Her", "Their", "This", "That", "These", "Those",
-                   "There", "Here", "Now", "Next", "Finally", "However", "He", "She", "It"}
-        for cap in summary_caps:
-            if cap not in _COMMON and cap.lower() not in source_lower:
-                return (False, f"entity_invented({cap})", 0.0, set())
-
-    # d) Entity gate: >= 65% of named_entities (retuned from 80%)
-    entities = _extract_named_entities(parsed_outline)
-    missing = set()
-    if entities:
-        present = set()
-        for n in entities:
-            if n.lower() in summary_lower:
-                present.add(n)
-            else:
-                missing.add(n)
-        coverage = round(len(present) / len(entities) * 100, 1) if entities else 100.0
-        if coverage < 65.0:
-            return (False, f"low_coverage({coverage:.0f}%)", coverage, missing)
-    else:
-        coverage = 100.0
-
-    # e) Tail gate: >= 70% of final 15% of events represented
-    events = parsed_outline.get("events", []) if parsed_outline else []
-    if events:
-        tail_start = int(0.85 * len(events))
-        tail_events = events[tail_start:]
-        if tail_events:
-            tail_represented = 0
-            for ev in tail_events:
-                speaker = (ev.get("speaker") or "").strip()
-                action = (ev.get("action") or "").strip()
-                check_words = [w.lower() for w in (speaker + " " + action).split()
-                               if len(w) > 3 and w.lower() not in {"the", "and", "but", "with", "from", "narrator", "unnamed"}]
-                if any(w in summary_lower for w in check_words):
-                    tail_represented += 1
-            tail_pct = round(tail_represented / len(tail_events) * 100, 1)
-            if tail_pct < 70.0:
-                return (False, f"low_tail({tail_pct:.0f}%)", coverage, set())
-
-    return (True, "ok", coverage, set())
+    ok = coverage_pct >= 85.0 and tail_ok and not degeneracy_failed
+    return ok, metrics, uncovered
 
 
-def _split_chapter_chunks(text: str, chunk_words: int = 900, overlap_words: int = 135):
-    """Split chapter text into sequential chunks with 15% overlap. Returns list of strings.
+# ── Main orchestrator ──
 
-    v8: overlap_words=135 (15% of 900). The overlap ensures Pass A sees continuity
-    at chunk boundaries so events aren't missed.
-    """
-    words = text.split()
-    if len(words) <= chunk_words:
-        return [text]
-    chunks = []
-    start = 0
-    while start < len(words):
-        end = min(start + chunk_words, len(words))
-        chunks.append(" ".join(words[start:end]))
-        if end >= len(words):
-            break
-        start = end - overlap_words  # overlap for continuity
-    return chunks
+def _generate_chapter_summary(chapter_text, chapter_title=""):
+    """Windowed map-reduce summary generation. Never raises.
 
-
-def _groq_summary_call(groq_client, system_prompt: str, user_content: str,
-                       temperature: float, max_tokens: int,
-                       frequency_penalty: float = 0.6,
-                       presence_penalty: float = 0.3) -> tuple:
-    """Single Groq chat call via the centralized groq_client.groq_chat().
-
-    Returns (text, error_code). Never raises.
-    - Success: (text, None)
-    - Failure: ("", code) where code is one of:
-      groq_no_key, groq_rate_limited, groq_all_models_failed, groq_empty
-
-    The old implementation hardcoded a single model id with no fallback — if
-    Groq decommissioned that model, every Hindi feature died. Now it routes
-    through groq_chat() which walks GROQ_MODELS with 429 backoff.
-    """
-    import groq_client as _gc
-    return _gc.groq_chat(
-        system_prompt, user_content,
-        temperature=temperature,
-        max_tokens=max_tokens,
-        frequency_penalty=frequency_penalty,
-        presence_penalty=presence_penalty,
-    )
-
-
-def _extract_outline_proper_nouns(outline: str) -> set:
-    """Extract proper nouns from the Pass A outline (capitalized tokens,
-    excluding sentence-initial common words). Used by the coverage gate."""
-    if not outline:
-        return set()
-    # Match capitalized words of 3+ letters (excludes "I", "A", "The" at start)
-    # Also match multi-word names like "Fortune", "Styx", "Plutus", "Virgil"
-    candidates = re.findall(r'\b[A-Z][a-z]{2,}\b', outline)
-    # Exclude common sentence-initial words that aren't proper nouns
-    _COMMON = {"The", "And", "But", "Then", "When", "While", "After", "Before",
-               "They", "He", "She", "It", "This", "That", "These", "Those",
-               "His", "Her", "Their", "Its", "Our", "Your", "My",
-               "There", "Here", "Now", "Next", "Finally", "However",
-               "Dante", "Virgil"}  # always keep these two even if sentence-initial
-    # Actually KEEP Dante/Virgil — they ARE proper nouns we want to check.
-    _EXCLUDE = {"The", "And", "But", "Then", "When", "While", "After", "Before",
-                "They", "She", "This", "That", "These", "Those",
-                "His", "Her", "Their", "Its", "Our", "Your",
-                "There", "Here", "Now", "Next", "Finally", "However"}
-    return {w for w in candidates if w not in _EXCLUDE}
-
-
-def _check_coverage(summary: str, outline_nouns: set) -> tuple:
-    """Check what fraction of outline proper nouns appear in the Hindi summary.
-
-    Matches on the Latin-script name inside parentheses in the summary
-    (e.g. प्लूटस (Plutus) → matches "Plutus"). Returns (coverage_pct, missing_set).
-    """
-    if not outline_nouns:
-        return (100.0, set())
-    summary_lower = summary.lower()
-    present = set()
-    missing = set()
-    for noun in outline_nouns:
-        if noun.lower() in summary_lower:
-            present.add(noun)
-        else:
-            missing.add(noun)
-    pct = round(len(present) / len(outline_nouns) * 100, 1) if outline_nouns else 100.0
-    return (pct, missing)
-
-
-def _generate_hindi_summary(groq_client, chapter_text: str, chapter_title: str = "") -> tuple:
-    """Generate a Hindi chapter summary via JSON event extraction + Hindi narration.
-
-    v9 flow (HARD PASS SEPARATION — Pass A output NEVER returned as summary):
-    - Pass A: extract STRUCTURED JSON (events/named_entities/key_quotes/similes).
-      ALL English. Server-side validation: JSON parse, >=8 events, actor dominance.
-    - Pass B: narrate the outline + FULL chapter text as Hindi prose.
-      Uses the verbatim spec prompt. Groq params: temp 0.4, freq_penalty 0.5,
-      presence_penalty 0.3, max_tokens for ~450-700 Hindi words.
-    - Validation gate (_validate_summary_v9): Devanagari ratio >=0.55, no ने+ASCII
-      splice, no numbered list/कथन/रूपक headings, >=80% named_entities coverage,
-      no 8-word shingle repeat >2. On failure: retry once. On second failure:
-      return error_code "summary_quality_gate_failed" — NEVER return the outline.
-    - Input integrity: logs chars for Pass A and Pass B separately.
-
-    Returns (summary, error_code, quality, missing, outline_json, coverage, degraded).
-    - summary is ALWAYS Hindi prose from Pass B, or empty string on failure.
-    - error_code is None on success, or a machine code on failure.
-    - degraded is ALWAYS False in v9 (no outline fallback).
-    Never raises — wrapped in try/except + traceback.print_exc().
+    Returns (summary, quality, error_code).
+    - summary: non-empty English prose, or "" on failure.
+    - quality: "ok", "degraded", or "error".
+    - error_code: None on success, machine code on failure.
     """
     import traceback
     try:
-        return _generate_hindi_summary_inner(groq_client, chapter_text, chapter_title)
+        return _generate_chapter_summary_inner(chapter_text, chapter_title)
     except Exception:
         traceback.print_exc()
-        return ("", "internal", "error", set(), "", 0.0, False)
+        return ("", "error", "internal")
 
 
-def _generate_hindi_summary_inner(groq_client, chapter_text: str, chapter_title: str = "") -> tuple:
-    """Inner implementation — see _generate_hindi_summary for the wrapper."""
+def _generate_chapter_summary_inner(chapter_text, chapter_title=""):
+    """Inner implementation."""
     if not chapter_text or not chapter_text.strip():
-        return ("", "empty_summary", "error", set(), "", 0.0, False)
+        return ("", "error", "empty_summary")
 
-    full_chars = len(chapter_text)
     word_count = len(chapter_text.split())
     chap_id = chapter_title or f"words={word_count}"
+    print(f"summary_input chapter={chap_id} words={word_count}")
 
-    # ═══════════════════════════════════════════════════════════════
-    # INPUT INTEGRITY — log the true size before any LLM call.
-    # ═══════════════════════════════════════════════════════════════
-    print(f"summary_input chapter={chap_id} chars_in_full_chapter={full_chars} "
-          f"words={word_count}")
+    # ── STEP 0: Segment ──
+    windows = _segment_windows(chapter_text)
+    n_windows = len(windows)
+    if n_windows == 0:
+        return ("", "error", "segmentation_failed")
 
-    CHUNK_WORDS = 900
-    OVERLAP_WORDS = 135  # 15% overlap
-    SINGLE_PASS_THRESHOLD = 1200
-    regeneration_count = 0
+    # Verify last window contains the end of the chapter
+    last_win_text = windows[-1][1]
+    last_win_norm = re.sub(r'\s+', ' ', last_win_text.lower().strip())[-200:]
+    chapter_norm = re.sub(r'\s+', ' ', chapter_text.lower().strip())[-200:]
+    if last_win_norm not in chapter_norm and chapter_norm not in last_win_norm:
+        print(f"[summary] WARN: last window does not contain chapter ending")
 
-    # ── Chunking for Pass A ──
-    if word_count > SINGLE_PASS_THRESHOLD:
-        chunks = _split_chapter_chunks(chapter_text,
-                                        chunk_words=CHUNK_WORDS,
-                                        overlap_words=OVERLAP_WORDS)
-        print(f"[summary] chunked: {len(chunks)} chunks of ~{CHUNK_WORDS} words "
-              f"(overlap={OVERLAP_WORDS})")
-    else:
-        chunks = [chapter_text]
-        print(f"[summary] single-chunk (word_count={word_count} <= {SINGLE_PASS_THRESHOLD})")
+    print(f"[summary] STEP 0: {n_windows} windows, word_count={word_count}, "
+          f"last_window_start={windows[-1][1][:60]!r}")
 
-    # ═══════════════════════════════════════════════════════════════
-    # PASS A — JSON Event Extraction (English only, INTERNAL)
-    # ═══════════════════════════════════════════════════════════════
+    # ── STEP 1: Map (sequential, max 4 concurrent would be ideal but
+    #   sequential is simpler and avoids rate-limit issues on free tier) ──
     all_events = []
-    all_named_entities = []
-    all_key_quotes = []
-    all_similes = []
-    n_chunks = len(chunks)
-    chars_sent_to_pass_a = 0
+    for win_num, win_text in windows:
+        events, err = _map_window(win_num, win_text)
+        if err:
+            print(f"[summary] STEP 1: window {win_num} error={err}")
+        if events:
+            all_events.extend(events)
+        print(f"[summary] STEP 1: window {win_num} → {len(events)} events")
 
-    for ci, chunk in enumerate(chunks):
-        chars_sent_to_pass_a += len(chunk)
-        pass_a_user = (
-            f"Text (chapter chunk {ci+1} of {n_chunks}):\n"
-            f"<<<{chunk}>>>\n\n"
-            f"Extract events, named_entities, key_quotes, and similes as JSON per the schema."
-        )
-        raw_a, code_a = _groq_summary_call(
-            groq_client, _SUMMARY_PASS_A_SYSTEM, pass_a_user,
-            temperature=0.4, max_tokens=2048,
-            frequency_penalty=0.6, presence_penalty=0.4)
+    if not all_events:
+        return ("", "error", "map_all_windows_empty")
 
-        if not raw_a:
-            print(f"[summary] Pass A chunk {ci+1}/{n_chunks} empty (code={code_a})")
-            continue
+    # ── STEP 2: Ledger ──
+    ledger, entity_set, in_story_set = _build_ledger(all_events)
+    print(f"[summary] STEP 2: ledger={len(ledger)} events, "
+          f"entities={len(entity_set)}, in_story={len(in_story_set)}")
 
-        parsed, errors = _validate_pass_a_json(raw_a, chunk)
-        if parsed is None:
-            print(f"[summary] Pass A chunk {ci+1} JSON parse failed → retrying with repair")
-            regeneration_count += 1
-            raw_a2, _ = _groq_summary_call(
-                groq_client, _SUMMARY_PASS_A_SYSTEM + "\n" + _PASS_A_REPAIR,
-                pass_a_user,
-                temperature=0.3, max_tokens=2048,
-                frequency_penalty=0.6, presence_penalty=0.4)
-            if raw_a2:
-                parsed, errors = _validate_pass_a_json(raw_a2, chunk)
-
-        if parsed is None:
-            print(f"[summary] Pass A chunk {ci+1} still failed after retry — skipping")
-            continue
-
-        if errors:
-            error_str = "; ".join(errors)
-            print(f"[summary] Pass A chunk {ci+1} errors: {error_str}")
-            if any("speaker_dominance" in e for e in errors):
-                regeneration_count += 1
-                raw_a3, _ = _groq_summary_call(
-                    groq_client, _SUMMARY_PASS_A_SYSTEM + "\n" + _PASS_A_SUBJECT_REPAIR,
-                    pass_a_user,
-                    temperature=0.3, max_tokens=2048,
-                    frequency_penalty=0.6, presence_penalty=0.4)
-                if raw_a3:
-                    parsed3, errors3 = _validate_pass_a_json(raw_a3, chunk)
-                    if parsed3 and not any("speaker_dominance" in e for e in errors3):
-                        parsed = parsed3
-            if any("speaker_collapse" in e for e in errors):
-                regeneration_count += 1
-                # Extract proper nouns from the chunk for the repair instruction
-                _chunk_nouns = re.findall(r'\b[A-Z][a-z]{2,}\b', chunk)
-                _chunk_noun_str = ", ".join(sorted(set(_chunk_nouns))[:20])
-                _speaker_repair = _PASS_A_SPEAKER_REPAIR.format(names=_chunk_noun_str)
-                raw_a4, _ = _groq_summary_call(
-                    groq_client, _SUMMARY_PASS_A_SYSTEM + "\n" + _speaker_repair,
-                    pass_a_user,
-                    temperature=0.3, max_tokens=2048,
-                    frequency_penalty=0.6, presence_penalty=0.4)
-                if raw_a4:
-                    parsed4, errors4 = _validate_pass_a_json(raw_a4, chunk)
-                    if parsed4 and not any("speaker_collapse" in e for e in errors4):
-                        parsed = parsed4
-
-        all_events.extend(parsed.get("events", []))
-        all_named_entities.extend(parsed.get("named_entities", []))
-        all_key_quotes.extend(parsed.get("key_quotes", []))
-        all_similes.extend(parsed.get("similes", []))
-        print(f"[summary] Pass A chunk {ci+1}/{n_chunks}: "
-              f"{len(parsed.get('events', []))} events, "
-              f"{len(parsed.get('named_entities', []))} entities")
-
-    # De-duplicate named_entities
-    all_named_entities = list(set(all_named_entities))
-
-    master_parsed = {
-        "events": all_events,
-        "named_entities": all_named_entities,
-        "key_quotes": all_key_quotes,
-        "similes": all_similes,
-    }
-    events_count = len(all_events)
-    print(f"[summary] master: {events_count} events, "
-          f"{len(all_named_entities)} entities, {len(all_similes)} similes")
-
-    if events_count == 0:
-        print(f"summary_returned_from=pass_a_failed chapter={chap_id}")
-        return ("", "empty_summary", "error", set(), "", 0.0, False)
-
-    # Log the Pass A JSON for verification
-    try:
-        import json as _json
-        print(f"summary_pass_a_chars={chars_sent_to_pass_a} chapter={chap_id}")
-        print(f"[summary] PASS_A_JSON:\n{_json.dumps(master_parsed, ensure_ascii=False, indent=2)[:3000]}")
-    except Exception:
-        pass
-
-    # ═══════════════════════════════════════════════════════════════
-    # PASS B — Hindi Prose Narration (outline + FULL chapter text)
-    # ═══════════════════════════════════════════════════════════════
-    outline_json = _build_outline_for_pass_b(master_parsed)
-
-    # For long chapters: send outline + an extractive condensation of the
-    # chapter (first 2000 + last 2000 words) so Pass B sees the tail.
-    if word_count > 2500:
-        chapter_words_list = chapter_text.split()
-        condensed = " ".join(chapter_words_list[:2000]) + "\n...\n" + " ".join(chapter_words_list[-2000:])
-        pass_b_chapter_text = condensed
-        print(f"[summary] Pass B using condensed chapter ({len(pass_b_chapter_text)} chars, "
-              f"first 2000 + last 2000 words)")
-    else:
-        pass_b_chapter_text = chapter_text
-
-    pass_b_user = (
-        f"Event list (JSON):\n{outline_json}\n\n"
-        f"Write the summary based ONLY on the events above."
-    )
-    chars_sent_to_pass_b = len(pass_b_user)
-    print(f"summary_pass_b_chars={chars_sent_to_pass_b} chapter={chap_id}")
-
-    raw_summary, code_b = _groq_summary_call(
-        groq_client, _SUMMARY_PASS_B_SYSTEM, pass_b_user,
-        temperature=0.3, max_tokens=2048,
-        frequency_penalty=0.5, presence_penalty=0.3)
-
-    if not raw_summary:
-        print(f"summary_pass_b_error={code_b} chapter={chap_id}")
-        print(f"summary_returned_from=pass_b_failed chapter={chap_id}")
-        return ("", code_b or "summary_pass_b_failed", "error", set(),
-                outline_json, 0.0, False)
-
-    summary = _clean_summary_llm_output(raw_summary)
+    # ── STEP 3: Reduce ──
+    summary, err = _reduce_summary(ledger, entity_set, in_story_set, chapter_title)
     if not summary:
-        print(f"summary_pass_b_error=empty_after_clean chapter={chap_id}")
-        print(f"summary_returned_from=pass_b_failed chapter={chap_id}")
-        return ("", "summary_pass_b_failed", "error", set(),
-                outline_json, 0.0, False)
-    print(f"[summary] pass-b: len={len(summary)} paras={len(summary.split(chr(10)+chr(10)))}")
+        return ("", "error", err or "reduce_empty")
+    print(f"[summary] STEP 3: summary len={len(summary)} words={len(summary.split())}")
 
-    # ═══════════════════════════════════════════════════════════════
-    # VALIDATION GATE on the final summary
-    # ═══════════════════════════════════════════════════════════════
-    ok, reason, coverage, missing = _validate_summary_v11(summary, master_parsed, chapter_text)
-    print(f"summary_gate chapter={chap_id} ok={ok} reason={reason} coverage={coverage:.1f}% tail=...")
+    # ── STEP 4: Verify ──
+    ok, metrics, uncovered = _verify_summary(summary, ledger, entity_set)
+    print(f"[summary] STEP 4: ok={ok} coverage={metrics['coverage_pct']}% "
+          f"tail={metrics['tail_ok']} degeneracy={metrics['degeneracy_failed']} "
+          f"entity={metrics['entity_pct']}%")
 
     if not ok:
-        # Retry Pass B ONCE with the failure reason appended.
-        regeneration_count += 1
-        missing_str = ", ".join(sorted(missing)[:15]) if missing else "(none)"
-        retry_user = (
-            pass_b_user + "\n\n"
-            f"Previous attempt failed: {reason}. "
-            f"Include these names: {missing_str}. "
-            f"Rewrite the summary in plain English prose, remove repetition, "
-            f"include the listed names."
+        # Retry reduce once with uncovered events pinned
+        retry_msg = (
+            f"YOU OMITTED THESE EVENTS (numbers {uncovered[:20]}). "
+            f"Coverage was {metrics['coverage_pct']}%. "
+            f"Tail covered: {metrics['tail_ok']}. "
+            f"Rewrite covering EVERY event."
         )
-        print(f"[summary] gate failed ({reason}) → retrying Pass B")
-        raw_retry, _ = _groq_summary_call(
-            groq_client, _SUMMARY_PASS_B_SYSTEM, retry_user,
-            temperature=0.3, max_tokens=2048,
-            frequency_penalty=0.5, presence_penalty=0.3)
-        if raw_retry:
-            retry_summary = _clean_summary_llm_output(raw_retry)
-            if retry_summary:
-                ok2, reason2, cov2, missing2 = _validate_summary_v11(retry_summary, master_parsed, chapter_text)
-                print(f"summary_gate chapter={chap_id} retry ok={ok2} reason={reason2} coverage={cov2:.1f}%")
-                if ok2:
-                    summary = retry_summary
-                    ok, reason, coverage, missing = ok2, reason2, cov2, missing2
+        print(f"[summary] STEP 4: retrying reduce (uncovered={uncovered[:10]})")
+        summary2, err2 = _reduce_summary(ledger, entity_set, in_story_set, chapter_title)
+        if summary2:
+            ok2, metrics2, _ = _verify_summary(summary2, ledger, entity_set)
+            print(f"[summary] STEP 4 retry: ok={ok2} coverage={metrics2['coverage_pct']}%")
+            if ok2 or metrics2["coverage_pct"] >= metrics["coverage_pct"]:
+                summary = summary2
+                ok, metrics = ok2, metrics2
 
     if not ok:
-        # v9.1: If the summary is non-empty Hindi prose that just failed a
-        # strict gate (coverage, shingle, similarity), return it with
-        # quality="partial" rather than erroring. A partial summary is
-        # better than no summary — the user sees the text with a badge.
-        # Only error on structural failures (outline leak, bare verbs,
-        # ne_ascii splice, low devanagari ratio) which indicate the
-        # output is fundamentally broken.
-        _STRUCTURAL_FAILURES = {"format_leak", "meta_opening", "non_indic_script", "empty"}
-        if any(sf in reason for sf in _STRUCTURAL_FAILURES):
-            print(f"[summary] structural gate failed ({reason}) → returning error")
-            print(f"summary_returned_from=quality_gate_failed chapter={chap_id}")
-            return ("", "summary_quality_gate_failed", "error", missing,
-                    outline_json, coverage, False)
-        # Non-structural failure (coverage, shingle, similarity): return
-        # the summary with quality="partial" + the missing names.
-        print(f"[summary] non-structural gate failed ({reason}) → returning "
-              f"partial summary (NOT erroring)")
-        final_word_count = len(summary.split())
-        print(f"summary_returned_from=pass_b_partial chapter={chap_id}")
-        print(f"summary_stats chapter={chap_id} "
-              f"chars_sent_to_pass_a={chars_sent_to_pass_a} "
-              f"chars_sent_to_pass_b={chars_sent_to_pass_b} "
-              f"chars_in_full_chapter={full_chars} n_chunks={n_chunks} "
-              f"events_returned={events_count} regeneration_count={regeneration_count} "
-              f"final_word_count={final_word_count}")
-        return (summary, None, "partial", missing, outline_json, coverage, False)
+        print(f"[summary] summary_quality_degraded: "
+              f"coverage={metrics['coverage_pct']}% tail={metrics['tail_ok']} "
+              f"degeneracy={metrics['degeneracy_failed']}")
+        # Ship the best attempt — never error for quality
+        return (summary, "degraded", None)
 
-    # Log the final stats.
-    final_word_count = len(summary.split())
-    print(f"summary_returned_from=pass_b chapter={chap_id}")
-    print(f"summary_stats chapter={chap_id} "
-          f"chars_sent_to_pass_a={chars_sent_to_pass_a} "
-          f"chars_sent_to_pass_b={chars_sent_to_pass_b} "
-          f"chars_in_full_chapter={full_chars} n_chunks={n_chunks} "
-          f"events_returned={events_count} regeneration_count={regeneration_count} "
-          f"final_word_count={final_word_count}")
+    # Log the structured summary line
+    import json as _json
+    log_line = _json.dumps({
+        "chapter": chap_id,
+        "source_words": word_count,
+        "windows": n_windows,
+        "total_events": len(ledger),
+        "coverage_pct": metrics["coverage_pct"],
+        "tail_ok": metrics["tail_ok"],
+        "entity_pct": metrics["entity_pct"],
+        "quality": "ok",
+        "cache": "v12",
+    })
+    print(f"summary_log {log_line}")
 
-    return (summary, None, "ok", set(), outline_json, coverage, False)
+    return (summary, "ok", None)
 
 
 @app.route("/api/chapter/summary", methods=["POST"])
@@ -12191,10 +11851,10 @@ def api_chapter_summary():
                         "code": "no_transcript"}), 400
 
     # Check R2 cache (skip when force=true)
-    # ARIA: v9 cache namespace — invalidates all v8 summaries (which may contain
-    # the Pass A outline leak) + their Swara audio.
-    summary_cache_key = f"summaries/v11/{book_id}/{chapter_index}.en.json"
-    audio_cache_key = f"summaries/v11/{book_id}/{chapter_index}.en.mp3"
+    import hashlib as _hashlib
+    _text_hash = _hashlib.sha1(chapter_text.encode("utf-8")).hexdigest()[:16]
+    summary_cache_key = f"summaries/v12/{book_id}/{chapter_index}.{_text_hash}.en.json"
+    audio_cache_key = f"summaries/v12/{book_id}/{chapter_index}.{_text_hash}.en.mp3"
 
     if not force:
         try:
@@ -12228,31 +11888,27 @@ def api_chapter_summary():
     else:
         print(f"[summary] force=true — bypassing cache, regenerating fresh")
 
-    # Generate summary via Groq
+    # Generate summary via windowed map-reduce
     try:
-        summary, gen_code, quality, missing_set, outline, coverage, degraded = \
-            _generate_hindi_summary(None, chapter_text, chapter_title)
+        summary, quality, gen_code = _generate_chapter_summary(chapter_text, chapter_title)
         if not summary:
             _err_map = {
-                "groq_no_key": ("AI सेवा अभी उपलब्ध नहीं है", 503),
-                "groq_rate_limited": ("थोड़ी देर रुकें — बहुत सारे अनुरोध", 429),
-                "groq_all_models_failed": ("AI सेवा अभी उपलब्ध नहीं है", 503),
-                "empty_summary": ("सारांश खाली आया — बाद में कोशिश करें", 503),
-                "summary_pass_b_failed": ("सारांश बनाने में समस्या — बाद में कोशिश करें", 503),
-                "summary_quality_gate_failed": ("सारांश गुणवत्ता जाँच विफल — बाद में कोशिश करें", 503),
-                "internal": ("कुछ गलत हुआ — बाद में कोशिश करें", 500),
+                "groq_no_key": ("AI service unavailable", 503),
+                "groq_rate_limited": ("Rate limited — retrying", 429),
+                "groq_all_models_failed": ("AI service unavailable", 503),
+                "empty_summary": ("Summary came back empty — try again", 503),
+                "map_all_windows_empty": ("Could not extract events — try again", 503),
+                "reduce_empty": ("Could not generate summary — try again", 503),
+                "segmentation_failed": ("Chapter text too short", 400),
+                "internal": ("Something went wrong — try again", 500),
             }
             _msg, _sc = _err_map.get(gen_code or "empty_summary",
-                                     ("अभी उपलब्ध नहीं है, बाद में कोशिश करें", 503))
+                                     ("Summary unavailable, try again", 503))
             return jsonify({"error": _msg, "code": gen_code or "empty_summary"}), _sc
 
-        # Final last-resort sanitize before caching/returning.
-        summary = _sanitize_summary(summary)
-        if not summary:
-            return jsonify({"error": "सारांश खाली आया — बाद में कोशिश करें",
-                            "code": "empty_summary"}), 503
-
-        missing_list = sorted(missing_set) if missing_set else []
+        # No sanitize needed — _clean_summary_text already handles it
+        missing_list = []
+        degraded = (quality == "degraded")
 
         # Synthesize audio using the book's narration voice (English, not Hindi).
         # Fail-soft — empty audio_url is fine, the text summary is still returned.
@@ -12334,7 +11990,7 @@ def api_chapter_summary():
 
     except Exception:
         traceback.print_exc()
-        return jsonify({"error": "कुछ गलत हुआ — बाद में कोशिश करें",
+        return jsonify({"error": "Something went wrong — try again",
                         "code": "internal"}), 500
 
 
