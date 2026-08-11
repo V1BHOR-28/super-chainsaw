@@ -10858,8 +10858,9 @@ def api_bgm_cues(job_id, chapter_index):
 def api_chapter_summary(job_id, chapter_index):
     """Generate or fetch a cached English chapter summary.
 
-    Returns {summary, source, windows, cached} with long-cache headers.
-    Fail-soft: returns 503 with structured JSON on any error.
+    Single LLM call (Groq model ladder) with an extractive fallback. Returns
+    {summary, source, model, input_words, output_words, retries, cached} with
+    long-cache headers. Fail-soft: returns 503 with structured JSON on any error.
     """
     try:
         job, err, sc = _check_job_owner(job_id)
@@ -10900,14 +10901,21 @@ def api_chapter_summary(job_id, chapter_index):
         if not result:
             return jsonify({"error": "summary_failed", "code": "LLM_UNAVAILABLE"}), 503
 
-        print(f"[summary] {job_id}/{chapter_index}: windows={result.get('windows', 0)} "
-              f"ledger={len(result.get('ledger', []))} source={result.get('source', '?')} "
+        # Per-chapter logging: model used, input/output word counts, retry count.
+        print(f"[summary] {job_id}/{chapter_index}: model={result.get('model', '?')} "
+              f"input_words={result.get('input_words', 0)} "
+              f"output_words={result.get('output_words', 0)} "
+              f"retries={result.get('retries', 0)} "
+              f"source={result.get('source', '?')} "
               f"cached={result.get('cached', False)}")
 
         resp = jsonify({
             "summary": result["summary"],
             "source": result.get("source", ""),
-            "windows": result.get("windows", 0),
+            "model": result.get("model", ""),
+            "input_words": result.get("input_words", 0),
+            "output_words": result.get("output_words", 0),
+            "retries": result.get("retries", 0),
             "cached": result.get("cached", False),
         })
         resp.headers["Cache-Control"] = "public, max-age=604800"

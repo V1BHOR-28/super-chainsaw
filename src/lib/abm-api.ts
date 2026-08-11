@@ -531,7 +531,10 @@ export function getCoverUrl(jobId: string, hasCover: boolean): string {
 export interface ChapterSummaryResponse {
   summary: string;
   source: string;
-  windows: number;
+  model?: string;
+  input_words?: number;
+  output_words?: number;
+  retries?: number;
   cached: boolean;
 }
 

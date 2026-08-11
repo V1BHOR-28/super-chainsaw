@@ -1564,3 +1564,59 @@ Files modified:
 - src/components/aria/library-view.tsx (+30 lines: optimistic card upsert in handleConvertStarted)
 - src/lib/abm-api.ts (+6 lines: chapter_index_mismatch + thread_spawn_failed error codes)
 - src/components/aria/chapter-selector.tsx (+3 lines: comment documenting modal stays open on failure)
+
+---
+Task ID: SUMMARY-SINGLECALL
+Agent: main (Replace windowed map-reduce summary with single-call summary)
+Task: Replace the entire windowed map-reduce summary pipeline in chapter_summary.py with a single-call summary. Delete _segment_windows, the Pass A map step, the ledger merge, the coverage gate, and the degeneracy gate. Bump SUMMARY_CACHE_VERSION to v15. New single function summarize_chapter(title, text) -> str with a 2-model Groq ladder (kimi-k2 -> llama-3.3-70b) + extractive fallback, exact system prompt/params, deterministic post-checks with one retry, English only, per-chapter logging of model/in_words/out_words/retries.
+
+Work Log:
+- Read /home/z/my-project/mini-services/audiobook-maker/chapter_summary.py (357 lines): confirmed the 3-pass structure (segment_windows -> map_all -> build_ledger -> reduce_ledger -> is_degenerate/covers_tail gates) and CACHE_VERSION = "s1".
+- Read the /api/chapter_summary route in audiobook_app.py (lines 10857-10919): confirmed it calls get_or_create_summary(...) and returns {summary, source, windows, cached}, logging windows/ledger/source/cached.
+- Read frontend: src/lib/abm-api.ts (ChapterSummaryResponse had windows) + src/components/aria/chapter-summary-card.tsx (only reads summary.split(/\n{2,}/) — does NOT read windows/source/cached, so response-shape changes are safe).
+- Rewrote chapter_summary.py from scratch:
+  * SUMMARY_CACHE_VERSION = "v15" (was CACHE_VERSION="s1"). _r2_key now uses summaries/{job}/{idx}.v15.json.gz — all old s1/v9 caches structurally bypassed.
+  * Deleted: segment_windows, map_window, map_all, build_ledger, reduce_ledger, is_degenerate, covers_tail, ledger_fallback, _MAP_SYSTEM, _REDUCE_SYSTEM, _extractive_bullets, WINDOW_*/MAX_* constants, ThreadPoolExecutor import.
+  * Kept/adapted: _r2_get/_r2_put/_r2_key/_r2 caching, _sentences, _norm_for_dedup (used by post-checks), normalize_text -> _normalize.
+  * New _groq_client(): prefers generation_engine._llm_client (groq in prod), else standalone OpenAI client from ABM_LLM_API_KEY/ABM_LLM_API_BASE (groq default). None if no key.
+  * New _call_model(): one non-streaming chat.completions.create with temperature=0.3, max_tokens=900, presence_penalty=0.4, frequency_penalty=0.4, top_p=0.9. Returns (text|None, error|None). Never raises.
+  * New _maybe_truncate(): only if len > 100_000 chars, keep first 40% + last 40% joined by "\n[...]\n".
+  * New _SYSTEM_PROMPT: verbatim from spec (classic-lit summarizer, nested-speech rules, 2 paragraphs 120-200 words each, present tense, no preamble).
+  * New _clean(): strip markdown/preamble, collapse >2 paragraphs to 2.
+  * New _passes_checks(): >=2 paragraphs (split on blank line); rejects forbidden substrings ("the speaker","the narrator","In this chapter","Summary:"); no verbatim repeated sentence (via _norm_for_dedup); word count 200-450.
+  * New _extractive_fallback(): first 8 + last 6 substantive sentences (>=6 words), split at midpoint into 2 paragraphs.
+  * New _summarize_with_meta(title, text) -> (str, {model,input_words,output_words,retries,source}): walks _GROQ_MODELS ladder; per model: call -> clean -> check; on check-fail retry ONCE same model; on 2nd check-fail RETURN that output anyway (do not fall to next model); on API-call error fall to next model; if no model produces output, extractive fallback. Prints "[summary] model=... input_words=... output_words=... retries=... source=..." per chapter.
+  * New summarize_chapter(title, text) -> str: thin wrapper over _summarize_with_meta returning just the text.
+  * get_or_create_summary(job_id, chapter_index, chapter_text, chapter_title): now calls _summarize_with_meta, returns {summary, model, input_words, output_words, retries, source, text_sha, cached}. R2 cache round-trips the full dict (cached reads restore model/in_words/out_words/retries too).
+- Updated /api/chapter_summary route in audiobook_app.py: docstring updated; log line now prints model/input_words/output_words/retries/source/cached; response JSON now {summary, source, model, input_words, output_words, retries, cached} (windows/ledger dropped).
+- Updated src/lib/abm-api.ts ChapterSummaryResponse: dropped windows, added optional model/input_words/output_words/retries (card only reads summary, so no runtime impact).
+
+Verification:
+- python3 -m py_compile chapter_summary.py audiobook_app.py: BOTH PASS.
+- bun run lint: 0 errors, 0 warnings.
+- Post-check unit tests (all behave per spec):
+  * _maybe_truncate: 1000-char input unchanged; 150k-char input -> 40000 + "\n[...]\n" + 40000 (len 80007). OK.
+  * _passes_checks: 289-word 2-para valid summary -> True. Forbidden "In this chapter" -> False. Forbidden "the narrator" -> False. One paragraph -> False. 56-word too-short -> False. Verbatim-repeated sentences -> False. 168-word below-200 floor -> False. OK.
+  * _clean: 4 paragraphs -> 2. Strips ##/* markdown. OK.
+  * _extractive_fallback: produces exactly 2 paragraphs. OK.
+  * Empty input summarize_chapter("", "") -> "". OK.
+- Mock-client ladder tests (5 scenarios, FakeClient scripted per model):
+  1. kimi returns GOOD first try -> model=kimi, retries=0, source=llm.
+  2. kimi fails check (forbidden), retry returns GOOD -> model=kimi, retries=1, source=llm.
+  3. kimi fails check twice -> keep kimi's 2nd output, retries=1 (does NOT fall to llama). Matches "return the output anyway rather than erroring".
+  4. kimi call errors -> llama returns GOOD -> model=llama, retries=0, source=llm.
+  5. both models error -> extractive fallback, retries=0, source=fallback.
+  * Sampling params verified on the wire: temperature=0.3, max_tokens=900, presence_penalty=0.4, frequency_penalty=0.4, top_p=0.9, messages[0].role=system.
+- REAL CHAPTER TEST (Alice's Adventures in Wonderland, Ch. I "Down the Rabbit-Hole", public domain, 1364 words):
+  * Sandbox has no `openai` python lib and no ABM_LLM_API_KEY set, so _groq_client() returned None and the Groq ladder was skipped — the run exercised the EXTRACTIVE FALLBACK path.
+  * Reported numbers: model=extractive, input_words=1364, output_words=657, retries=0, source=fallback, 2 paragraphs.
+  * In production (Render: ABM_LLM_API_KEY set + ABM_LLM_API_BASE=groq + openai lib installed per worklog line 215), the same code path will call moonshotai/kimi-k2-instruct first, then llama-3.3-70b-versatile, and only fall to extractive if both are unreachable.
+- grep for deleted symbols (segment_windows/map_all/build_ledger/reduce_ledger/is_degenerate/covers_tail/ledger_fallback/generate_summary/CACHE_VERSION/_MAP_SYSTEM/_REDUCE_SYSTEM/WINDOW_WORDS/MAX_LEDGER) outside chapter_summary.py: ZERO matches. Clean.
+
+Stage Summary:
+Files modified:
+- mini-services/audiobook-maker/chapter_summary.py (full rewrite: 357 lines -> ~290 lines. Single-call summarize_chapter + _summarize_with_meta ladder. SUMMARY_CACHE_VERSION v15. All map-reduce/ledger/coverage/degeneracy code deleted.)
+- mini-services/audiobook-maker/audiobook_app.py (~30 lines in api_chapter_summary: new log line + new response shape {summary, source, model, input_words, output_words, retries, cached}.)
+- src/lib/abm-api.ts (ChapterSummaryResponse: windows -> optional model/input_words/output_words/retries.)
+
+Real-chapter numbers (extractive fallback, no groq key in sandbox): model=extractive, input_words=1364, output_words=657, retries=0. The Groq ladder + post-check retry logic is verified via mock-client tests and will run live in production.

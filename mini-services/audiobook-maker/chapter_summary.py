@@ -1,10 +1,13 @@
-"""chapter_summary — deterministic 3-pass English chapter summary.
+"""chapter_summary — single-call English chapter summary for the audiobook app.
 
-Pass A (map)    : each ~400-word window -> plain factual bullets (LLM, parallel)
-Pass B (merge)  : deterministic dedupe/ordering into one event ledger (no LLM)
-Pass C (reduce) : ledger -> exactly 2 English paragraphs (LLM)
+One LLM call sends the full chapter text in a single user message. A two-model
+Groq ladder (moonshotai/kimi-k2-instruct -> llama-3.3-70b-versatile) is tried in
+order; the first model that returns output wins. If both models are unavailable
+the summary degrades to an extractive sentence fallback. No chunking, no
+map-reduce, no language filters. Fail-soft: always returns text or empty string.
 
-No Hindi, no TTS, no translation. Fail-soft: always returns text or None.
+Cache namespace: SUMMARY_CACHE_VERSION = "v15" (bumped from "s1" — the old
+windowed map-reduce artifacts are structurally incompatible and must regenerate).
 """
 from __future__ import annotations
 
@@ -14,76 +17,80 @@ import json
 import os
 import re
 import tempfile
-from concurrent.futures import ThreadPoolExecutor
 
-CACHE_VERSION = "s1"
-WINDOW_WORDS = 400
-WINDOW_MIN_WORDS = 150
-MAX_WINDOWS = 24
-MAX_LEDGER_BULLETS = 40
-MAX_WORKERS = 4
+SUMMARY_CACHE_VERSION = "v15"
 
-_SENT_END = re.compile(r"[.!?;:\u2014]")
+# Over this size the MIDDLE of the chapter is dropped (first 40% + last 40%).
+MAX_CHARS = 100_000
+
+# Groq OpenAI-compatible model ladder — first model that returns output wins.
+_GROQ_MODELS = ("moonshotai/kimi-k2-instruct", "llama-3.3-70b-versatile")
+
+# Sampling parameters (applied to every model in the ladder).
+_TEMPERATURE = 0.3
+_MAX_TOKENS = 900
+_PRESENCE_PENALTY = 0.4
+_FREQUENCY_PENALTY = 0.4
+_TOP_P = 0.9
+
+# Post-check thresholds.
+_MIN_WORDS = 200
+_MAX_WORDS = 450
+_FORBIDDEN_SUBSTRINGS = ("the speaker", "the narrator", "In this chapter", "Summary:")
+
+_SENT_SPLIT = re.compile(r"(?<=[.!?])\s+")
 
 
-def normalize_text(text: str) -> str:
+def _normalize(text: str) -> str:
     text = (text or "").replace("\r", "\n")
     text = re.sub(r"[ \t]+", " ", text)
     text = re.sub(r"\n{3,}", "\n\n", text)
     return text.strip()
 
 
-def segment_windows(text: str, window_words: int = WINDOW_WORDS) -> list[str]:
-    """Bounded, lossless segmentation. start always advances (no infinite loop),
-    every source word appears exactly once, never more than MAX_WINDOWS windows."""
-    words = normalize_text(text).split()
-    if not words:
-        return []
-    n = len(words)
-    size = max(WINDOW_MIN_WORDS, window_words)
-    if n / size > MAX_WINDOWS:
-        size = -(-n // MAX_WINDOWS)  # ceil
-
-    windows: list[str] = []
-    start = 0
-    while start < n:
-        target = min(start + size, n)
-        end = target
-        if target < n:
-            slack = max(10, size // 6)
-            lo = max(start + size // 2, target - slack)
-            hi = min(n, target + slack)
-            for i in range(target, lo - 1, -1):
-                if _SENT_END.search(words[i - 1]):
-                    end = i
-                    break
-            else:
-                for i in range(target + 1, hi + 1):
-                    if _SENT_END.search(words[i - 1]):
-                        end = i
-                        break
-        if end <= start:            # hard progress guarantee
-            end = min(start + size, n)
-        windows.append(" ".join(words[start:end]))
-        start = end
-    while len(windows) > MAX_WINDOWS:
-        tail = windows.pop()
-        windows[-1] = windows[-1] + " " + tail
-    return windows
-
-
 def _sentences(text: str) -> list[str]:
-    parts = re.split(r"(?<=[.!?])\s+", (text or "").strip())
-    return [p.strip() for p in parts if p.strip()]
+    return [p.strip() for p in _SENT_SPLIT.split((text or "").strip()) if p.strip()]
 
 
-def _norm_bullet(b: str) -> str:
-    return re.sub(r"[^a-z0-9 ]+", "", b.lower()).strip()
+def _norm_for_dedup(s: str) -> str:
+    return re.sub(r"[^a-z0-9 ]+", "", s.lower()).strip()
 
 
-def _client():
+_SYSTEM_PROMPT = (
+    "You summarize chapters of classic literature for an audiobook app.\n\n"
+    "CRITICAL RULES ABOUT WHO IS SPEAKING:\n"
+    "- Classic texts nest speech several levels deep: the narrator quotes a "
+    "character, who quotes another character, who quotes a third.\n"
+    "- Before writing, silently identify the narrator and every named speaker.\n"
+    "- Never write 'the speaker', 'the narrator', 'a person', or an unanchored "
+    "'he'/'she'. Always use the character's name.\n"
+    "- When a character merely REPORTS what someone else did or said, write it as "
+    "reported speech ('Virgil recounts that Beatrice told him...'). Never write it "
+    "as an event the protagonist witnessed or performed.\n"
+    "- Do not state that two characters met, travelled together, or spoke to each "
+    "other unless the text says so directly.\n\n"
+    "OUTPUT FORMAT:\n"
+    "- Exactly two paragraphs of plain English prose. No headings, no bullets, no "
+    "markdown, no preamble, no 'In this chapter'.\n"
+    "- 120-200 words per paragraph.\n"
+    "- Paragraph 1: the first half of the chapter's events. Paragraph 2: the second "
+    "half, and it MUST cover how the chapter ends.\n"
+    "- Name every character who speaks or acts. Include any major simile or image.\n"
+    "- Third person, present tense, factual. No interpretation, no moralizing, no "
+    "invented detail."
+)
+
+
+def _groq_client():
+    """OpenAI-compatible client pointed at Groq.
+
+    Prefers the shared, already-initialized LLM client from generation_engine
+    (in production ABM_LLM_API_BASE points at Groq). Falls back to a standalone
+    client built from ABM_LLM_API_KEY / ABM_LLM_API_BASE. Returns None if no
+    key is available or the openai library is missing.
+    """
     try:
-        import generation_engine as ge
+        import generation_engine as ge  # type: ignore
         c = getattr(ge, "_llm_client", None)
         if c is not None:
             return c
@@ -94,141 +101,48 @@ def _client():
         return None
     try:
         from openai import OpenAI
-        return OpenAI(api_key=key,
-                      base_url=os.environ.get("ABM_LLM_API_BASE",
-                                              "https://api.groq.com/openai/v1"))
+        return OpenAI(
+            api_key=key,
+            base_url=os.environ.get("ABM_LLM_API_BASE",
+                                    "https://api.groq.com/openai/v1"),
+        )
     except Exception:
         return None
 
 
-def _models() -> list[str]:
-    raw = os.environ.get("ABM_SUMMARY_MODELS", "")
-    if raw.strip():
-        return [m.strip() for m in raw.split(",") if m.strip()]
-    return ["llama-3.3-70b-versatile", "llama-3.1-8b-instant"]
+def _call_model(client, model: str, system: str, user: str) -> tuple[str | None, str | None]:
+    """One non-streaming chat completion. Returns (text, error). Never raises."""
+    try:
+        r = client.chat.completions.create(
+            model=model,
+            messages=[{"role": "system", "content": system},
+                      {"role": "user", "content": user}],
+            temperature=_TEMPERATURE,
+            max_tokens=_MAX_TOKENS,
+            presence_penalty=_PRESENCE_PENALTY,
+            frequency_penalty=_FREQUENCY_PENALTY,
+            top_p=_TOP_P,
+        )
+        out = (r.choices[0].message.content or "").strip()
+        return (out or None), None
+    except Exception as e:  # noqa: BLE001 — fail-soft across the ladder
+        return None, str(e)
 
 
-def llm_chat(system: str, user: str, *, temperature: float = 0.3,
-             max_tokens: int = 900) -> str | None:
-    client = _client()
-    if client is None:
-        return None
-    for model in _models():
-        try:
-            r = client.chat.completions.create(
-                model=model,
-                messages=[{"role": "system", "content": system},
-                          {"role": "user", "content": user}],
-                temperature=temperature,
-                max_tokens=max_tokens,
-            )
-            out = (r.choices[0].message.content or "").strip()
-            if out:
-                return out
-        except Exception as e:
-            print(f"[summary] model {model} failed: {e}")
-    return None
+def _maybe_truncate(text: str) -> str:
+    """Only if the chapter exceeds MAX_CHARS, drop the middle: keep first 40% and
+    last 40% joined by '\\n[...]\\n'."""
+    if len(text) <= MAX_CHARS:
+        return text
+    keep = int(MAX_CHARS * 0.40)
+    return text[:keep] + "\n[...]\n" + text[-keep:]
 
 
-_MAP_SYSTEM = (
-    "You extract facts from one excerpt of a book chapter.\n"
-    "Rules:\n"
-    "- Output 3 to 6 bullet lines, each starting with '- '.\n"
-    "- Each bullet is one short third-person sentence about what actually "
-    "happens in THIS excerpt: who acts, what they do or say, where.\n"
-    "- Use only names and facts present in the excerpt. Invent nothing.\n"
-    "- Never say 'the narrator says' about another character's speech; "
-    "attribute speech to the character who speaks it.\n"
-    "- No analysis, no themes, no commentary, no preamble."
-)
-
-
-def _extractive_bullets(window: str, limit: int = 3) -> list[str]:
-    out = []
-    for s in _sentences(window):
-        s = " ".join(s.split())
-        if len(s.split()) >= 6:
-            out.append(s if len(s) <= 240 else s[:237] + "...")
-        if len(out) >= limit:
-            break
-    return out or [" ".join(window.split()[:40])]
-
-
-def map_window(window: str, idx: int, total: int) -> list[str]:
-    raw = llm_chat(
-        _MAP_SYSTEM,
-        f"Excerpt {idx + 1} of {total}:\n\n{window}",
-        temperature=0.2, max_tokens=500,
-    )
-    bullets: list[str] = []
-    for line in (raw or "").splitlines():
-        line = line.strip()
-        line = re.sub(r"^[-*\u2022]\s*", "", line)
-        line = re.sub(r"^\d+[.)]\s*", "", line)
-        if len(line.split()) >= 4:
-            bullets.append(line)
-    if not bullets:
-        bullets = _extractive_bullets(window)
-    return bullets[:6]
-
-
-def map_all(windows: list[str]) -> list[list[str]]:
-    total = len(windows)
-    if total == 0:
-        return []
-    with ThreadPoolExecutor(max_workers=min(MAX_WORKERS, total)) as ex:
-        return list(ex.map(lambda p: map_window(p[1], p[0], total),
-                           list(enumerate(windows))))
-
-
-def build_ledger(per_window: list[list[str]]) -> list[str]:
-    """Deterministic: reading order, drop near-duplicates, cap size while always
-    keeping the first and last window's bullets (protects the chapter ending)."""
-    seen: set[str] = set()
-    flat: list[tuple[int, str]] = []
-    for wi, bullets in enumerate(per_window):
-        for b in bullets:
-            k = _norm_bullet(b)
-            if not k or k in seen:
-                continue
-            seen.add(k)
-            flat.append((wi, b))
-    if len(flat) <= MAX_LEDGER_BULLETS:
-        return [b for _, b in flat]
-    last = len(per_window) - 1
-    keep_idx = [i for i, (wi, _) in enumerate(flat) if wi in (0, last)]
-    middle = [i for i in range(len(flat)) if i not in set(keep_idx)]
-    room = max(0, MAX_LEDGER_BULLETS - len(keep_idx))
-    if room and middle:
-        step = len(middle) / room
-        keep_idx += [middle[int(i * step)] for i in range(room)]
-    return [flat[i][1] for i in sorted(set(keep_idx))]
-
-
-_REDUCE_SYSTEM = (
-    "You write a plain English chapter summary for an audiobook app.\n"
-    "Input is an ordered list of facts from one chapter, in reading order.\n"
-    "Rules:\n"
-    "- Write exactly TWO paragraphs separated by one blank line.\n"
-    "- Paragraph 1: the first half of the chapter. Paragraph 2: the second "
-    "half, and it MUST cover how the chapter ends.\n"
-    "- 90 to 160 words per paragraph. Simple, clear, third person, past tense.\n"
-    "- Cover every fact given; do not add facts, quotes, themes or opinions.\n"
-    "- No headings, no bullets, no markdown, no preamble."
-)
-
-
-def reduce_ledger(ledger: list[str], chapter_title: str = "") -> str | None:
-    facts = "\n".join(f"- {b}" for b in ledger)
-    head = f"Chapter: {chapter_title}\n\n" if chapter_title else ""
-    return llm_chat(_REDUCE_SYSTEM, f"{head}Facts in reading order:\n{facts}",
-                    temperature=0.35, max_tokens=800)
-
-
-def clean_prose(text: str) -> str:
-    text = re.sub(r"^\s*(here('|\u2019)s|summary[:\-])\s*.*?\n", "", text or "",
+def _clean(raw: str) -> str:
+    """Strip common LLM preamble/markdown and collapse to <=2 paragraphs."""
+    text = re.sub(r"^\s*(here('|\u2019)s|summary[:\-])\s*.*?\n", "", raw or "",
                   flags=re.I)
-    text = re.sub(r"[*#`>]+", "", text)
+    text = re.sub(r"[*#>`]+", "", text)
     text = re.sub(r"\n{3,}", "\n\n", text).strip()
     paras = [" ".join(p.split()) for p in text.split("\n\n") if p.strip()]
     if len(paras) > 2:
@@ -237,66 +151,131 @@ def clean_prose(text: str) -> str:
     return "\n\n".join(paras)
 
 
-def is_degenerate(text: str) -> bool:
-    sents = [_norm_bullet(s) for s in _sentences(text) if s.strip()]
+def _passes_checks(text: str) -> bool:
+    """Cheap deterministic post-checks. See module docstring for the list."""
+    if not text:
+        return False
+    paras = [p.strip() for p in re.split(r"\n\s*\n", text) if p.strip()]
+    if len(paras) < 2:
+        return False
+    low = text.lower()
+    for bad in _FORBIDDEN_SUBSTRINGS:
+        if bad.lower() in low:
+            return False
+    norm = [_norm_for_dedup(s) for s in _sentences(text)]
+    norm = [s for s in norm if s]
+    if len(norm) != len(set(norm)):
+        return False
+    wc = len(text.split())
+    if wc < _MIN_WORDS or wc > _MAX_WORDS:
+        return False
+    return True
+
+
+def _extractive_fallback(title: str, text: str) -> str:
+    """Deterministic two-paragraph summary built from source sentences.
+
+    Used when no Groq model is reachable. Picks the first 8 + last 6 substantive
+    sentences and splits them into two paragraphs at the midpoint.
+    """
+    sents = [" ".join(s.split()) for s in _sentences(text) if len(s.split()) >= 6]
     if not sents:
-        return True
-    uniq = len(set(sents))
-    return uniq < max(3, int(len(sents) * 0.6))
-
-
-def covers_tail(text: str, ledger: list[str], tail_n: int = 3) -> bool:
-    body = _norm_bullet(text)
-    stop = {"the", "and", "was", "were", "with", "that", "then", "from", "his",
-            "her", "him", "she", "they", "them", "for", "had", "who", "into"}
-    for bullet in ledger[-tail_n:]:
-        toks = [w for w in _norm_bullet(bullet).split()
-                if len(w) > 3 and w not in stop]
-        if toks and any(t in body for t in toks):
-            return True
-    return not ledger
-
-
-def ledger_fallback(ledger: list[str]) -> str:
-    if len(ledger) > 14:
-        ledger = ledger[:8] + ledger[-6:]
-    sents = []
-    for b in ledger:
-        b = b.strip().rstrip(".")
-        if b:
-            sents.append(b[0].upper() + b[1:] + ".")
-    mid = max(1, len(sents) // 2)
-    return " ".join(sents[:mid]) + "\n\n" + " ".join(sents[mid:])
-
-
-def generate_summary(chapter_text: str, chapter_title: str = "") -> dict:
-    """Return {'summary': str, 'ledger': [...], 'windows': n, 'source': str}."""
-    windows = segment_windows(chapter_text)
-    if not windows:
-        return {"summary": "", "ledger": [], "windows": 0, "source": "empty"}
-    per_window = map_all(windows)
-    ledger = build_ledger(per_window)
-
-    for attempt in range(2):
-        raw = reduce_ledger(ledger, chapter_title)
-        if not raw:
+        sents = [" ".join(text.split()[:40])]
+    if len(sents) > 14:
+        sents = sents[:8] + sents[-6:]
+    capped = []
+    for s in sents:
+        s = s.strip().rstrip(".")
+        if not s:
             continue
-        prose = clean_prose(raw)
-        if (len(prose.split()) >= 80 and not is_degenerate(prose)
-                and covers_tail(prose, ledger)):
-            return {"summary": prose, "ledger": ledger,
-                    "windows": len(windows), "source": f"llm{attempt + 1}"}
-    return {"summary": clean_prose(ledger_fallback(ledger)), "ledger": ledger,
-            "windows": len(windows), "source": "fallback"}
+        capped.append(s[0].upper() + s[1:] + ".")
+    if not capped:
+        return ""
+    mid = max(1, len(capped) // 2)
+    return " ".join(capped[:mid]) + "\n\n" + " ".join(capped[mid:])
+
+
+def _summarize_with_meta(title: str, text: str) -> tuple[str, dict]:
+    """Run the single-call ladder. Returns (summary_text, meta).
+
+    meta = {model, input_words, output_words, retries, source}.
+    """
+    clean = _normalize(text)
+    if not clean:
+        return "", {"model": "none", "input_words": 0, "output_words": 0,
+                    "retries": 0, "source": "empty"}
+    body = _maybe_truncate(clean)
+    user_msg = (f"Chapter title: {title}\n\nFull chapter text:\n{body}\n\n"
+                f"Write the two-paragraph summary now.")
+    in_words = len(body.split())
+
+    client = _groq_client()
+    model_used = "extractive"
+    retries = 0
+    out: str | None = None
+
+    if client is not None:
+        for model in _GROQ_MODELS:
+            raw, err = _call_model(client, model, _SYSTEM_PROMPT, user_msg)
+            if not raw:
+                # API failure on this model -> try the next model in the ladder.
+                print(f"[summary] model {model} call failed: {err}")
+                continue
+            prose = _clean(raw)
+            if _passes_checks(prose):
+                out = prose
+                model_used = model
+                retries = 0
+                break
+            # Checks failed: retry ONCE with the same model.
+            raw2, err2 = _call_model(client, model, _SYSTEM_PROMPT, user_msg)
+            retries = 1
+            if raw2:
+                prose2 = _clean(raw2)
+                if _passes_checks(prose2):
+                    out = prose2
+                    model_used = model
+                    break
+                # Second failure: return the output anyway rather than erroring.
+                out = prose2
+                model_used = model
+                break
+            # Retry call itself failed: keep the first attempt's output.
+            out = prose
+            model_used = model
+            break
+
+    if not out:
+        out = _extractive_fallback(title, clean)
+        model_used = "extractive"
+        retries = 0
+
+    out_words = len(out.split())
+    meta = {
+        "model": model_used,
+        "input_words": in_words,
+        "output_words": out_words,
+        "retries": retries,
+        "source": "fallback" if model_used == "extractive" else "llm",
+    }
+    print(f"[summary] model={model_used} input_words={in_words} "
+          f"output_words={out_words} retries={retries} source={meta['source']}")
+    return out, meta
+
+
+def summarize_chapter(title: str, text: str) -> str:
+    """Single-call English chapter summary. Returns the summary text (never None)."""
+    out, _meta = _summarize_with_meta(title, text)
+    return out
 
 
 def _r2_key(job_id: str, chapter_index: int) -> str:
-    return f"summaries/{job_id}/{chapter_index}.{CACHE_VERSION}.json.gz"
+    return f"summaries/{job_id}/{chapter_index}.{SUMMARY_CACHE_VERSION}.json.gz"
 
 
 def _r2_get(job_id: str, chapter_index: int) -> dict | None:
     try:
-        import storage_backend
+        import storage_backend  # type: ignore
         if not storage_backend.is_enabled():
             return None
         key = _r2_key(job_id, chapter_index)
@@ -320,7 +299,7 @@ def _r2_get(job_id: str, chapter_index: int) -> dict | None:
 
 def _r2_put(job_id: str, chapter_index: int, payload: dict) -> bool:
     try:
-        import storage_backend
+        import storage_backend  # type: ignore
         if not storage_backend.is_enabled():
             return False
         fd, tmp = tempfile.mkstemp(suffix=".json.gz")
@@ -342,15 +321,28 @@ def _r2_put(job_id: str, chapter_index: int, payload: dict) -> bool:
 
 def get_or_create_summary(job_id: str, chapter_index: int, chapter_text: str,
                           chapter_title: str = "") -> dict | None:
+    """Cache-aware entry point used by the /api/chapter_summary route.
+
+    Returns a dict with: summary, model, input_words, output_words, retries,
+    source, cached, text_sha — or None if no summary could be produced.
+    """
     cached = _r2_get(job_id, chapter_index)
     if cached and cached.get("summary"):
         cached["cached"] = True
         return cached
-    result = generate_summary(chapter_text, chapter_title)
-    if not result.get("summary"):
+    summary, meta = _summarize_with_meta(chapter_title, chapter_text)
+    if not summary:
         return None
-    result["text_sha"] = hashlib.sha256(
-        (chapter_text or "").encode("utf-8")).hexdigest()[:16]
+    result = {
+        "summary": summary,
+        "model": meta["model"],
+        "input_words": meta["input_words"],
+        "output_words": meta["output_words"],
+        "retries": meta["retries"],
+        "source": meta["source"],
+        "text_sha": hashlib.sha256(
+            (chapter_text or "").encode("utf-8")).hexdigest()[:16],
+    }
     _r2_put(job_id, chapter_index, result)
     result["cached"] = False
     return result
