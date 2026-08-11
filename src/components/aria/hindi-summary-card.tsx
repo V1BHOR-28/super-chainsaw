@@ -184,12 +184,13 @@ export function HindiSummaryCard({
       ) {
         return;
       }
-      // Toast the server's message; fall back to generic Hindi only when
-      // there is none. Show a rate-limit-specific toast when code matches.
+      // Toast the server's message + include the machine code for diagnostics.
       const code = (err as HindiApiError)?.code;
       const msg = err instanceof Error ? err.message : "";
       if (code === "rate_limited" || code === "groq_rate_limited") {
-        toast.error("Rate limited — retrying");
+        toast.error(`Rate limited — retrying [${code}]`);
+      } else if (code) {
+        toast.error(`${msg || "Summary unavailable"} [${code}]`);
       } else {
         toast.error(msg || "Summary unavailable, try again");
       }

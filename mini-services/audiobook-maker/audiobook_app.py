@@ -11422,7 +11422,14 @@ def _dedupe_summary(text: str) -> str:
 
 
 def _clean_summary_llm_output(text: str) -> str:
-    """Strip markdown, drop non-Devanagari leading lines, dedupe, collapse newlines."""
+    """Strip markdown, drop LLM preamble lines, dedupe, collapse newlines.
+
+    Language-agnostic — works on both English and Hindi summaries.
+    Drops ONLY:
+    - lines matching ^(Here is|Here's|Sure|Certainly|Below is|Summary:)\\b
+    - lines that are pure markdown fences (``` ...)
+    - empty-after-strip lines (collapse to one blank line between paragraphs)
+    """
     if not text:
         return ""
     # Strip markdown: **bold**, *italic*, # headings, [text](url), `code`
@@ -11432,7 +11439,10 @@ def _clean_summary_llm_output(text: str) -> str:
     text = re.sub(r'\[([^\]]+)\]\([^)]+\)', r'\1', text)
     text = re.sub(r'`([^`]+)`', r'\1', text)
     text = re.sub(r'^[\s]*[-•·]\s+', '', text, flags=re.MULTILINE)
-    # Drop lines with no Devanagari (English preamble, "Here is...", etc.)
+    # Language-agnostic preamble filter: drop ONLY LLM meta-lines
+    _PREAMBLE_RE = re.compile(r'^(Here is|Here\'s|Sure|Certainly|Below is|Summary:)\b',
+                              re.IGNORECASE)
+    _FENCE_RE = re.compile(r'^```')
     lines = text.split("\n")
     kept = []
     for ln in lines:
@@ -11441,14 +11451,15 @@ def _clean_summary_llm_output(text: str) -> str:
             if kept and kept[-1] != "":
                 kept.append("")  # preserve one blank line between paragraphs
             continue
-        if not re.search(r"[\u0900-\u097F]", ln):
+        if _FENCE_RE.match(ln):
+            continue
+        if _PREAMBLE_RE.match(ln):
             continue
         kept.append(ln)
     text = "\n".join(kept).strip()
     # Collapse 3+ newlines to double
     text = re.sub(r'\n{3,}', '\n\n', text)
-    # ARIA: de-duplicate sentences/paragraphs BEFORE validation. This catches
-    # the degenerate loop where the model repeats the same sentence 15x.
+    # De-duplicate sentences/paragraphs BEFORE validation.
     text = _dedupe_summary(text)
     return text
 
@@ -11543,13 +11554,13 @@ def _extract_named_entities(parsed):
 def _validate_summary_v10(summary, parsed_outline):
     """Validate the final English summary against the Pass A JSON.
 
-    v10 gates (English, retuned):
+    v10.1 gates (English, retuned):
     a) Format gate: reject if numbered list, bullet chars, or meta-commentary opening.
     b) Degeneracy gate: reject if any 6-word shingle appears 3+ times, or if 3+
        sentences share the same first 3 tokens.
     c) Entity gate: reject if < 80% of named_entities appear in the summary.
     d) Tail gate: reject if < 70% of the final 15% of Pass A events are
-       represented (checked via key_quotes from the tail events).
+       represented.
 
     Returns (ok, reason, coverage, missing).
     """
@@ -11558,6 +11569,9 @@ def _validate_summary_v10(summary, parsed_outline):
 
     if _NON_INDIC_SCRIPT_RE.search(summary):
         return (False, "non_indic_script", 0.0, set())
+
+    # Hoist summary_lower — used by both entity gate and tail gate
+    summary_lower = summary.lower()
 
     # a) Format gate
     if _OUTLINE_LEAK_RE.search(summary):
@@ -11605,7 +11619,6 @@ def _validate_summary_v10(summary, parsed_outline):
     entities = _extract_named_entities(parsed_outline)
     missing = set()
     if entities:
-        summary_lower = summary.lower()
         present = set()
         for n in entities:
             if n.lower() in summary_lower:
@@ -11628,7 +11641,6 @@ def _validate_summary_v10(summary, parsed_outline):
             for ev in tail_events:
                 actor = (ev.get("actor") or "").strip()
                 action = (ev.get("action") or "").strip()
-                # Check if any key word from the event appears in the summary
                 check_words = [w.lower() for w in (actor + " " + action).split()
                                if len(w) > 3 and w.lower() not in {"the", "and", "but", "with", "from"}]
                 if any(w in summary_lower for w in check_words):
@@ -11895,7 +11907,7 @@ def _generate_hindi_summary_inner(groq_client, chapter_text: str, chapter_title:
 
     pass_b_user = (
         f"Outline (JSON):\n{outline_json}\n\n"
-        f"मूल अध्याय-पाठ:\n{pass_b_chapter_text}"
+        f"Chapter text:\n{pass_b_chapter_text}"
     )
     chars_sent_to_pass_b = len(pass_b_user)
     print(f"summary_pass_b_chars={chars_sent_to_pass_b} chapter={chap_id}")
@@ -11931,9 +11943,10 @@ def _generate_hindi_summary_inner(groq_client, chapter_text: str, chapter_title:
         missing_str = ", ".join(sorted(missing)[:15]) if missing else "(none)"
         retry_user = (
             pass_b_user + "\n\n"
-            f"पिछला प्रयास असफल: {reason}. "
-            f"इन नामों को शामिल करें: {missing_str}. "
-            f"दोहराव हटाएँ। केवल हिंदी गद्य लिखें।"
+            f"Previous attempt failed: {reason}. "
+            f"Include these names: {missing_str}. "
+            f"Rewrite the summary in plain English prose, remove repetition, "
+            f"include the listed names."
         )
         print(f"[summary] gate failed ({reason}) → retrying Pass B")
         raw_retry, _ = _groq_summary_call(
