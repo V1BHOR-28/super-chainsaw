@@ -10916,6 +10916,7 @@ def api_chapter_summary(job_id, chapter_index):
             "input_words": result.get("input_words", 0),
             "output_words": result.get("output_words", 0),
             "retries": result.get("retries", 0),
+            "text_sha": result.get("text_sha", ""),
             "cached": result.get("cached", False),
         })
         resp.headers["Cache-Control"] = "public, max-age=604800"
@@ -10925,6 +10926,296 @@ def api_chapter_summary(job_id, chapter_index):
         import traceback
         traceback.print_exc()
         return jsonify({"error": "summary_failed", "code": "LLM_UNAVAILABLE"}), 503
+
+
+# ─── Summary audio (edge-tts synthesis of the English chapter summary) ───
+# Helpers shared by POST /api/summary_audio below.
+
+import re as _re_summary_audio
+import asyncio as _asyncio_summary_audio
+import tempfile as _tempfile_summary_audio
+
+# English narrator voice + rate preset, matching the chapter-audio edge-tts
+# path (tts_split._edge_tts_call). One voice, one preset — no Hindi, no
+# translation, no per-voice selection. Hardcoded so summary audio always
+# matches the book's existing edge-tts narration.
+_SUMMARY_AUDIO_VOICE = "en-US-AriaNeural"
+_SUMMARY_AUDIO_RATE = "-10%"
+
+# R2 key namespace. The text_sha is encoded in the key so a regenerated
+# summary (new hash) naturally misses the cache and re-synthesizes — no
+# custom object metadata needed (R2 presigned-PUT path doesn't support it).
+def _summary_audio_r2_key(job_id, chapter_index, text_sha):
+    safe_sha = (text_sha or "0").replace("/", "_")[:16] or "0"
+    return f"summary_audio/{job_id}/{chapter_index}.{safe_sha}.mp3"
+
+
+def _sanitize_summary_for_tts(text):
+    """Sanitize an English chapter summary before edge-tts synthesis.
+
+    Mandatory cleaning (this broke TTS before):
+      - strip all SSML/XML tags and any literal "break time=...ms" text
+      - strip URLs, markdown (**, ##, -, >), and bracketed citations [..]
+      - collapse whitespace
+      - normalize smart quotes to ASCII
+    Returns the cleaned string (possibly empty).
+    """
+    if not text:
+        return ""
+    # SSML / XML tags: <break .../>, <speak>, <prosody ...>, any <tag ...>.
+    out = _re_summary_audio.sub(r"<[^>]+>", " ", text)
+    # Literal "break time=500ms" / "break time='2s'" text that leaked from
+    # LLM output mimicking SSML without the angle brackets.
+    out = _re_summary_audio.sub(r"\bbreak\s+time\s*=\s*['\"]?\d+\s*(?:ms|s)?['\"]?",
+                                " ", out, flags=_re_summary_audio.I)
+    # URLs (http/https/www).
+    out = _re_summary_audio.sub(r"\bhttps?://\S+|www\.\S+", " ", out)
+    # Bracketed citations [12], [see Ch. 3], (Ch. 3) -> keep parens content
+    # but drop square-bracket citations entirely.
+    out = _re_summary_audio.sub(r"\[[^\]]*\]", " ", out)
+    # Markdown: **bold**, ## headings, leading list bullets -, >, backticks.
+    out = _re_summary_audio.sub(r"\*\*|##+|^-+|>+|`+", " ", out, flags=_re_summary_audio.M)
+    # Smart quotes → ASCII.
+    out = (out.replace("\u2018", "'").replace("\u2019", "'")
+              .replace("\u201c", '"').replace("\u201d", '"')
+              .replace("\u2013", "-").replace("\u2014", "-")
+              .replace("\u2026", "..."))
+    # Collapse whitespace.
+    out = _re_summary_audio.sub(r"\s+", " ", out).strip()
+    return out
+
+
+def _synthesize_summary_mp3(text, out_path):
+    """Synthesize `text` to an MP3 at `out_path` via edge-tts.
+
+    Mirrors the /api/preview_audio edge-tts branch: one Communicate.save
+    call inside a fresh asyncio event loop. No word-timing capture, no
+    chunking — the summary is short (200-450 words). Never raises on the
+    happy path; raises on edge-tts failure so the caller can return 500.
+    """
+    import edge_tts
+    loop = _asyncio_summary_audio.new_event_loop()
+    try:
+        async def _run():
+            communicate = edge_tts.Communicate(
+                text=text, voice=_SUMMARY_AUDIO_VOICE, rate=_SUMMARY_AUDIO_RATE
+            )
+            await communicate.save(str(out_path))
+        loop.run_until_complete(_run())
+    finally:
+        loop.close()
+
+
+@app.route("/api/summary_audio", methods=["POST", "OPTIONS"])
+def api_summary_audio():
+    """Synthesize (or fetch a cached) MP3 of a chapter's English summary.
+
+    POST body: { book_id, chapter_index }
+
+    Pipeline:
+      1. Resolve the already-generated English summary for the chapter
+         (R2-cached or freshly generated via chapter_summary). If no
+         summary can be produced, return 409 {"code":"NO_SUMMARY"} — this
+         route does NOT generate a summary on its own.
+      2. Sanitize the summary text (strip SSML/XML/break-time/URLs/markdown/
+         citations, normalize smart quotes, collapse whitespace). Empty
+         after cleaning → 422 {"code":"EMPTY_SUMMARY"}.
+      3. Cache check by hash: the R2 key encodes the summary's text_sha, so
+         a regenerated summary (new hash) naturally misses → re-synthesize.
+         A hit returns the existing presigned URL with no synthesis.
+      4. Synthesize via edge-tts (en-US-AriaNeural @ -10%, matching chapter
+         audio). Upload to R2 at summary_audio/{book_id}/{chapter}.{sha}.mp3.
+         If R2 is not configured, serve the local temp file directly.
+      5. Return { url }.
+
+    CORS: handled by the global after_request hook (same as all routes).
+    """
+    try:
+        # ── Parse + validate body ──
+        body = request.get_json(silent=True) or {}
+        book_id = str(body.get("book_id") or "").strip()
+        chapter_index_raw = body.get("chapter_index")
+        if not book_id:
+            return jsonify({"error": "book_id required",
+                            "code": "BAD_REQUEST"}), 400
+        try:
+            chapter_index = int(chapter_index_raw)
+        except (TypeError, ValueError):
+            return jsonify({"error": "chapter_index must be an integer",
+                            "code": "BAD_REQUEST"}), 400
+
+        # ── Owner check (same helper as every other job-scoped route) ──
+        job, err, sc = _check_job_owner(book_id)
+        if err is not None:
+            if sc == 404:
+                return jsonify({"error": "Job not found",
+                                "code": "NOT_FOUND"}), 404
+            return err, sc
+
+        if book_id not in jobs:
+            try:
+                job = _reconstruct_job_from_storj(book_id, fallback_record=job)
+            except Exception:
+                return jsonify({"error": "Job not found",
+                                "code": "NOT_FOUND"}), 404
+
+        # ── Resolve chapter text + title (same logic as chapter_summary) ──
+        chapter_text = ""
+        chapter_title = ""
+        info = job.get("info")
+        if info and info.chapters:
+            for ch in info.chapters:
+                if ch.index == chapter_index:
+                    chapter_title = ch.title or ""
+                    chapter_text = getattr(ch, "text", "") or ""
+                    break
+        if not chapter_text or not chapter_text.strip():
+            _tc = job.get("transcript_cues") or {}
+            _tc_list = (_tc.get(chapter_index)
+                        or _tc.get(str(chapter_index)) or [])
+            if _tc_list:
+                chapter_text = " ".join(str(c[2]) for c in _tc_list
+                                        if len(c) >= 3)
+        if not chapter_text or not chapter_text.strip():
+            return jsonify({"error": "no chapter text",
+                            "code": "NO_TEXT"}), 404
+
+        # ── Load the already-generated summary (cache-first) ──
+        import chapter_summary
+        result = chapter_summary.get_or_create_summary(
+            book_id, chapter_index, chapter_text, chapter_title)
+        if not result or not result.get("summary"):
+            # No summary exists and none could be generated. Do NOT
+            # synthesize from the raw chapter text — the user asked for
+            # summary audio, not chapter audio.
+            return jsonify({"error": "no summary available for this chapter",
+                            "code": "NO_SUMMARY"}), 409
+
+        summary_text = result["summary"]
+        text_sha = result.get("text_sha", "") or "0"
+
+        # ── Sanitize before synthesis (mandatory) ──
+        clean_text = _sanitize_summary_for_tts(summary_text)
+        if not clean_text:
+            return jsonify({"error": "summary cleaned to empty",
+                            "code": "EMPTY_SUMMARY"}), 422
+
+        # ── Cache check: hash-encoded R2 key ──
+        import storage_backend
+        r2_key = _summary_audio_r2_key(book_id, chapter_index, text_sha)
+        r2_enabled = storage_backend.is_enabled()
+
+        # Local cache dir (used when R2 is not configured, e.g. sandbox/dev).
+        # Mirrors the R2 key structure on disk so the same hash-invalidation
+        # semantics apply: a regenerated summary (new sha) writes a new file.
+        local_dir = os.path.join(_DATA_DIR, "summary_audio", book_id)
+        local_path = os.path.join(local_dir, f"{chapter_index}.{text_sha}.mp3")
+
+        if r2_enabled and storage_backend.object_exists(r2_key):
+            # Cache hit AND hash matches (hash is in the key, so existence
+            # implies a match). Return the presigned URL — no synthesis.
+            url = storage_backend.presigned_get_url(
+                r2_key, download_name=f"summary_{chapter_index}.mp3")
+            print(f"[summary-audio] {book_id}/{chapter_index}: cache hit "
+                  f"(sha={text_sha}) key={r2_key}")
+            resp = jsonify({"url": url, "cached": True})
+            resp.headers["Cache-Control"] = "no-cache"
+            return resp
+        if not r2_enabled and os.path.isfile(local_path) and os.path.getsize(local_path) > 0:
+            # Local cache hit. Serve via the GET route below (relative URL
+            # that goes through the standard ABM proxy).
+            url = f"/api/abm/summary_audio_file/{book_id}/{chapter_index}"
+            print(f"[summary-audio] {book_id}/{chapter_index}: local cache "
+                  f"hit (sha={text_sha}) path={local_path}")
+            resp = jsonify({"url": url, "cached": True})
+            resp.headers["Cache-Control"] = "no-cache"
+            return resp
+
+        # ── Synthesize via edge-tts ──
+        os.makedirs(local_dir, exist_ok=True)
+        fd, tmp_path = _tempfile_summary_audio.mkstemp(suffix=".mp3")
+        os.close(fd)
+        try:
+            _synthesize_summary_mp3(clean_text, tmp_path)
+            if not os.path.isfile(tmp_path) or os.path.getsize(tmp_path) == 0:
+                return jsonify({"error": "edge-tts produced no audio",
+                                "code": "TTS_EMPTY"}), 502
+
+            file_size = os.path.getsize(tmp_path)
+            # Move the temp file into the local cache dir so the GET route
+            # can serve it (and so it survives across requests in dev).
+            shutil.move(tmp_path, local_path)
+            tmp_path = local_path  # for the finally-block cleanup guard
+
+            if r2_enabled:
+                storage_backend.upload_file(local_path, r2_key)
+                url = storage_backend.presigned_get_url(
+                    r2_key, download_name=f"summary_{chapter_index}.mp3")
+                print(f"[summary-audio] {book_id}/{chapter_index}: synthesized "
+                      f"voice={_SUMMARY_AUDIO_VOICE} rate={_SUMMARY_AUDIO_RATE} "
+                      f"sha={text_sha} bytes={file_size} key={r2_key} -> R2")
+                resp = jsonify({"url": url, "cached": False})
+            else:
+                url = f"/api/abm/summary_audio_file/{book_id}/{chapter_index}"
+                print(f"[summary-audio] {book_id}/{chapter_index}: synthesized "
+                      f"voice={_SUMMARY_AUDIO_VOICE} rate={_SUMMARY_AUDIO_RATE} "
+                      f"sha={text_sha} bytes={file_size} key={r2_key} -> local")
+                resp = jsonify({"url": url, "cached": False})
+            resp.headers["Cache-Control"] = "no-cache"
+            return resp
+        except Exception as synth_err:
+            print(f"[summary-audio] {book_id}/{chapter_index}: synthesis "
+                  f"failed: {synth_err}")
+            return jsonify({"error": f"synthesis failed: {synth_err}",
+                            "code": "TTS_FAILED"}), 502
+        finally:
+            # Best-effort cleanup of any leftover temp file (the successful
+            # path moved it into local_path already).
+            try:
+                if os.path.isfile(tmp_path) and tmp_path != local_path:
+                    os.remove(tmp_path)
+            except OSError:
+                pass
+
+    except Exception:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": "summary audio failed",
+                        "code": "INTERNAL"}), 500
+
+
+@app.route("/api/summary_audio_file/<job_id>/<int:chapter_index>")
+def api_summary_audio_file(job_id, chapter_index):
+    """Serve a locally-cached summary MP3 (dev/sandbox fallback when R2 is
+    not configured). Looks for the hash-encoded file under
+    {DATA_DIR}/summary_audio/{job_id}/{chapter}.<sha>.mp3 and serves the
+    first match with HTTP Range support. In production this route is unused
+    — R2 presigned URLs are returned directly by POST /api/summary_audio.
+    """
+    try:
+        job, err, sc = _check_job_owner(job_id)
+        if err is not None:
+            if sc == 404:
+                return jsonify({"error": "Job not found"}), 404
+            return err, sc
+    except Exception:
+        return jsonify({"error": "Job not found"}), 404
+
+    local_dir = os.path.join(_DATA_DIR, "summary_audio", job_id)
+    if not os.path.isdir(local_dir):
+        return jsonify({"error": "no summary audio for this chapter"}), 404
+    # Serve the file matching {chapter}.<sha>.mp3 (any sha — the newest
+    # written wins since only one summary hash is current at a time).
+    import glob
+    matches = sorted(glob.glob(os.path.join(local_dir, f"{chapter_index}.*.mp3")),
+                      key=os.path.getmtime, reverse=True)
+    if not matches:
+        return jsonify({"error": "no summary audio for this chapter"}), 404
+    return _send_file_throttled(
+        matches[0], as_attachment=False,
+        download_name=f"summary_{chapter_index}.mp3",
+        mimetype="audio/mpeg", conditional=True,
+    )
 
 
 @app.route("/api/bgm_debug/<job_id>/<int:chapter_index>")

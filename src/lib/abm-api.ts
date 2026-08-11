@@ -535,6 +535,7 @@ export interface ChapterSummaryResponse {
   input_words?: number;
   output_words?: number;
   retries?: number;
+  text_sha?: string;
   cached: boolean;
 }
 
@@ -550,4 +551,40 @@ export async function fetchChapterSummary(
     throw new Error(`Summary failed (${res.status})`);
   }
   return (await res.json()) as ChapterSummaryResponse;
+}
+
+/**
+ * Synthesize (or fetch a cached) MP3 of a chapter's English summary.
+ * POST /api/summary_audio — the Flask app edge-tts-synthesizes the summary
+ * text and returns a presigned R2 URL (or a local-serve URL in dev).
+ *
+ * On error, throws an Error whose message is the machine-readable code from
+ * the response body (e.g. "NO_SUMMARY", "EMPTY_SUMMARY", "TTS_FAILED") so
+ * the caller can surface it directly in a toast.
+ */
+export async function fetchChapterSummaryAudio(
+  jobId: string,
+  chapterIndex: number,
+  summaryHash?: string,
+): Promise<string> {
+  const res = await fetch(`${ABM_BASE}/summary_audio`, {
+    method: "POST",
+    headers: cidHeaders({ "Content-Type": "application/json" }),
+    body: JSON.stringify({
+      book_id: jobId,
+      chapter_index: chapterIndex,
+      summary_hash: summaryHash ?? "",
+    }),
+    credentials: "include",
+  });
+  if (!res.ok) {
+    const body = await res.json().catch(() => ({}));
+    const code = body?.code || body?.error || `HTTP_${res.status}`;
+    throw new Error(typeof code === "string" ? code : `HTTP_${res.status}`);
+  }
+  const data = (await res.json()) as { url: string; cached?: boolean };
+  if (!data?.url) {
+    throw new Error("NO_URL");
+  }
+  return data.url;
 }

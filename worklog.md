@@ -1620,3 +1620,253 @@ Files modified:
 - src/lib/abm-api.ts (ChapterSummaryResponse: windows -> optional model/input_words/output_words/retries.)
 
 Real-chapter numbers (extractive fallback, no groq key in sandbox): model=extractive, input_words=1364, output_words=657, retries=0. The Groq ladder + post-check retry logic is verified via mock-client tests and will run live in production.
+
+---
+Task ID: RESEARCH-SUMMARY-AUDIO
+Agent: general-purpose (research for summary-audio feature)
+Task: Research the audiobook-maker Flask + Next.js codebase to gather everything needed to implement a new POST /api/summary-audio route + frontend "Listen to summary" button. Read-only: report edge-tts synthesis path, R2 storage helpers (esp. metadata support), CORS pattern on Flask origin, existing /api/chapter_summary route shape, frontend chapter-summary-card.tsx + main chapter audio element + zustand store, and the abm-api.ts POST helper pattern. No code changes.
+
+Work Log:
+- Read worklog.md (1622 lines) to understand project context — most recent entries: SUMMARY-SINGLECALL (rewrote chapter_summary.py with single-call Groq ladder, SUMMARY_CACHE_VERSION=v15, response shape {summary, source, model, input_words, output_words, retries, cached}), GENERATE-STUCK-FIX, PASS-SEPARATION-V9. Earlier entry 7-frontend-rewrite established the abm-api.ts pattern using relative `/api/abm/...` paths through the Next.js proxy, with optional `NEXT_PUBLIC_ABM_DIRECT_URL` for large uploads.
+- Located edge-tts synthesis code: grep `edge_tts|Communicate` across the audiobook-maker service. Two call sites: (a) the main chapter pipeline in tts_split.py via `_edge_tts_call` → `generate_chunk_mp3` (called from generation_engine.py:4254 for each chunk); (b) a small inline pattern in audiobook_app.py:9120-9130 inside the `/api/preview_audio/<job_id>` route for short TTS previews. The preview pattern is the closest model for the new summary-audio route.
+- Read storage_backend.py end-to-end (223 lines) to confirm the upload/download/exists API and check for custom-metadata support. CRITICAL FINDING: `upload_file` uses presigned PUT URLs via `requests.put` and only passes `Bucket`, `Key`, `ContentType` — there is NO Metadata parameter and NO set_metadata/put_object-with-metadata helper anywhere in the module. Custom R2 object metadata is NOT supported by the current storage_backend.
+- Mapped the CORS pattern in audiobook_app.py: `_ALLOWED_ORIGINS` set built from `ABM_ALLOWED_ORIGINS` env var (line 253); `_origin_allowed()` (line 260) also accepts the request's own host + localhost dev; `_global_cors_preflight` before_request handler (line 275) short-circuits OPTIONS; `add_security_headers` after_request handler (line 334) adds `Access-Control-Allow-Origin` + `Access-Control-Allow-Credentials: true` + `Vary: Origin` to EVERY response whose Origin is allowlisted. So the new summary-audio route inherits CORS automatically — no per-route code needed.
+- Read the existing /api/chapter_summary route (audiobook_app.py:10857-10927) and chapter_summary.py (349 lines, esp. get_or_create_summary at line 322). Confirmed: response JSON includes {summary, source, model, input_words, output_words, retries, cached} but NOT text_sha — even though get_or_create_summary computes `text_sha = sha256(chapter_text)[:16]` and stores it in the cached R2 payload (chapter_summary.py:343-344). To cache summary audio by hash, the route either needs to expose text_sha in the response, recompute it from the chapter text in the new route, or accept the summary text in the POST body and hash it server-side.
+- Read `_check_job_owner` (audiobook_app.py:748-794): returns (job, error_response, status_code); uses cookie `_get_client_id()` vs `jobs[job_id]["client_id"]`, with download-token fallback for restart-survival and admin bypass.
+- Read frontend: src/components/aria/chapter-summary-card.tsx (118 lines, rendered inside player-view.tsx:354 when showTranscript is true). Currently props = {jobId, chapterIndex}; state = "collapsed"|"loading"|"loaded"|"error" + summary + errorStatus. Fetches via `fetchChapterSummary(jobId, chapterIndex)` from abm-api.ts and renders `summary.summary.split(/\n{2,}/)` paragraphs.
+- Read src/hooks/use-audio-engine.ts (327 lines): the main chapter audio is a single `new Audio()` element (line 42) stored in `audioRef` AND registered with the module-level singleton `audio-element-registry.ts` (line 48 calls `setAudioElement(a)`). It is wired to the `usePlayerStore` zustand store (src/lib/player-store.ts): `isPlaying` state drives `a.play()`/`a.pause()` in the useEffect at lines 80-90. The store exposes `play()` (line 237) and `pause()` (line 238) actions.
+- Read src/lib/abm-api.ts (554 lines) to extract the POST helper pattern: `ABM_BASE = "/api/abm"` relative prefix; `cidHeaders()` adds `X-ABM-Cid`; `credentials: "include"` everywhere; errors parsed via `body?.error_code || body?.error` with a switch translating machine codes to human messages. The `generate()` function (line 308) is the cleanest POST-with-JSON-body example to mirror.
+- Confirmed the chapter_summary cached R2 key is `summaries/{job_id}/{chapter_index}.{SUMMARY_CACHE_VERSION}.json.gz` (chapter_summary.py:273, currently v15) — a parallel `summaries_audio/{job_id}/{chapter_index}.{hash}.mp3` key namespace would be the natural fit for summary-audio caching (encoding the hash in the key, since storage_backend can't attach it as object metadata).
+
+Stage Summary:
+
+1) EDGE-TTS SYNTHESIS PATH
+   - Main chapter pipeline (chunk-level): `async def _edge_tts_call(text, voice, rate, output_path, max_retries=3)` at tts_split.py:463, called by `async def generate_chunk_mp3(text, voice, rate, output_path, max_retries=3)` at tts_split.py:565. Orchestration loop in generation_engine.py:4254 (`loop.run_until_complete(generate_chunk_mp3(block["text"], voice, rate, part_path))`). Per-chapter MP3s are then assembled by chunk concatenation.
+   - Preview/short-text pattern (closest model for summary-audio): inline in `/api/preview_audio/<job_id>` at audiobook_app.py:9120-9130:
+     ```python
+     import edge_tts
+     loop = asyncio.new_event_loop()
+     try:
+         async def _run():
+             communicate = edge_tts.Communicate(
+                 text=preview_text, voice=voice, rate=rate
+             )
+             await communicate.save(str(preview_path))
+         loop.run_until_complete(_run())
+     finally:
+         loop.close()
+     ```
+     Pattern: writes to a temp file path (str(preview_path)), then Flask serves it via `send_file(str(preview_path), mimetype="audio/mpeg", as_attachment=False, download_name="preview.mp3", conditional=True)` (audiobook_app.py:9210-9212). Bytes/BytesIO is NOT used — file path on disk is the contract.
+   - English narration voice: `en-US-AriaNeural` (Female) is the default. Defined in tts_split.py:
+     * Line 667: `_EDGE_FALLBACK_VOICES["en"] = "en-US-AriaNeural"`
+     * Line 682: `_EDGE_FALLBACK_DEFAULT = "en-US-AriaNeural"`
+     * Line 690: `_EDGE_FALLBACK_ACCENT[("en","us")] = {"Male": "en-US-GuyNeural", "Female": "en-US-AriaNeural"}`
+     * Line 714: `_EDGE_FALLBACK_GENDER["en"] = {"Male": "en-US-GuyNeural", "Female": "en-US-AriaNeural"}`
+     No env-var override for the default English voice; it's hardcoded. (`/api/preview_audio` defaults to `it-IT-IsabellaNeural` at audiobook_app.py:8840, but that's the Italian preview default — for English summary narration, hardcode `en-US-AriaNeural` in the new route.)
+   - Rate/pitch/volume preset for chapter narration (the "audiobook preset"): rate=`"-10%"`, pitch=`"-2Hz"`, hardcoded in `_edge_tts_call` at tts_split.py:497-499 and again in the stream-fallback at line 523-524. The `rate` param passed by the caller is IGNORED for the actual Communicate call — only used for the truncation check (see comment at lines 476-480). Volume is not set (edge-tts default). The preview route at audiobook_app.py:9124-9125 does NOT apply this preset (uses the raw `rate` query param, no pitch) — for the summary-audio route we should match the chapter preset (rate=`"-10%"`, pitch=`"-2Hz"`) so the summary sounds like the rest of the book, OR omit pitch and use `+0%` for a faster "summary voice" — design decision for the implementer.
+   - Output: writes to a file path on disk via `communicate.save(path)` or the streaming capture into `open(path, "wb")` (tts_split.py:504). No BytesIO. The new summary-audio route should follow the same pattern: write to a temp file in `UPLOAD_DIR / job_id / "summary_{chapter_idx}_{hash}.mp3"`, then `send_file(..., mimetype="audio/mpeg", conditional=True)` for Range support.
+
+2) R2 STORAGE HELPERS (storage_backend.py)
+   - `is_enabled()` — line 33. True iff boto3 installed + ABM_S3_ENDPOINT/ACCESS_KEY/SECRET_KEY/BUCKET all set.
+   - `upload_file(local_path, key)` — line 69. Signature: `(local_path, key)`. Returns None on success, raises RuntimeError on HTTP failure. Uses presigned PUT URL + `requests.put`; detects ContentType from extension (.mp3 → "audio/mpeg"). CRITICAL: does NOT accept a Metadata parameter — only `Bucket`, `Key`, `ContentType` go into the presigned URL Params (line 88).
+   - `download_file(key, local_path)` — line 113. Uses `presigned_get_url` + `requests.get(stream=True)`. Returns None on success, raises RuntimeError on non-200.
+   - `object_exists(key)` — line 101. head_object; returns False on 404.
+   - `object_size(key)` — line 125. head_object returning ContentLength.
+   - `presigned_get_url(key, download_name=None, ttl=None)` — line 152. Default TTL `_PRESIGN_TTL` = 21600s (6h, line 27).
+   - `presigned_put_url(key, ttl=None)` — line 167.
+   - `delete_object(key)` — line 177. `list_prefix(prefix)` — line 182. `delete_prefix(prefix)` — line 208. `get_range(key, start, end)` — line 140.
+   - CUSTOM METADATA: NOT SUPPORTED. There is no `put_object(Metadata={...})` call, no `copy_object` to add metadata post-hoc, no `set_metadata` helper, no way to read Metadata back. To associate a `summary_hash` with an R2 object we must either (a) encode it in the key (e.g. `summaries_audio/{job_id}/{chapter_idx}.{hash}.mp3` — mirrors how chapter_summary.py uses `summaries/{job}/{idx}.{VERSION}.json.gz` at line 273), or (b) extend storage_backend.py with a new `upload_file_with_metadata(local_path, key, metadata)` helper that uses boto3's `put_object(Metadata=...)` directly (bypassing the presigned-URL workaround). Option (a) is the path of least resistance and is the established pattern in this codebase.
+
+3) CORS PATTERN ON FLASK ORIGIN
+   - The Flask app has GLOBAL CORS for all routes via two hooks — no per-route code is needed:
+     * `_ALLOWED_ORIGINS` set built from `ABM_ALLOWED_ORIGINS` env var (audiobook_app.py:253-257). Example: `ABM_ALLOWED_ORIGINS=https://ariaggn.vercel.app,http://localhost:3000`.
+     * `_origin_allowed(origin)` (line 260-272): True if origin is in `_ALLOWED_ORIGINS`, OR equals `request.host_url` (same-origin), OR is `http://localhost:*` / `http://127.0.0.1:*`.
+     * `@app.before_request _global_cors_preflight()` (line 275-294): short-circuits OPTIONS with `Access-Control-Allow-Origin: <origin>`, `Allow-Credentials: true`, `Allow-Methods: GET, POST, PUT, DELETE, OPTIONS`, `Allow-Headers: <requested or "Content-Type, X-ABM-Cid, Authorization">`, `Max-Age: 86400`, `Vary: Origin`. Runs BEFORE `_csrf_protect` so OPTIONS isn't 403'd.
+     * `@app.after_request add_security_headers(response)` (line 334-345): for EVERY response, if `Origin` header is present AND `_origin_allowed(Origin)`, sets `Access-Control-Allow-Origin: <origin>`, `Access-Control-Allow-Credentials: true`, and appends `Origin` to `Vary`. This is what makes direct-origin routes (Vercel → Flask) work without a per-route decorator.
+   - No flask-cors library. No per-route `@cross_origin` decorator. The new `/api/summary_audio` route automatically inherits CORS — when called via the Next.js proxy (`/api/abm/summary_audio`) it's same-origin (no CORS needed); when called via `NEXT_PUBLIC_ABM_DIRECT_URL` direct-to-Flask the after_request hook adds the CORS headers.
+   - `@app.after_request _set_client_cookie(response)` at line 15600 also sets `SameSite=None; Secure` on the `abm_cid` cookie for cross-origin allowlisted requests under HTTPS (lines 15618-15626), so the auth cookie survives direct-origin XHR. The new route will benefit from this automatically.
+
+4) EXISTING /api/chapter_summary ROUTE
+   - Route: `@app.route("/api/chapter_summary/<job_id>/<int:chapter_index>")` GET — audiobook_app.py:10857-10927.
+   - Response JSON shape (line 10912-10920):
+     ```json
+     { "summary": "...", "source": "llm|fallback", "model": "...",
+       "input_words": int, "output_words": int, "retries": int, "cached": bool }
+     ```
+     PLUS `Cache-Control: public, max-age=604800` header (line 10921). The response does NOT include the summary text's hash (`text_sha`) — that field is computed inside `chapter_summary.get_or_create_summary()` (chapter_summary.py:343-344) and stored in the R2-cached payload, but stripped from the HTTP response. The frontend currently receives no hash to send back on a subsequent summary-audio call.
+   - Chapter text + title resolution (audiobook_app.py:10878-10896):
+     1. `info = job.get("info")`; iterate `info.chapters` matching `ch.index == chapter_index`; set `chapter_title = ch.title`, `chapter_text = ch.text`.
+     2. If empty, fallback to `job["transcript_cues"][chapter_index]` joined as space-separated words (line 10890-10893).
+     3. If still empty → 404 `{"error": "no_text", "code": "NO_TEXT"}`.
+   - Owner check: `_check_job_owner(job_id)` at audiobook_app.py:748-794. Returns `(job, err, sc)`. Resolution: (a) if `job_id not in jobs`, scan `_download_tokens` for a persisted snapshot and return that as a minimal job dict (restart-survival); (b) if owner client_id is set, caller's `_get_client_id()` (cookie-based) must match, else 403 (admin bypass via `_admin_auth_ok`); (c) legacy jobs without client_id log a SECURITY-WARN and pass through. The new summary-audio route should use the same helper at the top.
+
+5) FRONTEND: chapter-summary-card.tsx + MAIN CHAPTER AUDIO ELEMENT
+   - chapter-summary-card.tsx (src/components/aria/chapter-summary-card.tsx, 118 lines):
+     * Props: `{ jobId: string; chapterIndex: number }`.
+     * State: `state: "collapsed" | "loading" | "loaded" | "error"`; `summary: ChapterSummaryResponse | null`; `errorStatus: string`.
+     * Fetch: `handleLoad` calls `fetchChapterSummary(jobId, chapterIndex)` from `@/lib/abm-api`. Mounted inside player-view.tsx:354 (keyed by currentChapterIdx, rendered only when `showTranscript` is true).
+     * Renders: a "Show summary" button (collapsed state), a spinner (loading), an error+Retry (error), or a card with `summary.summary.split(/\n{2,}/)` paragraphs (loaded). The new "Listen to summary" button should be added to the "loaded" state alongside the existing summary text.
+   - Main chapter audio element:
+     * Component: src/hooks/use-audio-engine.ts (mounted once at the workspace root via audiobook-workspace.tsx).
+     * Audio element ref: `audioRef = useRef<HTMLAudioElement | null>(null)` at line 23; instantiated as `const a = new Audio()` at line 42; also registered in the module-level singleton `src/lib/audio-element-registry.ts` via `setAudioElement(a)` at line 48.
+     * Control: wired to the `usePlayerStore` zustand store (src/lib/player-store.ts). `isPlaying` state at line 62; the useEffect at use-audio-engine.ts:80-90 calls `a.play()` or `a.pause()` based on `isPlaying`. Store actions: `play: () => set({ isPlaying: true })` at player-store.ts:237; `pause: () => set({ isPlaying: false })` at player-store.ts:238; `toggle` at line 239.
+   - Cleanest way to pause the main chapter audio from chapter-summary-card.tsx (no prop-drilling, no event bus, no DOM querySelector):
+     ```typescript
+     import { usePlayerStore } from "@/lib/player-store";
+     // Inside the "Listen to summary" click handler, BEFORE starting summary audio:
+     usePlayerStore.getState().pause();
+     ```
+     This flips `isPlaying: false` in the store, which the use-audio-engine.ts useEffect picks up and calls `a.pause()` on the actual audio element — UI buttons (play/pause icon) stay in sync automatically. Alternative if direct element access is needed: `import { getAudioElement } from "@/lib/audio-element-registry"; const a = getAudioElement(); if (a && !a.paused) a.pause();` — but this leaves the store's `isPlaying` flag stale (UI shows "playing" while audio is paused), so the zustand `pause()` action is preferred.
+
+6) ABM-API FETCH HELPERS (src/lib/abm-api.ts, 554 lines)
+   - Pattern summary:
+     * `const ABM_BASE = "/api/abm"` (line 18) — all routes go through the Next.js catch-all proxy at `/api/abm/[...path]`, so requests are same-origin (no CORS). The Flask `add_security_headers` after_request hook only adds CORS headers when an Origin header is present, so the proxy path needs no CORS handling at all.
+     * `cidHeaders(extra?)` (line 30-35): merges `extra` headers + `X-ABM-Cid: <localStorage.abm_cid>` if present. Used on every request so the Flask backend can identify the owner even when the cookie isn't carried (e.g. direct-origin uploads).
+     * `credentials: "include"` on every fetch — carries the `abm_cid` HttpOnly cookie set by Flask's `_set_client_cookie` after_request hook (audiobook_app.py:15600).
+     * Direct-origin bypass for large bodies: `analyzeEpub()` (line 236-301) reads `process.env.NEXT_PUBLIC_ABM_DIRECT_URL`, validates it starts with `http`, and POSTs directly to `${directUrl}/api/analyze` instead of the proxy. Falls back to proxy if invalid. Only used when the body would exceed Vercel's ~4.5MB request limit. For the new summary-audio POST (small JSON body), the proxy path is fine — no need for the direct-origin bypass.
+     * Error parsing: `const body = await res.json().catch(() => ({}))`; `const errorCode = body?.error_code || body?.error || ""`; switch on errorCode translating machine codes to human messages; final fallback `msg = body?.error || body?.message || \`<Verb> failed (${res.status})\``; `throw new Error(msg)`. See generate() at line 332-353 for the canonical switch.
+   - Example POST function to mirror (verbatim from src/lib/abm-api.ts:308-355):
+     ```typescript
+     export async function generate(
+       jobId: string,
+       voice: string,
+       selectedChapters: number[],
+       outputFormat: "mp3" | "m4b" | "zip" = "mp3",
+       rate: string = "+0%",
+       bgmMode: "off" | "runtime" | "prerender" = "off",
+       language: "en" | "hinglish" = "en",
+     ): Promise<void> {
+       const res = await fetch(`${ABM_BASE}/generate`, {
+         method: "POST",
+         headers: cidHeaders({ "Content-Type": "application/json" }),
+         body: JSON.stringify({
+           job_id: jobId,
+           voice,
+           rate,
+           selected_chapters: selectedChapters,
+           output_format: outputFormat,
+           single_file: false,
+           bgm_mode: bgmMode,
+           language,
+         }),
+         credentials: "include",
+       });
+       if (!res.ok) {
+         const body = await res.json().catch(() => ({}));
+         const errorCode = body?.error_code || body?.error || "";
+         let msg: string;
+         if (errorCode === "payment_required" || errorCode === "free_quota_exhausted") {
+           msg = "This voice requires payment (Gemini premium). Try an edge-tts voice instead — they're free.";
+         } else if (errorCode === "gemini_tts_not_configured") {
+           msg = "Gemini TTS is not configured on the server. Try an edge-tts voice instead.";
+         } else if (errorCode === "gemini_overload") {
+           msg = "Gemini voices are temporarily overloaded. Try again in a few minutes, or use an edge-tts voice.";
+         } else if (errorCode === "selection_too_large") {
+           msg = body?.error || "Selection too large. Reduce the number of chapters.";
+         } else if (errorCode === "invalid_voice") {
+           msg = "Invalid voice selected. Pick a different voice.";
+         } else if (body?.error === "Session expired. Re-upload file.") {
+           msg = "This book's session has expired (server restarted). Re-upload the EPUB to convert more chapters.";
+         } else {
+           msg = (body && (body.error || body.message)) || `Generate failed (${res.status})`;
+         }
+         throw new Error(msg);
+       }
+     }
+     ```
+   - For the new summary-audio call, mirror this shape: `fetchChapterSummaryAudio(jobId, chapterIndex, summaryHash)` → POST `${ABM_BASE}/summary_audio` with JSON body `{job_id, chapter_index, summary_hash}` and `cidHeaders({"Content-Type": "application/json"})`. The backend can return either (a) JSON `{audio_url: "/api/abm/summary_audio/<job_id>/<idx>?hash=..."}` (then the frontend sets `audio.src = audio_url` and plays), or (b) the MP3 bytes directly with `Content-Type: audio/mpeg` (then the frontend does `URL.createObjectURL(await res.blob())`). Option (a) is preferred because it gives the browser HTTP Range support for free and matches the `getChapterMp3Url()` pattern at abm-api.ts:508-511.
+
+NEXT ACTIONS for the implementer:
+- Backend (audiobook_app.py): add `@app.route("/api/summary_audio", methods=["POST"])` (or `@app.route("/api/summary_audio/<job_id>/<int:chapter_index>")` GET mirroring chapter_mp3). Use `_check_job_owner`; resolve chapter text via the same info.chapters loop as api_chapter_summary; recompute `text_sha = sha256(chapter_text)[:16]` and compare with the `summary_hash` from the request; if `summaries_audio/{job_id}/{chapter_idx}.{hash}.mp3` exists on disk or R2, serve it (send_file or redirect to presigned_get_url); else synthesize via `edge_tts.Communicate(text=summary_text, voice="en-US-AriaNeural", rate="-10%", pitch="-2Hz").save(path)` inside an asyncio loop (mirror audiobook_app.py:9120-9130), upload to R2 via `storage_backend.upload_file(path, key)`, serve. Hardcode the English voice + audiobook preset.
+- Backend (chapter_summary.py or audiobook_app.py api_chapter_summary): expose `text_sha` in the /api/chapter_summary JSON response so the frontend can send it back. One-line change at audiobook_app.py:10912-10920 to add `"text_sha": result.get("text_sha", "")`.
+- Backend (storage_backend.py): NO changes needed if the hash is encoded in the R2 key. If true object metadata is desired, add a new helper `upload_file_with_metadata(local_path, key, metadata: dict)` that calls `_get_client().put_object(Bucket=_BUCKET, Key=_full_key(key), Body=open(local_path,'rb'), Metadata=metadata, ContentType=...)` directly (bypassing the presigned-URL path). Recommend the key-encoding approach.
+- Frontend (chapter-summary-card.tsx): add a "Listen to summary" button in the "loaded" state. On click: `usePlayerStore.getState().pause()` to stop the main chapter audio, then either set `audio.src = summaryAudioUrl` on a new `<audio ref>` local to the card OR call `fetchChapterSummaryAudio(...)` to get the URL first. Mirror the loading/error state machine already in the card.
+- Frontend (abm-api.ts): add `ChapterSummaryAudioResponse` interface + `fetchChapterSummaryAudio(jobId, chapterIndex, summaryHash)` POST helper, mirroring `generate()` exactly.
+- CORS: nothing to do — the global `add_security_headers` after_request hook covers the new route automatically.
+
+---
+Task ID: SUMMARY-AUDIO
+Agent: main (Add "Listen to summary" button — English edge-tts summary audio)
+Task: Add a "Listen to summary" button to the chapter summary card that synthesizes the already-generated English summary via the existing edge-tts path (no new TTS provider). Backend: POST /api/summary_audio with SSML/URL/markdown sanitization, R2 cache keyed by summary hash (hash mismatch -> re-synthesize), CORS on Flask origin. Frontend: 3-state button (idle/loading/playing), audio ref cleanup on chapter change/unmount, pause main chapter audio on summary play (no auto-resume), machine-code error toast. English only — no Hindi/translation logic.
+
+Work Log:
+- Delegated research to RESEARCH-SUMMARY-AUDIO subagent (worklog lines 1624-1785). Key findings:
+  * edge-tts pattern: edge_tts.Communicate(text, voice, rate).save(path) in asyncio loop (audiobook_app.py:9120-9130, /api/preview_audio).
+  * English narrator voice: en-US-AriaNeural @ rate="-10%" (tts_split._edge_tts_call).
+  * R2 storage_backend: upload_file/download_file/object_exists/presigned_get_url — but NO custom object metadata (presigned PUT path). Solution: encode summary hash in the R2 KEY so cache invalidation is automatic on hash mismatch.
+  * CORS: global after_request hook (audiobook_app.py:334) covers all routes — no per-route code needed.
+  * /api/chapter_summary response did NOT include text_sha (though get_or_create_summary computes it) — needed to expose it so the frontend can echo it back.
+  * Main chapter audio: usePlayerStore.pause() flips isPlaying=false -> audio engine pauses the <audio> element via useEffect (use-audio-engine.ts:80-90). Cleanest way to pause main audio from the card.
+  * Frontend POST pattern: fetchChapterSummaryAudio mirrors generate() in abm-api.ts (cidHeaders + credentials:include + JSON body + error-code parsing).
+
+BACKEND (audiobook_app.py):
+
+Part 1 — Expose text_sha in /api/chapter_summary response (1-line):
+- Added "text_sha": result.get("text_sha", "") to the jsonify({...}) block at line 10919.
+
+Part 2 — Helpers (lines 10931-11006):
+- _SUMMARY_AUDIO_VOICE = "en-US-AriaNeural", _SUMMARY_AUDIO_RATE = "-10%" (matches chapter audio edge-tts preset). English only, hardcoded, no per-voice selection.
+- _summary_audio_r2_key(job_id, chapter_index, text_sha): f"summary_audio/{job_id}/{chapter_index}.{sha}.mp3". Hash in key = automatic cache invalidation on summary regeneration.
+- _sanitize_summary_for_tts(text): strips SSML/XML tags (<break/>, <speak>, etc.), literal "break time=500ms" text, URLs (http/https/www), square-bracket citations [12], markdown (**, ##, -, >, `), normalizes smart quotes (U+2018/9/C/D/3/4/26) to ASCII, collapses whitespace. Returns possibly-empty string.
+- _synthesize_summary_mp3(text, out_path): edge_tts.Communicate(text=..., voice=en-US-AriaNeural, rate=-10%).save(out_path) in a fresh asyncio.new_event_loop(). Mirrors /api/preview_audio edge-tts branch exactly.
+
+Part 3 — POST /api/summary_audio route (lines 11009-11184):
+- methods=["POST", "OPTIONS"]. Body: { book_id, chapter_index }.
+- Owner check via _check_job_owner (same as every job-scoped route).
+- Chapter text resolution: same info.chapters loop as /api/chapter_summary, with transcript_cues fallback.
+- Loads the already-generated summary via chapter_summary.get_or_create_summary (R2-cached or fresh). If no summary -> 409 {"code":"NO_SUMMARY"}. Does NOT synthesize from raw chapter text.
+- Sanitizes summary text. Empty after cleaning -> 422 {"code":"EMPTY_SUMMARY"}.
+- Cache check (hash-encoded key): if R2 enabled AND object_exists(r2_key) -> return presigned_get_url (no synthesis). If R2 not enabled AND local file exists at {DATA_DIR}/summary_audio/{job_id}/{chapter}.{sha}.mp3 -> return /api/abm/summary_audio_file/{job_id}/{chapter_index} URL.
+- Synthesize: edge-tts to temp file, move to local cache dir, upload to R2 if enabled. Returns {url, cached:false}. Logs voice/rate/sha/bytes/key.
+- Error codes: BAD_REQUEST (400), NOT_FOUND (404), NO_TEXT (404), NO_SUMMARY (409), EMPTY_SUMMARY (422), TTS_EMPTY (502), TTS_FAILED (502), INTERNAL (500).
+
+Part 4 — GET /api/summary_audio_file/<job_id>/<int:chapter_index> (lines 11187-11218):
+- Dev/sandbox fallback: serves the locally-cached summary MP3 with HTTP Range support via _send_file_throttled. Finds {chapter}.<sha>.mp3 (newest by mtime). Unused in production (R2 presigned URLs returned directly).
+
+FRONTEND:
+
+Part 5 — abm-api.ts (lines 538-590):
+- Added text_sha?: string to ChapterSummaryResponse.
+- New fetchChapterSummaryAudio(jobId, chapterIndex, summaryHash?): POST /api/summary_audio. Returns the url string. On error, throws Error whose message IS the machine code from body.code (e.g. "NO_SUMMARY", "EMPTY_SUMMARY", "TTS_FAILED") — caller surfaces it directly in the toast.
+
+Part 6 — chapter-summary-card.tsx (full rewrite, 233 lines):
+- New state: audioState "idle"|"loading"|"playing". audioRef (HTMLAudioElement|null). audioChapterRef ({jobId,chapterIndex}|null) to track which chapter the audio belongs to.
+- teardownAudio(): pauses element, sets src="", nulls ref + chapter ref, flips state to idle.
+- useEffect cleanup on [jobId, chapterIndex, teardownAudio]: calls teardownAudio() on chapter change or unmount. This is the mandatory cleanup — stale audio refs used to keep a chapter's audio playing over the next chapter.
+- handleListenClick():
+  * If audioRef exists for THIS chapter: toggle play/pause on the same element. No new fetch.
+  * First click for this chapter: setAudioState("loading") -> fetchChapterSummaryAudio(jobId, chapterIndex, summary.text_sha) -> create new Audio(url) -> attach ended/pause listeners -> usePlayerStore.getState().pause() (pause main chapter audio, NO auto-resume) -> a.play() -> setAudioState("playing").
+  * On error: toast({title:"Summary audio failed", description:`Summary audio failed (${code})`}) where code is the machine code from the Error message.
+- Button JSX (3 states): idle = Play icon + "Listen to summary"; loading = Loader2 spinner + "Preparing audio…" (disabled); playing = Pause icon + "Pause". aria-label per state.
+- React Compiler: dependency array uses `summary` (not summary?.text_sha) to satisfy preserve-manual-memoization rule.
+
+Verification:
+- python3 -m py_compile audiobook_app.py: PASSES.
+- bun run lint: 0 errors, 0 warnings.
+- _sanitize_summary_for_tts unit tests (8 cases): SSML tags stripped, literal "break time=500ms" stripped, URLs stripped, markdown (**, ##, -, >, `) stripped, bracketed citations [12] stripped, smart quotes normalized to ASCII, whitespace collapsed, empty-after-cleaning returns "". All pass.
+- _summary_audio_r2_key: "summary_audio/job123/7.abc123def4567890.mp3" (hash in key). Empty sha -> "summary_audio/job123/7.0.mp3".
+- REAL edge-tts synthesis test (installed edge-tts 7.2.8 into /home/z/.venv):
+  * Input: 183-word 2-paragraph summary of Dante's Inferno Canto I (English).
+  * voice id: en-US-AriaNeural
+  * rate: -10%
+  * input words: 183, input chars: 1029
+  * summary sha (sha256[:16]): f93d0813cb5316eb
+  * R2 key: summary_audio/test_job/0.f93d0813cb5316eb.mp3
+  * file size: 470,160 bytes (459.1 KB)
+  * MP3 magic bytes: fff364 (valid frame sync — real MP3)
+  * est duration: ~29.4s
+- The synthesis used the EXACT same edge_tts.Communicate(text=..., voice="en-US-AriaNeural", rate="-10%").save(path) call that _synthesize_summary_mp3 uses, with the EXACT same voice+rate preset as chapter audio (tts_split._edge_tts_call).
+
+Stage Summary:
+Files modified:
+- mini-services/audiobook-maker/audiobook_app.py (+290 lines: text_sha in /api/chapter_summary response; _SUMMARY_AUDIO_VOICE/_RATE constants; _summary_audio_r2_key; _sanitize_summary_for_tts; _synthesize_summary_mp3; POST /api/summary_audio route; GET /api/summary_audio_file route)
+- src/lib/abm-api.ts (+60 lines: text_sha in ChapterSummaryResponse; fetchChapterSummaryAudio POST helper)
+- src/components/aria/chapter-summary-card.tsx (full rewrite: +115 lines — 3-state "Listen to summary" button, audio ref lifecycle, main-audio pause, machine-code toast)
+
+Reported numbers (real chapter):
+- voice id: en-US-AriaNeural
+- R2 key: summary_audio/test_job/0.f93d0813cb5316eb.mp3
+- file size: 470,160 bytes (459.1 KB)
+- English only. No Hindi, no translation. Reuses the existing edge-tts synthesis path — no new TTS provider.
+
+No git push — implementation + verification only, per the task spec.
