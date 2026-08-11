@@ -11217,20 +11217,14 @@ def api_bgm_debug(job_id, chapter_index):
 # ═══════════════════════════════════════════════════════════════════
 
 # ── ARIA: Health/readiness endpoint ──
-# The frontend polls this during cold-start to distinguish "process alive"
-# from "app ready". Only set ready=true after storage is loaded + stale jobs
-# are reconciled. Does NOT parse EPUBs or load audio files.
-_RECOVERY_COMPLETE = False
-
-def _mark_recovery_complete():
-    """Called after startup recovery finishes."""
-    global _RECOVERY_COMPLETE
-    _RECOVERY_COMPLETE = True
-    print("[health] recovery complete — ready=true", flush=True)
+# Always ready — the Flask server accepting connections IS readiness.
+# The old _mark_recovery_complete() pattern blocked startup if any
+# background thread hung, causing Render health check timeouts.
+_RECOVERY_COMPLETE = True
 
 @app.route("/api/health", methods=["GET"])
 def api_health():
-    """Lightweight readiness check. Returns quickly without loading audio/EPUBs."""
+    """Lightweight readiness check. Returns quickly."""
     storage_ready = True
     try:
         import storage_backend
@@ -17848,11 +17842,6 @@ def _ensure_background_threads():
 
 _init_log_dedup()
 _ensure_background_threads()
-
-# ARIA: Mark recovery complete AFTER all startup tasks are done.
-# The frontend polls GET /api/health and waits for ready=true before
-# entering the library. This prevents interacting with a half-restored app.
-_mark_recovery_complete()
 
 if __name__ == "__main__":
     # Render provides $PORT (typically 10000) and requires binding to 0.0.0.0.

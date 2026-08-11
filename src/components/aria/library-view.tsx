@@ -29,7 +29,6 @@ import {
   getJobChapters,
   deleteJob,
   isPollingStatus,
-  checkHealth,
   type MyJob,
   type AnalyzeResponse,
   type AnalyzeChapter,
@@ -248,8 +247,6 @@ export function LibraryView() {
   // Set when the first fetch exceeds ~8s OR fails with 502/timeout/network
   // error (then we retry with backoff before surfacing the real error).
   const [wakingUp, setWakingUp] = useState(false);
-  const [healthReady, setHealthReady] = useState(false);
-  const healthAbortRef = useRef<AbortController | null>(null);
   const [hoveredJob, setHoveredJob] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
   const [analyzeResponse, setAnalyzeResponse] = useState<AnalyzeResponse | null>(null);
@@ -375,49 +372,20 @@ export function LibraryView() {
     await fetchJobsWithRetry(false);
   }, [fetchJobsWithRetry]);
 
-  // ── Health polling: wait for backend readiness before fetching jobs ──
-  // The backend sets ready=true only after storage is loaded + stale jobs
-  // are reconciled. We poll every 2-3s until ready, then fetch jobs.
+  // ── Initial fetch: load library as soon as userId is available ──
+  // The old health-polling pattern blocked library loading if the backend
+  // was slow to respond to /api/health, causing a deadlock where the user
+  // stared at a "waking up" screen forever. The cold-start retry logic in
+  // fetchJobsWithRetry already handles Render's spin-up time.
   useEffect(() => {
     if (userId === "anon") return;
-    setHealthReady(false);
-    // Abort any previous health-poll cycle
-    if (healthAbortRef.current) healthAbortRef.current.abort();
-    const ac = new AbortController();
-    healthAbortRef.current = ac;
-
-    let stopped = false;
-    const poll = async () => {
-      while (!stopped && !ac.signal.aborted) {
-        try {
-          const h = await checkHealth(ac.signal);
-          if (h.ready) {
-            setHealthReady(true);
-            return;
-          }
-          setWakingUp(true);
-        } catch {
-          setWakingUp(true);
-        }
-        await new Promise((r) => setTimeout(r, 2500));
-      }
-    };
-    poll();
-    return () => { stopped = true; ac.abort(); };
-  }, [userId]);
-
-  useEffect(() => {
-    // Don't fetch until the real userId is available (not "anon") AND
-    // the backend health check says ready=true.
-    if (userId === "anon") return;
-    if (!healthReady) return;
     // Initial fetch with cold-start retry logic.
     const minLoadTimer = new Promise<void>((r) => setTimeout(r, 1500));
     Promise.all([
       fetchJobsWithRetry(true),
       minLoadTimer,
     ]).finally(() => setLoading(false));
-  }, [fetchJobsWithRetry, userId, healthReady]);
+  }, [fetchJobsWithRetry, userId]);
 
   // Poll while any job is still generating / optimizing / translating.
   // Also send heartbeats to keep generating jobs alive (the Flask app cancels
