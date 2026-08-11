@@ -10854,6 +10854,71 @@ def api_bgm_cues(job_id, chapter_index):
     return resp
 
 
+@app.route("/api/chapter_summary/<job_id>/<int:chapter_index>")
+def api_chapter_summary(job_id, chapter_index):
+    """Generate or fetch a cached English chapter summary.
+
+    Returns {summary, source, windows, cached} with long-cache headers.
+    Fail-soft: returns 503 with structured JSON on any error.
+    """
+    try:
+        job, err, sc = _check_job_owner(job_id)
+        if err is not None:
+            if sc == 404:
+                return jsonify({"error": "Job not found", "code": "NOT_FOUND"}), 404
+            return err, sc
+
+        if job_id not in jobs:
+            try:
+                job = _reconstruct_job_from_storj(job_id, fallback_record=job)
+            except Exception:
+                return jsonify({"error": "Job not found", "code": "NOT_FOUND"}), 404
+
+        # Resolve chapter text
+        chapter_text = ""
+        chapter_title = ""
+        info = job.get("info")
+        if info and info.chapters:
+            for ch in info.chapters:
+                if ch.index == chapter_index:
+                    chapter_title = ch.title or ""
+                    chapter_text = getattr(ch, "text", "") or ""
+                    break
+
+        if not chapter_text or not chapter_text.strip():
+            _tc = job.get("transcript_cues") or {}
+            _tc_list = _tc.get(chapter_index) or _tc.get(str(chapter_index)) or []
+            if _tc_list:
+                chapter_text = " ".join(str(c[2]) for c in _tc_list if len(c) >= 3)
+
+        if not chapter_text or not chapter_text.strip():
+            return jsonify({"error": "no_text", "code": "NO_TEXT"}), 404
+
+        import chapter_summary
+        result = chapter_summary.get_or_create_summary(
+            job_id, chapter_index, chapter_text, chapter_title)
+        if not result:
+            return jsonify({"error": "summary_failed", "code": "LLM_UNAVAILABLE"}), 503
+
+        print(f"[summary] {job_id}/{chapter_index}: windows={result.get('windows', 0)} "
+              f"ledger={len(result.get('ledger', []))} source={result.get('source', '?')} "
+              f"cached={result.get('cached', False)}")
+
+        resp = jsonify({
+            "summary": result["summary"],
+            "source": result.get("source", ""),
+            "windows": result.get("windows", 0),
+            "cached": result.get("cached", False),
+        })
+        resp.headers["Cache-Control"] = "public, max-age=604800"
+        return resp
+
+    except Exception:
+        import traceback
+        traceback.print_exc()
+        return jsonify({"error": "summary_failed", "code": "LLM_UNAVAILABLE"}), 503
+
+
 @app.route("/api/bgm_debug/<job_id>/<int:chapter_index>")
 def api_bgm_debug(job_id, chapter_index):
     """Diagnostic endpoint for BGM cue generation.

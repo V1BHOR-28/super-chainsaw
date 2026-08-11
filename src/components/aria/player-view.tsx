@@ -31,6 +31,7 @@ import { AmbientGlow, StatusPill, AriaDivider } from "./primitives";
 import { NowPlayingBars } from "./waveform";
 import { BookCover } from "./book-cover";
 import { TranscriptView } from "./transcript-view";
+import { ChapterSummaryCard } from "./chapter-summary-card";
 import { getJobChapters, type AnalyzeResponse, type ChapterMp3Info } from "@/lib/abm-api";
 
 /**
@@ -348,7 +349,16 @@ export function PlayerView() {
           {/* ARIA: synced-transcript panel. Word-by-word highlighting
               driven by useWordSync's rAF loop reading audio.currentTime
               directly. Toggle is the AlignLeft icon in the header. */}
-          {showTranscript && <TranscriptView />}
+          {showTranscript && (
+            <>
+              <ChapterSummaryCard
+                key={currentChapterIdx}
+                jobId={job?.jobId ?? ""}
+                chapterIndex={job?.chapterMp3s?.[currentChapterIdx]?.index ?? -1}
+              />
+              <TranscriptView />
+            </>
+          )}
         </div>
       </main>
 

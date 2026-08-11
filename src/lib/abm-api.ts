@@ -525,3 +525,26 @@ export function getCoverUrl(jobId: string, hasCover: boolean): string {
   const cid = getStoredClientId();
   return `${ABM_BASE}/cover/${jobId}${cid ? `?cid=${encodeURIComponent(cid)}` : ""}`;
 }
+
+/* ──── Chapter summary ──── */
+
+export interface ChapterSummaryResponse {
+  summary: string;
+  source: string;
+  windows: number;
+  cached: boolean;
+}
+
+export async function fetchChapterSummary(
+  jobId: string,
+  chapterIndex: number,
+): Promise<ChapterSummaryResponse> {
+  const res = await fetch(
+    `${ABM_BASE}/chapter_summary/${jobId}/${chapterIndex}`,
+    { credentials: "include", headers: cidHeaders() },
+  );
+  if (!res.ok) {
+    throw new Error(`Summary failed (${res.status})`);
+  }
+  return (await res.json()) as ChapterSummaryResponse;
+}
