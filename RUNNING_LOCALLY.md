@@ -1,66 +1,62 @@
-# Setting Up a Permanent Local Audiobook Backend with Cloudflare Tunnel
+# Setting Up a Permanent Local Audiobook Backend with ngrok Tunnel
 
-This guide walks you through running the Audiobook backend locally via Docker and connecting your Vercel-hosted frontend to it using a **stable, permanent Cloudflare Tunnel URL** that never changes when Docker or your laptop restarts.
+This guide walks you through running the Audiobook backend locally via Docker and connecting your Vercel-hosted frontend to it using a **stable, permanent ngrok Tunnel URL** that never changes when Docker or your laptop restarts.
 
 ---
 
 ## How the Stable URL Works
 
-Unlike temporary tunnels that generate a new random domain every restart, a **Named Cloudflare Tunnel** uses a token bound to your Cloudflare Zero Trust account. 
-- The token connects outbound to Cloudflare servers.
-- Your public domain (e.g. `aria.yourdomain.com`) is configured once in Cloudflare's dashboard.
+With ngrok's free tier, you can claim a **free static domain** (e.g. `aria-audiobook.ngrok-free.app` or `abruptly-coastland-strangely.ngrok-free.dev`).
+- The domain is reserved exclusively for your ngrok account.
+- The `tunnel` service inside Docker connects outbound using your `NGROK_AUTHTOKEN` and binds to your reserved domain.
 - Every time you start Docker with `docker compose up -d`, it reconnects to the exact same URL automatically.
 
 ---
 
 ## Step-by-Step Setup Guide
 
-### 1. Sign Up for Cloudflare Zero Trust
-1. Go to [Cloudflare Zero Trust Console](https://one.dash.cloudflare.com).
-2. Log in with your Cloudflare account (free tier, no credit card required).
+### 1. Get Your Free ngrok Auth Token
+1. Log in at [ngrok Dashboard](https://dashboard.ngrok.com).
+2. Go to **Your Authtoken** ([dashboard.ngrok.com/get-started/your-authtoken](https://dashboard.ngrok.com/get-started/your-authtoken)).
+3. Copy your authtoken.
 
-### 2. Create a Named Tunnel
-1. In the Zero Trust sidebar, navigate to **Networks** → **Tunnels**.
-2. Click **Add a tunnel**.
-3. Choose **Cloudflared** as the connector type and click **Next**.
-4. Name your tunnel (e.g., `aria-audiobook`) and click **Save tunnel**.
+### 2. Claim Your Free Static Domain
+1. In the ngrok sidebar, navigate to **Cloud Edge** → **Domains** ([dashboard.ngrok.com/domains](https://dashboard.ngrok.com/domains)).
+2. Claim your free static domain (e.g. `your-name.ngrok-free.app` or `abruptly-coastland-strangely.ngrok-free.dev`).
 
-### 3. Copy Your Tunnel Token
-1. On the **Install and run a connector** page, select **Docker**.
-2. Copy the token string inside the run command (the long token starting with `eyJ...`).
-3. Open your local `.env` file in the repo directory and set:
-   ```env
-   CF_TUNNEL_TOKEN=eyJ...your-copied-token-here...
-   ```
+### 3. Add Credentials to Your Local `.env`
+Open `.env` in your project folder and set:
+```env
+NGROK_AUTHTOKEN=your-ngrok-authtoken-here
+NGROK_DOMAIN=your-static-domain.ngrok-free.app
+ABM_ALLOWED_ORIGINS=https://ariaggn.vercel.app,http://localhost:3000
+```
 
-### 4. Configure Public Hostname Routing
-1. On the next screen (**Route traffic**), add a **Public Hostname**:
-   - **Subdomain**: `aria` (or your preferred subdomain)
-   - **Domain**: Choose your domain connected to Cloudflare
-   - **Type**: `HTTP`
-   - **URL**: `audiobook:5601` *(Note: use `audiobook:5601`, matching the Docker container name and internal port)*
-2. Click **Save hostname**.
-
-### 5. Start the Local Docker Setup
+### 4. Start the Local Docker Setup
 In your terminal inside the project directory:
 ```bash
-docker compose up -d
+docker compose up -d --build
 ```
 Docker will start both the `audiobook` backend service and the `tunnel` connector service.
 
-### 6. Verify Your Permanent Public Endpoint
+To view live tunnel connection logs:
+```bash
+docker compose logs -f tunnel
+```
+
+### 5. Verify Your Permanent Public Endpoint
 Test your tunnel URL in a browser or terminal:
 ```bash
-curl https://aria.yourdomain.com/api/voices
+curl https://your-static-domain.ngrok-free.app/api/voices
 ```
 You should receive a JSON list of available Edge TTS voices.
 
-### 7. Connect Vercel Frontend to Your Local Backend
+### 6. Connect Vercel Frontend to Your Local Backend
 1. Go to your [Vercel Dashboard](https://vercel.com).
 2. Select your **ARIA** project → **Settings** → **Environment Variables**.
 3. Set or update:
    ```env
-   ABM_SERVICE_URL=https://aria.yourdomain.com
+   ABM_SERVICE_URL=https://your-static-domain.ngrok-free.app
    ```
 4. Trigger a new deployment on Vercel (or push a commit).
 
@@ -70,7 +66,7 @@ You should receive a JSON list of available Edge TTS voices.
 
 | Command | What it does |
 |---|---|
-| `docker compose up -d` | Starts backend + tunnel in detached background mode |
-| `docker compose logs -f tunnel` | Views live Cloudflare Tunnel connection logs |
+| `docker compose up -d --build` | Starts/rebuilds backend + ngrok tunnel |
+| `docker compose logs -f tunnel` | Views live ngrok tunnel logs |
 | `docker compose ps` | Checks health status of backend and tunnel containers |
 | `docker compose stop` | Safely stops containers without losing audio data |

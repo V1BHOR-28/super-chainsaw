@@ -1,4 +1,4 @@
-# docker-compose.yml — audiobook-maker backend (Docker, local-first) + Cloudflare Tunnel.
+# docker-compose.yml — audiobook-maker backend (Docker, local-first) + ngrok Tunnel.
 
 services:
   audiobook:
@@ -19,12 +19,14 @@ services:
       start_period: 15s
 
   tunnel:
-    image: cloudflare/cloudflared:latest
-    restart: unless-stopped
-    command: tunnel --no-autoupdate run --token ${CF_TUNNEL_TOKEN}
+    image: ngrok/ngrok:latest
+    environment:
+      - NGROK_AUTHTOKEN=${NGROK_AUTHTOKEN}
+    command: http audiobook:5601 --domain=${NGROK_DOMAIN}
     depends_on:
       audiobook:
         condition: service_healthy
+    restart: unless-stopped
 
 volumes:
   audiobook_data:
