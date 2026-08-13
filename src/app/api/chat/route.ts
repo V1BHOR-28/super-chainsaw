@@ -602,6 +602,11 @@ export async function POST(req: NextRequest) {
             // If streaming fails (429, 402, etc.), fall through to the existing
             // non-streaming parallel approach below.
             let streamedDirectly = false
+            // Track which provider actually produced the reply + whether a fallback
+            // was triggered. Used for logging/telemetry below — declared up-front
+            // so the streaming block and the parallel-race block can both assign.
+            let providerUsed: string | undefined
+            let fallbackHappened = false
             try {
               const streamResponse = await fetch('https://openrouter.ai/api/v1/chat/completions', {
                 method: 'POST',
@@ -939,6 +944,16 @@ export async function POST(req: NextRequest) {
               }
             }
             } // end if (!streamedDirectly) — closes the non-streaming fallback block
+
+            // One final telemetry line — which provider actually produced this
+            // reply, and whether we had to fall back. Helps debug "why did ARIA
+            // take 8s to respond" without digging through prior logs.
+            console.log(`[chat.llm] Reply complete`, {
+              provider: providerUsed,
+              fallback: fallbackHappened,
+              streamed: streamedDirectly,
+              chars: fullText.length,
+            })
           } catch (e) {
             const errMsg = e instanceof Error ? e.message : String(e)
             console.error('[chat.llm] Detailed error:', {
