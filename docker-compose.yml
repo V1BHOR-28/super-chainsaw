@@ -22,7 +22,7 @@ services:
     image: ngrok/ngrok:latest
     environment:
       - NGROK_AUTHTOKEN=${NGROK_AUTHTOKEN}
-    command: http audiobook:5601 --domain=${NGROK_DOMAIN}
+    command: http audiobook:5601 --url=${NGROK_DOMAIN}
     depends_on:
       audiobook:
         condition: service_healthy
