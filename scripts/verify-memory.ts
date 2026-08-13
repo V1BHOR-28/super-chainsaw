@@ -63,7 +63,7 @@ async function checkConversationOrdering() {
 
 async function checkPersonalConfidenceNotDowngraded() {
   const src = await getFileContent('src/app/api/memory/detect/route.ts')
-  const pass = !/category === 'personal'.*confidence === 'high'.*confidence: 'medium'/s.test(src)
+  const pass = !/category === 'personal'[\s\S]*confidence === 'high'[\s\S]*confidence: 'medium'/.test(src)
   results.push({ name: 'no-personal-downgrade', pass, detail: pass ? 'Downgrade rule removed.' : 'Downgrade rule still present in detect/route.ts' })
 }
 

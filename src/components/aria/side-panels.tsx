@@ -1,6 +1,6 @@
 'use client'
 
-import { useEffect, useRef, useState } from 'react'
+import React, { useEffect, useRef, useState } from 'react'
 import { isPast, differenceInCalendarDays } from 'date-fns'
 import {
   Plus,
@@ -60,13 +60,15 @@ function EmptyState({ children }: { children: React.ReactNode }) {
   )
 }
 
-function SmallInput(props: React.InputHTMLAttributes<HTMLInputElement>) {
-  return (
-    <input
-      {...props}
-      className={`flex-1 rounded-lg px-3 py-2 text-[13px] outline-none transition-colors placeholder:text-[var(--aria-fg-dim)] focus:border-[rgba(245,158,11,0.45)] ${props.className ?? ''}`}
-      style={{
-        background: 'var(--aria-bg-panel)',
+const SmallInput = React.forwardRef<HTMLInputElement, React.InputHTMLAttributes<HTMLInputElement>>(
+  function SmallInput(props, ref) {
+    return (
+      <input
+        {...props}
+        ref={ref}
+        className={`flex-1 rounded-lg px-3 py-2 text-[13px] outline-none transition-colors placeholder:text-[var(--aria-fg-dim)] focus:border-[rgba(245,158,11,0.45)] ${props.className ?? ''}`}
+        style={{
+          background: 'var(--aria-bg-panel)',
         border: '1px solid var(--aria-border)',
         color: 'var(--aria-fg)',
         fontFamily: 'inherit',
@@ -74,8 +76,9 @@ function SmallInput(props: React.InputHTMLAttributes<HTMLInputElement>) {
         ...(props.style || {}),
       }}
     />
-  )
-}
+    )
+  }
+)
 
 function AddButton({
   onClick,
