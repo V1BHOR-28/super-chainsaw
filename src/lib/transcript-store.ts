@@ -2,6 +2,7 @@
 
 import { create } from "zustand";
 import { getJobChapters } from "@/lib/abm-api";
+import { getCachedTranscript, cacheTranscript, removeCachedTranscript } from "@/lib/transcript-cache";
 
 /**
  * transcript-store — per-chapter cache of word-level sync cues.
@@ -155,15 +156,47 @@ export const useTranscriptStore = create<TranscriptStore>((set, get) => ({
     const inflight = get().inflight.get(key);
     if (inflight) return inflight;
 
-    // 3) Mark loading.
+    // 4) Mark loading.
     set((s) => {
       const next = new Map(s.entries);
       next.set(key, { data: null, status: "loading" });
       return { entries: next };
     });
 
-    // 4) Fire the request.
+    // 5) Fire the request. Two-tier fetch: IndexedDB cache first (instant,
+    //    works with backend offline), then network (authoritative). On
+    //    network success, the cues are written back to IndexedDB so the
+    //    next load is instant + survives a backend outage.
     const p = (async (): Promise<TranscriptData | null> => {
+      // ── Tier 1: IndexedDB cache ──
+      // Check the persistent browser cache first. If we have cues for this
+      // chapter, return them immediately — even if Docker is stopped. This
+      // makes the transcript available permanently after the first load.
+      const cached = await getCachedTranscript(jobId, chapterIdx);
+      if (cached && cached.length > 0) {
+        const data = buildTranscriptData(cached);
+        set((s) => {
+          const next = new Map(s.entries);
+          next.set(key, { data, status: "ready" });
+          const nextInflight = new Map(s.inflight);
+          nextInflight.delete(key);
+          return { entries: next, inflight: nextInflight };
+        });
+        // Fire a background network fetch to refresh the cache (in case the
+        // cues changed after a re-generation). Non-blocking — the cached
+        // version is already returned to the caller.
+        getJobChapters(jobId).then((resp) => {
+          const fresh = extractCuesForChapter(resp, chapterIdx);
+          if (fresh && fresh.length > 0) {
+            cacheTranscript(jobId, chapterIdx, fresh).catch(() => {});
+          }
+        }).catch(() => {
+          // Backend unreachable — the cached version is still good.
+        });
+        return data;
+      }
+
+      // ── Tier 2: Network fetch ──
       try {
         const resp = await getJobChapters(jobId);
         const cues = extractCuesForChapter(resp, chapterIdx);
@@ -178,6 +211,8 @@ export const useTranscriptStore = create<TranscriptStore>((set, get) => ({
           });
           return null;
         }
+        // Persist to IndexedDB so the next load survives a backend outage.
+        await cacheTranscript(jobId, chapterIdx, cues);
         const data = buildTranscriptData(cues);
         set((s) => {
           const next = new Map(s.entries);
@@ -228,6 +263,8 @@ export const useTranscriptStore = create<TranscriptStore>((set, get) => ({
       nextInflight.delete(key);
       return { entries: next, inflight: nextInflight };
     });
+    // Also remove the persistent IndexedDB cache entry for this chapter.
+    removeCachedTranscript(jobId, chapterIdx).catch(() => {});
   },
 
   clear: () => {
