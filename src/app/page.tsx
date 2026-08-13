@@ -14,6 +14,16 @@ import { useAriaStore } from '@/lib/store'
 
 export default function HomePage() {
   const { data: session, status } = useSession()
+
+  // ─── Dev-mode auth bypass ───────────────────────────────────────────
+  // Set NEXT_PUBLIC_DEV_BYPASS_AUTH=1 in .env to skip login entirely.
+  // The audiobook backend uses its own abm_cid cookie (set automatically
+  // by Flask), so audiobook upload/generate/play all work without a user
+  // account. This bypass is for LOCAL TESTING ONLY — never set it in
+  // production. When active, the app boots straight into the audiobook
+  // workspace with a fake user so the sidebar doesn't crash.
+  const DEV_BYPASS_AUTH = process.env.NEXT_PUBLIC_DEV_BYPASS_AUTH === '1'
+
   const {
     authState,
     setAuthState,
@@ -33,6 +43,22 @@ export default function HomePage() {
   // This eliminates the extra /api/auth/session API call which can race
   // on Vercel serverless (causing Google users to skip onboarding).
   useEffect(() => {
+    if (DEV_BYPASS_AUTH) {
+      // Dev bypass: set a fake user + skip auth entirely. The audiobook
+      // workspace works without a real account (Flask uses abm_cid cookie).
+      setUser({
+        id: 'dev-user',
+        name: 'Dev Tester',
+        email: 'dev@localhost',
+        tier: 'Free',
+      })
+      setAuthState('authenticated')
+      // Force the audiobook workspace — chat requires the database + LLM,
+      // which aren't configured in dev-bypass mode.
+      useAriaStore.getState().setActiveWorkspace('audiobooks')
+      return
+    }
+
     if (status === 'loading') return
 
     if (status === 'unauthenticated' || !session?.user) {
