@@ -4899,21 +4899,24 @@ def run_generation(job_id, info, voice, rate, single_file, output_format='m4b', 
                     except Exception as _e_bgm:
                         print(f"[{job_id}] BGM generation failed (non-fatal): {_e_bgm}")
 
-                # Upload to R2/S3 if configured — survives Render restarts.
-                # The chapter_mp3 endpoint redirects to presigned URLs when
-                # local files are missing (after a restart).
+                # Enqueue background Storj/R2 sync — non-blocking.
+                # Generated audio lives on the local volume (the durable
+                # primary store). Storj upload is best-effort async: if it
+                # fails, the job still succeeds and the file is still served
+                # from local disk. The storj_sync background thread retries
+                # with backoff; connectivity returning triggers catch-up.
                 _emit_finalize("Uploading to storage...", 0.70)
                 try:
-                    import storage_backend
-                    if storage_backend.is_enabled():
-                        for ch_entry in new_mp3s:
-                            if "s3_key" not in ch_entry and os.path.exists(ch_entry.get("path", "")):
-                                s3_key = f"chapters/{job_id}/{ch_entry['filename']}"
-                                storage_backend.upload_file(ch_entry["path"], s3_key)
-                                ch_entry["s3_key"] = s3_key
-                        print(f"[{job_id}] Uploaded new chapter MP3s to R2/S3 (total: {len(job['chapter_mp3s'])})")
+                    import storj_sync
+                    for ch_entry in new_mp3s:
+                        if "s3_key" not in ch_entry and os.path.exists(ch_entry.get("path", "")):
+                            s3_key = f"chapters/{job_id}/{ch_entry['filename']}"
+                            storj_sync.enqueue_storj_sync(
+                                ch_entry["path"], s3_key, job_id=job_id)
+                            ch_entry["s3_key"] = s3_key  # optimistic — marks intent
+                    print(f"[{job_id}] Enqueued {len(new_mp3s)} chapter MP3(s) for background Storj sync")
                 except Exception as _e_s3:
-                    print(f"[{job_id}] R2/S3 upload failed (non-fatal): {_e_s3}")
+                    print(f"[{job_id}] Storj sync enqueue failed (non-fatal): {_e_s3}")
                 _emit_finalize("Saving transcript cues...", 0.85)
                 job["output_files"] = mp3_files
                 job["output_name"] = f"{safe_name} (per-chapter)"
@@ -5581,6 +5584,41 @@ def run_generation(job_id, info, voice, rate, single_file, output_format='m4b', 
         # SystemExit/KeyboardInterrupt devono propagare — non sopprimerli.
         if isinstance(e, (SystemExit, KeyboardInterrupt)):
             raise
+
+        # ── Network-unreachable loud failure ────────────────────────────
+        # If the TTS API (edge-tts websocket, Google, Gemini, Speechify) is
+        # unreachable, fail the job loudly with a clear reason — do NOT hang
+        # forever or fabricate placeholder audio. The user sees status=error
+        # + reason "network unavailable" and can retry when connectivity
+        # returns. Already-generated chapters on the local volume remain
+        # listable/playable regardless.
+        _is_network_err = False
+        _err_str = str(e).lower()
+        if (isinstance(e, (ConnectionError, OSError, TimeoutError))
+                or "connection" in _err_str
+                or "timed out" in _err_str
+                or "timeout" in _err_str
+                or "unreachable" in _err_str
+                or "network" in _err_str
+                or "name or service not known" in _err_str
+                or "temporary failure in name resolution" in _err_str):
+            _is_network_err = True
+        if _is_network_err:
+            _user_msg = ("Network unavailable — couldn't reach the TTS service. "
+                         "Your generated chapters so far are saved; retry when "
+                         "you're back online.")
+            job["status"] = "error"
+            job["error"] = _user_msg
+            job["user_facing_error"] = _user_msg
+            job["error_reason"] = "network_unavailable"
+            job["progress_updated_at"] = time.time()
+            print(f"[{job_id}] Generation FAILED — network unavailable: "
+                  f"{type(e).__name__}: {e}", flush=True)
+            try:
+                _save_tokens()
+            except Exception:
+                pass
+            return  # loud failure — do not fall through to quota/budget logic
 
         # Marker forense: preserva la work_dir per analisi post-mortem
         # anche se il codice di cleanup successivo dovesse fallire.

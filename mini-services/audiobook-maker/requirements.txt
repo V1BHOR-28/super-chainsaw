@@ -1,6 +1,39 @@
-ruff
-boto3
+# audiobook-maker Python dependencies.
+# Previously split between this file and render.yaml's buildCommand.
+# Merged into one file for Docker builds (render.yaml is deleted).
+
+# ── Web server ──
+flask
 flask-compress
-google-auth>=2.23  # FCM HTTP v1 push notifications (app mobile)
-requests  # client HTTP per push FCM (push_service)
-qrcode[pil]>=7.4  # QR di trasferimento job sull'app mobile
+gunicorn
+werkzeug
+defusedxml
+
+# ── TTS providers ──
+edge-tts
+openai
+google-genai
+google-cloud-texttospeech
+
+# ── Storage (Storj / R2 / S3-compatible) ──
+boto3
+
+# ── Google auth (FCM push notifications) ──
+google-auth>=2.23
+
+# ── HTTP + media ──
+requests
+Pillow
+mutagen
+
+# ── Document parsing ──
+ebooklib
+beautifulsoup4
+lxml
+pymupdf
+
+# ── Misc ──
+qrcode[pil]>=7.4
+
+# ── Dev tooling ──
+ruff

@@ -16309,6 +16309,77 @@ payment._recover_orphaned_voucher_charges(jobs)
 # _save_tokens() call).
 _load_job_registry()
 
+# ── Local-first startup scan ────────────────────────────────────────────
+# On Docker (persistent volume), the EPUBs + generated MP3s are still on
+# disk after a restart. Repopulate the in-memory `jobs` dict from local
+# disk FIRST so we don't hit Storj for data that's right here. This is the
+# critical difference from the Render era (ephemeral disk → always Storj).
+# Only jobs that have a registry entry AND a local EPUB file are restored
+# here — everything else stays for lazy Storj reconstruction on access.
+def _restore_jobs_from_local_disk():
+    """Scan UPLOAD_DIR/{job_id}/ for local EPUBs and repopulate `jobs`.
+
+    For each job_id in the durable registry, check if the original EPUB
+    still exists on the local volume. If it does, re-parse it and insert
+    a fresh 'analyzed' job — exactly what _reconstruct_job_from_storj does,
+    but without the network round-trip. This makes restarts instant when
+    the Docker volume is present.
+    """
+    _restored = 0
+    _skipped = 0
+    with _job_registry_lock:
+        _reg_snapshot = dict(_job_registry)
+    for _jid, _rec in _reg_snapshot.items():
+        if not _jid or _jid in jobs:
+            continue
+        if not isinstance(_rec, dict):
+            continue
+        _epub_s3_key = _rec.get("epub_s3_key", "")
+        if not _epub_s3_key:
+            continue
+        _work_dir = UPLOAD_DIR / _jid
+        _epub_filename = os.path.basename(_epub_s3_key)
+        _local_epub = _work_dir / _epub_filename
+        if not _local_epub.is_file():
+            _skipped += 1
+            continue  # local file gone — leave for lazy Storj reconstruction
+        try:
+            _info = _parse_book(str(_local_epub))
+            with _jobs_lock:
+                jobs[_jid] = {
+                    "status": "analyzed",
+                    "epub_path": str(_local_epub),
+                    "epub_s3_key": _epub_s3_key,
+                    "info": _info,
+                    "last_poll": time.time(),
+                    "original_filename": _rec.get("original_filename", _epub_filename),
+                    "client_id": _rec.get("client_id", ""),
+                    "client_ip": "",
+                    "browser_lang": "",
+                    "optimized_chapters": [],
+                    "file_hash": _rec.get("file_hash", ""),
+                    "language_detected": _rec.get("language_detected", False),
+                    "selected_chapters": _rec.get("selected_chapters", []),
+                    "chapter_mp3s": _rec.get("chapter_mp3s", []),
+                    "transcript_cues": _rec.get("transcript_cues", {}) or {},
+                    "bgm_mode": _rec.get("bgm_mode", "off"),
+                    "bgm_cues": _rec.get("bgm_cues", {}) or {},
+                    "cover_thumb": _rec.get("cover_thumb", ""),
+                    "cover_s3_key": _rec.get("cover_s3_key", ""),
+                    "cover_mime": _rec.get("cover_mime", "image/jpeg"),
+                }
+            _restored += 1
+        except Exception as _e:
+            print(f"[startup] local restore failed for {_jid}: {_e}")
+            _skipped += 1
+    print(f"[startup] Local-first restore: {_restored} job(s) from disk, "
+          f"{_skipped} deferred to lazy Storj reconstruction")
+
+try:
+    _restore_jobs_from_local_disk()
+except Exception as _e:
+    print(f"[startup] local-first restore failed (non-fatal): {_e}")
+
 # ARIA: startup recovery — any token whose last_status was "generating" when
 # the worker died is stuck. The in-memory job is gone (process restart) and
 # the thread can't be re-enqueued without the full job state. Mark these as
@@ -16423,16 +16494,12 @@ _init_log_dedup()
 _ensure_background_threads()
 
 if __name__ == "__main__":
-    # Render provides $PORT (typically 10000) and requires binding to 0.0.0.0.
-    # Other hosts (local dev, sandbox) use ABM_PORT (default 5601) and 127.0.0.1.
-    # We detect Render by checking if $PORT is set; if so, bind to 0.0.0.0:$PORT.
-    RENDER_PORT = os.environ.get("PORT")
-    if RENDER_PORT:
-        PORT = int(RENDER_PORT)
-        HOST = "0.0.0.0"
-    else:
-        PORT = int(os.environ.get("ABM_PORT", "5601"))
-        HOST = "127.0.0.1"
+    # Docker bind: host 0.0.0.0 (so the container is reachable from the host
+    # and from the Cloudflare Tunnel sidecar), port from ABM_PORT (default 5601).
+    # The old Render-specific $PORT detection branch is gone — Render is no
+    # longer a deployment target.
+    PORT = int(os.environ.get("ABM_PORT", "5601"))
+    HOST = "0.0.0.0"
     DEBUG = os.environ.get("ABM_DEBUG", "0").strip().lower() in ("1", "true", "yes", "on")
     print(f"\n{'='*50}")
     print(f"  Audiobook Maker v{__version__}")
