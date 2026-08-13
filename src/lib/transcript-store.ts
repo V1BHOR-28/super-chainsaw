@@ -35,6 +35,11 @@ interface TranscriptEntry {
   data: TranscriptData | null;
   status: TranscriptStatus;
   error?: string;
+  /** Auto-retry bookkeeping: how many retries have been attempted, and when
+   *  the last retry happened. Used by fetchTranscript to space out retries
+   *  with exponential backoff when the backend is down. */
+  retryAttempt?: number;
+  retryAt?: number;
 }
 
 interface TranscriptStore {
@@ -111,7 +116,42 @@ export const useTranscriptStore = create<TranscriptStore>((set, get) => ({
       return existing.data;
     }
 
-    // 2) Inflight dedup — return the existing promise.
+    // 2) Auto-retry on error with exponential backoff.
+    // When the backend is down (Docker stopped, network blip), the fetch
+    // fails and the entry is marked "error". Instead of giving up forever,
+    // we retry after a delay — so the transcript auto-recovers when the
+    // backend comes back online. The retry is triggered by the TranscriptView
+    // re-mounting or by the periodic retry effect in TranscriptView.
+    if (existing && existing.status === "error") {
+      const RETRY_DELAYS = [2000, 5000, 10000, 20000, 30000]; // 2s, 5s, 10s, 20s, 30s
+      const attempt = existing.retryAttempt ?? 0;
+      if (attempt < RETRY_DELAYS.length) {
+        const lastAttempt = existing.retryAt ?? 0;
+        const elapsed = Date.now() - lastAttempt;
+        if (elapsed < RETRY_DELAYS[attempt]) {
+          // Not enough time has passed — don't retry yet. The TranscriptView's
+          // periodic retry effect will call fetchTranscript again.
+          return null;
+        }
+        // Mark the next retry attempt so we don't double-fire.
+        set((s) => {
+          const next = new Map(s.entries);
+          next.set(key, {
+            ...existing,
+            retryAttempt: attempt + 1,
+            retryAt: Date.now(),
+          });
+          return { entries: next };
+        });
+        // Fall through to the fetch below.
+      } else {
+        // Max retries exhausted — stay in "error" state. The user can still
+        // click "Try again" manually in the TranscriptView UI.
+        return null;
+      }
+    }
+
+    // 3) Inflight dedup — return the existing promise.
     const inflight = get().inflight.get(key);
     if (inflight) return inflight;
 
@@ -151,7 +191,13 @@ export const useTranscriptStore = create<TranscriptStore>((set, get) => ({
         const msg = err instanceof Error ? err.message : "Failed to load transcript";
         set((s) => {
           const next = new Map(s.entries);
-          next.set(key, { data: null, status: "error", error: msg });
+          next.set(key, {
+            data: null,
+            status: "error",
+            error: msg,
+            retryAttempt: 0,
+            retryAt: Date.now(),
+          });
           const nextInflight = new Map(s.inflight);
           nextInflight.delete(key);
           return { entries: next, inflight: nextInflight };

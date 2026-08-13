@@ -39,7 +39,21 @@ export function TranscriptView() {
     fetchTranscript(jobId, chapterIndex);
   }, [jobId, chapterIndex, fetchTranscript]);
 
+  // ── Auto-retry when the transcript fetch failed (backend was down) ──
+  // When Docker is stopped, getJobChapters() fails and the entry is marked
+  // "error". This effect polls every 3 seconds while in error state, calling
+  // fetchTranscript again — which respects the exponential backoff in the
+  // store. When the backend comes back online, the transcript auto-recovers
+  // without the user needing to click "Try again".
   const entry = useTranscriptEntry(jobId, chapterIndex);
+  useEffect(() => {
+    if (entry?.status !== "error") return;
+    if (!jobId || chapterIndex < 0) return;
+    const interval = setInterval(() => {
+      fetchTranscript(jobId, chapterIndex);
+    }, 3000);
+    return () => clearInterval(interval);
+  }, [entry?.status, jobId, chapterIndex, fetchTranscript]);
   const cues = entry?.data?.cues ?? null;
   const words = entry?.data?.words ?? null;
   const { activeWordIdx } = useWordSync(cues);
