@@ -79,6 +79,8 @@ async function proxy(
   // Forward the client IP for rate-limiting
   const clientIp = req.headers.get('x-forwarded-for') || req.headers.get('x-real-ip') || '127.0.0.1'
   headers.set('X-Forwarded-For', clientIp)
+  // Skip ngrok free-tier warning page (interstitial HTML) for API calls
+  headers.set('ngrok-skip-browser-warning', '1')
 
   // Forward the body as-is (works for JSON, multipart form-data, plain text)
   let body: BodyInit | null = null
