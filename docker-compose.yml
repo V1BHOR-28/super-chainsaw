@@ -1,11 +1,4 @@
-# docker-compose.yml — audiobook-maker backend (Docker, local-first).
-#
-# One service: the Flask app. All local state lives in a named volume
-# mounted at /app/data — this is the durable primary store. Storj/R2 (if
-# configured via .env) is an off-site backup target, not the source of truth.
-#
-# The app is reachable at http://localhost:5601 from the host. Put a reverse
-# proxy (Caddy, nginx, Cloudflare Tunnel) in front for HTTPS.
+# docker-compose.yml — audiobook-maker backend (Docker, local-first) + Cloudflare Tunnel.
 
 services:
   audiobook:
@@ -18,8 +11,20 @@ services:
       # Named volume — survives container restarts/rebuilds/deletes.
       # This is where EPUBs, generated MP3s, tokens, and the job registry live.
       - audiobook_data:/app/data
-    # If Storj env vars are absent, the app degrades to local-only (no sync).
-    # storage_backend.is_enabled() gates every Storj call.
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:5601/api/voices')\" || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+  tunnel:
+    image: cloudflare/cloudflared:latest
+    restart: unless-stopped
+    command: tunnel --no-autoupdate run --token ${CF_TUNNEL_TOKEN}
+    depends_on:
+      audiobook:
+        condition: service_healthy
 
 volumes:
   audiobook_data:
