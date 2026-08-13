@@ -52,12 +52,16 @@ services:
       dockerfile: Dockerfile
     restart: unless-stopped
     ports:
-      - "5601:5601"
+      - "7860:7860"
     environment:
       # Core
-      ABM_DATA_DIR: /tmp/abm-data
+      # /data/abm-data is the path used in production on Hugging Face Spaces
+      # (HF's 10GB persistent volume is mounted at /data). Mount a Docker
+      # volume here for local parity.
+      ABM_DATA_DIR: /data/abm-data
       ABM_JOB_RETENTION_SEC: "604800"
       PYTHON_VERSION: "3.11"
+      PORT: "7860"
       # LLM (Groq) — required for text optimization
       ABM_LLM_API_KEY: ${GROQ_API_KEY:-}
       ABM_LLM_API_BASE: https://api.groq.com/openai/v1
@@ -75,9 +79,10 @@ services:
     volumes:
       # Persist scratch data across restarts (covers, in-progress jobs).
       # Final artifacts go to R2 if configured; this is just for the working dir.
-      - abm-data:/tmp/abm-data
+      # Mirrors HF Spaces' /data persistent storage.
+      - abm-data:/data/abm-data
     healthcheck:
-      test: ["CMD", "curl", "--silent", "--fail", "http://localhost:5601/"]
+      test: ["CMD", "curl", "--silent", "--fail", "http://localhost:7860/"]
       interval: 30s
       timeout: 10s
       retries: 3
@@ -112,8 +117,8 @@ services:
       TAVILY_API_KEY: ${TAVILY_API_KEY:-}
       SERPER_API_KEY: ${SERPER_API_KEY:-}
       # ABM proxy
-      ABM_SERVICE_URL: http://abm:5601
-      NEXT_PUBLIC_ABM_DIRECT_URL: http://localhost:5601
+      ABM_SERVICE_URL: http://abm:7860
+      NEXT_PUBLIC_ABM_DIRECT_URL: http://localhost:7860
       # Cron (optional)
       CRON_SECRET: ${CRON_SECRET:-}
       ADMIN_EMAILS: ${ADMIN_EMAILS:-}

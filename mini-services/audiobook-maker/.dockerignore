@@ -29,5 +29,8 @@ tests/
 .env.*
 !.env.example
 
-# Markdown docs — not needed at runtime.
+# Markdown docs — not needed at runtime, EXCEPT README.md which Hugging Face
+# Spaces requires at the repo root for the Space's frontmatter metadata
+# (title, sdk, app_port, etc.). Without README.md the Space won't build.
 *.md
+!README.md

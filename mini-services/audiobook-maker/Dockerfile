@@ -1,18 +1,21 @@
 # syntax=docker/dockerfile:1.7
 #
-# Audiobook-maker (Flask) — Docker image for the Python backend.
+# Audiobook-maker (Flask) — Docker image.
 #
-# Replaces the Render deployment. Same code, same env vars, but runs in Docker
-# so you can deploy it anywhere (a VPS, Fly.io, Railway, your own k8s, etc.).
+# Designed to run on:
+#   1. Hugging Face Spaces (Docker SDK) — primary target. Free, no sleep,
+#      16GB RAM, 10GB persistent storage at /data. See DEPLOY_HF.md.
+#   2. Local Docker / docker-compose — for development. See docker-compose.yml
+#      in the repo root.
+#   3. Any other Docker host (VPS, Fly.io, Railway) — same image works.
 #
 # ─── Build ──────────────────────────────────────────────────────────────────
 #   docker build -t aria-abm mini-services/audiobook-maker
 #
 # ─── Run (needs R2 creds + Gemini/Groq keys at runtime) ─────────────────────
-#   docker run --env-file mini-services/audiobook-maker/.env.abm \
-#     -p 5601:5601 aria-abm
+#   docker run --env-file .env.abm -p 7860:7860 aria-abm
 #
-# ─── Or via docker-compose (recommended — wires up the frontend too) ────────
+# ─── Or via docker-compose (recommended for local dev) ──────────────────────
 #   docker compose up
 #
 # The image bakes the code + deps but NO secrets. All ABM_* env vars are
@@ -35,8 +38,6 @@ WORKDIR /app
 #   - build-essential + libxml2-dev + libxslt-dev + libjpeg-dev: needed to
 #     build lxml / Pillow / pymupdf wheels on slim images
 #   - curl: for the healthcheck
-#   - netcat-openbsd: nc, used by entrypoint for DB waits (not needed here
-#     but kept for parity with the frontend image)
 RUN apt-get update && apt-get install -y --no-install-recommends \
       ffmpeg \
       build-essential \
@@ -45,7 +46,6 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
       libjpeg-dev \
       zlib1g-dev \
       curl \
-      netcat-openbsd \
     && rm -rf /var/lib/apt/lists/*
 
 # Install Python deps first (cached unless requirements.txt changes).
@@ -55,33 +55,45 @@ COPY requirements.txt .
 RUN pip install --upgrade pip && pip install -r requirements.txt
 
 # Copy the Flask app. The .dockerignore in this dir excludes __pycache__,
-# tests, *.md, and the .pytest_cache.
+# tests, *.md (except README.md — HF requires it at the repo root for the
+# Space metadata), and the .pytest_cache.
 COPY . .
 
-# Create the data dir ABM_DATA_DIR points at. Render used /tmp/abm-data
-# (ephemeral); in Docker, mount a volume here for persistence across restarts.
-RUN mkdir -p /tmp/abm-data
+# ─── HF Spaces requirements ─────────────────────────────────────────────────
+# HF Spaces Docker SDK requires:
+#   1. A user named "user" with UID 1000.
+#   2. The app listening on the port declared in README.md frontmatter
+#      (app_port: 7860 — HF's default).
+#   3. Files owned by "user" so the container can read/write them.
+#
+# We create the user, chown the app + /data, then drop privileges.
+RUN useradd --create-home --uid 1000 user \
+  && mkdir -p /data/abm-data \
+  && chown -R user:user /app /data
 
-# Run as a non-root user. The Flask app doesn't need root.
-RUN useradd --create-home --uid 1001 abm \
-  && chown -R abm:abm /app /tmp/abm-data
-USER abm
+USER user
 
-ENV ABM_DATA_DIR=/tmp/abm-data \
+# /data is HF's persistent storage (10GB free, survives restarts).
+# /tmp is ephemeral scratch (wiped on restart).
+ENV ABM_DATA_DIR=/data/abm-data \
     PYTHON_VERSION=3.11 \
-    PORT=5601
+    PORT=7860
 
-EXPOSE 5601
+EXPOSE 7860
 
 # Healthcheck: hit the Flask app's root route. Returns 200 when the app is up.
 HEALTHCHECK --interval=30s --timeout=10s --start-period=30s --retries=3 \
-  CMD curl --silent --fail http://localhost:5601/ || exit 1
+  CMD curl --silent --fail http://localhost:7860/ || exit 1
 
 # gunicorn with 2 workers + 4 threads matches the Render blueprint in
 # render.yaml. 900s timeout because audiobook generation is long-running.
-# `--bind 0.0.0.0:5601` matches PORT above and what the Next.js proxy expects.
+# `--bind 0.0.0.0:7860` matches PORT above and what HF Spaces expects.
+#
+# Note: when run via `python audiobook_app.py` (e.g. local dev without
+# Docker), the app reads $PORT itself and binds to 0.0.0.0:$PORT. The
+# gunicorn entrypoint here is for production only.
 CMD ["gunicorn", "audiobook_app:app", \
-     "--bind", "0.0.0.0:5601", \
+     "--bind", "0.0.0.0:7860", \
      "--workers", "2", \
      "--threads", "4", \
      "--timeout", "900"]
