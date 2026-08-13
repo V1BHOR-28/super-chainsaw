@@ -721,23 +721,30 @@ def score_segments_heuristic(word_timings: list[dict]) -> list[dict]:
 
             # Re-check: if still > 55%, reassign beats with the smallest
             # winner margin (even if > 2) until we're under the cap.
-            mood_words2: dict[str, int] = {}
-            for seg in raw_segments:
-                w = seg["end_word"] - seg["start_word"] + 1
-                mood_words2[seg["mood"]] = mood_words2.get(seg["mood"], 0) + w
-            dom2 = max(mood_words2, key=mood_words2.get) if mood_words2 else None
-            if dom2 == dominant_mood and mood_words2.get(dom2, 0) / total_words > _DOMINANT_CAP_PCT:
-                # Sort dominant beats by smallest margin and reassign.
-                dominant_beats = [(i, seg) for i, seg in enumerate(raw_segments) if seg["mood"] == dominant_mood]
-                dominant_beats.sort(key=lambda x: x[1].get("_scores", {}).get(dominant_mood, 0) - x[1].get("_scores", {}).get(second_mood, 0))
-                for _, seg in dominant_beats:
-                    if mood_words2.get(dominant_mood, 0) / total_words <= _DOMINANT_CAP_PCT:
-                        break
+            # Guard: only runs when we actually found a second_mood above.
+            # Without this guard, beats get reassigned to None when the
+            # chapter has no runner-up (single-mood chapter), producing
+            # invalid segments with mood=None.
+            if not second_mood:
+                pass
+            else:
+                mood_words2: dict[str, int] = {}
+                for seg in raw_segments:
                     w = seg["end_word"] - seg["start_word"] + 1
-                    seg["mood"] = second_mood
-                    seg["intensity"] = max(1, seg.get("intensity", 2) - 1)
-                    mood_words2[dominant_mood] -= w
-                    mood_words2[second_mood] = mood_words2.get(second_mood, 0) + w
+                    mood_words2[seg["mood"]] = mood_words2.get(seg["mood"], 0) + w
+                dom2 = max(mood_words2, key=mood_words2.get) if mood_words2 else None
+                if dom2 == dominant_mood and mood_words2.get(dom2, 0) / total_words > _DOMINANT_CAP_PCT:
+                    # Sort dominant beats by smallest margin and reassign.
+                    dominant_beats = [(i, seg) for i, seg in enumerate(raw_segments) if seg["mood"] == dominant_mood]
+                    dominant_beats.sort(key=lambda x: x[1].get("_scores", {}).get(dominant_mood, 0) - x[1].get("_scores", {}).get(second_mood, 0))
+                    for _, seg in dominant_beats:
+                        if mood_words2.get(dominant_mood, 0) / total_words <= _DOMINANT_CAP_PCT:
+                            break
+                        w = seg["end_word"] - seg["start_word"] + 1
+                        seg["mood"] = second_mood
+                        seg["intensity"] = max(1, seg.get("intensity", 2) - 1)
+                        mood_words2[dominant_mood] -= w
+                        mood_words2[second_mood] = mood_words2.get(second_mood, 0) + w
 
     # Step 5b — merge adjacent same-mood beats.
     merged: list[dict] = []
