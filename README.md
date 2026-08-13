@@ -97,7 +97,7 @@ ARIA is one app with two workspaces:
 | **Web search** | Tavily + Serper |
 | **Audiobook backend** | Python Flask (mini-service) + Edge-TTS + ffmpeg |
 | **Object storage** | Cloudflare R2 (S3-compatible) via boto3 |
-| **Deployment** | Vercel (frontend) + Render (audiobook backend) |
+| **Deployment** | Vercel (frontend) + Hugging Face Spaces (audiobook backend) |
 
 ---
 
@@ -133,7 +133,9 @@ ARIA is one app with two workspaces:
 
 **The frontend** is a single Next.js app with two workspaces (Chat, Audiobooks) toggled in the sidebar. All audiobook API calls go through a catch-all proxy at `/api/abm/[...path]` that forwards to the Flask backend — so the browser only ever talks to Vercel (no CORS, no absolute URLs).
 
-**The audiobook backend** is a Python Flask monolith (`mini-services/audiobook-maker/`) that runs on Render. It parses EPUBs, synthesizes audio via Edge-TTS, mixes BGM, and uploads everything to R2. The frontend never touches R2 directly — it streams chapter MP3s through the Flask backend, which 302-redirects to presigned R2 URLs.
+**The audiobook backend** is a Python Flask monolith (`mini-services/audiobook-maker/`) that runs on Hugging Face Spaces (Docker SDK). It parses EPUBs, synthesizes audio via Edge-TTS, mixes BGM, and uploads everything to R2. The frontend never touches R2 directly — it streams chapter MP3s through the Flask backend, which 302-redirects to presigned R2 URLs.
+
+> **Why HF Spaces instead of Render?** Render's free tier sleeps after 15 minutes of inactivity, causing 30-50s cold starts. HF Spaces doesn't sleep, gives 16GB RAM (vs Render's 512MB), 10GB persistent storage, and still doesn't require a credit card. See `mini-services/audiobook-maker/DEPLOY_HF.md` for the migration guide.
 
 **The database** is a single Postgres instance with pgvector for semantic search. Embeddings are 768-dimensional (Gemini text-embedding-001), stored on Message rows (for conversation search) and Memory/Knowledge rows (for retrieval).
 
@@ -485,25 +487,26 @@ ARIA uses NextAuth.js v4 with two providers:
 
 1. Push to GitHub (the `main` branch auto-deploys)
 2. In Vercel project settings, add all [environment variables](#environment-variables)
-3. The build command (`prisma generate && prisma db push && next build`) handles schema sync automatically
+3. The build command (`prisma generate && next build`) compiles the app — Prisma schema sync happens via `prisma migrate deploy` at container start when running in Docker, or via Vercel's build-time `prisma generate` for the serverless deployment
 4. The app runs on Vercel's Node.js runtime
 
-### Audiobook backend → Render
+### Audiobook backend → Hugging Face Spaces
 
-The Flask backend in `mini-services/audiobook-maker/` deploys to Render:
+The Flask backend in `mini-services/audiobook-maker/` deploys to **Hugging Face Spaces** using the Docker SDK. This replaces the previous Render deployment (Render's free tier sleeps after 15 min of inactivity — HF Spaces doesn't).
 
-1. Create a new Web Service on Render, connected to the same GitHub repo
-2. **Root directory**: `mini-services/audiobook-maker`
-3. **Build command**: `pip install -r requirements.txt`
-4. **Start command**: `gunicorn audiobook_app:app --bind 0.0.0.0:$PORT --workers 2 --threads 4 --timeout 900`
-5. Set the same `ABM_S3_*`, `ABM_LLM_API_KEY`, `ABM_ALLOWED_ORIGINS` env vars
-6. Set `ABM_SERVICE_URL` on Vercel to the Render URL (e.g. `https://your-app.onrender.com`)
+Full step-by-step guide: **[`mini-services/audiobook-maker/DEPLOY_HF.md`](mini-services/audiobook-maker/DEPLOY_HF.md)**
+
+TL;DR:
+1. Create a new Space at https://huggingface.co/new-space — pick **Docker** SDK, **Private** visibility
+2. Connect it to your GitHub repo, set root dir to `mini-services/audiobook-maker`
+3. Add secrets (`ABM_S3_*`, `ABM_LLM_API_KEY`, `ABM_GEMINI_API_KEY`, `ABM_ALLOWED_ORIGINS`) in Space Settings
+4. Set `ABM_SERVICE_URL` on Vercel to your Space's URL (e.g. `https://YOUR_USERNAME-aria-abm.hf.space`)
 
 ### Storage → Cloudflare R2
 
 1. Create an R2 bucket
 2. Create an API token with Object Read & Write permissions
-3. Set `ABM_S3_ENDPOINT`, `ABM_S3_ACCESS_KEY`, `ABM_S3_SECRET_KEY`, `ABM_S3_BUCKET` on the Render service
+3. Set `ABM_S3_ENDPOINT`, `ABM_S3_ACCESS_KEY`, `ABM_S3_SECRET_KEY`, `ABM_S3_BUCKET` as secrets on the HF Space
 
 ### Database → Neon
 
