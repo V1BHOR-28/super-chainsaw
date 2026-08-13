@@ -76,6 +76,11 @@ async function proxy(
   })
   // Explicitly request no encoding from Flask
   headers.set('Accept-Encoding', 'identity')
+  // ngrok free tier returns an HTML "Visit Site" interstitial page for
+  // browser-like requests. This header bypasses it so API calls get the
+  // actual JSON response instead of HTML. Required when ABM_SERVICE_URL
+  // points at a *.ngrok-free.app domain.
+  headers.set('ngrok-skip-browser-warning', '1')
   // Forward the client IP for rate-limiting
   const clientIp = req.headers.get('x-forwarded-for') || req.headers.get('x-real-ip') || '127.0.0.1'
   headers.set('X-Forwarded-For', clientIp)
