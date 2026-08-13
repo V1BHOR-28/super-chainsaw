@@ -1,0 +1,43 @@
+# Docker ignore for the Next.js frontend.
+# Same logic as mini-services/audiobook-maker/.dockerignore.
+
+# Dependencies — installed inside the image, never copied from host.
+node_modules/
+
+# Next.js build artifacts — produced inside the image.
+.next/
+out/
+build/
+
+# Prisma client — generated inside the image.
+node_modules/@prisma/client/
+
+# Caches
+.cache/
+.turbo/
+.eslintcache
+.tsbuildinfo
+
+# Tests + coverage
+coverage/
+tests/smoke/
+
+# Editor / OS noise
+.vscode/
+.idea/
+.DS_Store
+
+# Logs
+*.log
+npm-debug.log*
+
+# Local env files — secrets must never be baked into the image.
+.env
+.env.local
+.env.*.local
+!.env.example
+
+# Docker artifacts themselves (don't include in the build context).
+Dockerfile
+.dockerignore
+docker-compose*.yml
