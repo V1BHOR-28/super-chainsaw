@@ -111,7 +111,7 @@ function buildFullMarkdown(
   memories: Array<{ content: string; category: string; pinned: boolean; createdAt: Date }>,
   knowledgeDocs: Array<{ title: string; source: string; createdAt: Date; content: string }>,
   moods: Array<{ mood: string; note: string | null; createdAt: Date }>,
-  reminders: Array<{ title: string; dueAt: Date; completed: boolean }>
+  reminders: Array<{ title: string; dueAt: Date | null; completed: boolean }>
 ): string {
   const lines: string[] = []
   lines.push(`# ARIA — Full Export`)
@@ -175,7 +175,7 @@ function buildFullMarkdown(
   lines.push('')
   if (reminders.length === 0) lines.push('_No reminders._')
   for (const r of reminders) {
-    lines.push(`- [${r.completed ? 'x' : ' '}] ${r.title} — due ${new Date(r.dueAt).toLocaleDateString()}`)
+    lines.push(`- [${r.completed ? 'x' : ' '}] ${r.title} — due ${r.dueAt ? new Date(r.dueAt).toLocaleDateString() : 'no date'}`)
   }
   lines.push('')
 

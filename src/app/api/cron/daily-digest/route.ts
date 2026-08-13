@@ -41,7 +41,7 @@ export async function GET(req: NextRequest) {
       const prompt = `Write a short (under 100 words), warm, plain-prose daily check-in for ${user.name || 'the user'} from their AI companion ARIA. Use only what's given below — do not invent anything not listed.
 
 Recent mood entries: ${recentMoods.map((m) => m.mood).join(', ') || 'none logged'}
-Upcoming reminders: ${upcomingReminders.map((r) => `${r.title} (due ${r.dueAt.toDateString()})`).join('; ') || 'none'}
+Upcoming reminders: ${upcomingReminders.map((r) => `${r.title} (due ${r.dueAt ? r.dueAt.toDateString() : 'no date'})`).join('; ') || 'none'}
 Last conversation summary: ${recentConvo?.summary || 'none yet'}
 
 Write it as ARIA speaking directly to them. No headers, no bullet points, just a short warm paragraph.`

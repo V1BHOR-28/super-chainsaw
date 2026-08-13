@@ -1,6 +1,44 @@
-ruff
-boto3
-flask-compress
-google-auth>=2.23  # FCM HTTP v1 push notifications (app mobile)
-requests  # client HTTP per push FCM (push_service)
-qrcode[pil]>=7.4  # QR di trasferimento job sull'app mobile
+# Audiobook-maker (Flask) — consolidated Python dependencies.
+#
+# This file is the single source of truth for the Flask backend's Python deps.
+# Previously, render.yaml's buildCommand installed most packages inline and
+# requirements.txt only had a small subset — which meant a `pip install -r
+# requirements.txt` alone (as used by Docker and local dev) was missing most
+# of what the code actually imports. Consolidating here so both Render and
+# Docker build from the same list.
+#
+# Install (dev):     pip install -r requirements.txt -r requirements-dev.txt
+# Install (prod):    pip install -r requirements.txt
+# Tests:             pytest tests/
+
+# ─── Web framework ───
+flask>=3.0
+flask-compress>=1.13
+gunicorn>=22.0           # production WSGI server (used in Docker, optional on Render)
+
+# ─── EPUB / PDF / HTML parsing ───
+ebooklib>=0.18
+beautifulsoup4>=4.12
+lxml>=5.0
+Pillow>=10.0             # PIL — used for cover image processing
+pymupdf>=1.24            # fitz — PDF text extraction
+defusedxml>=0.7          # XXE / billion-laughs protection for EPUB XML
+
+# ─── TTS ───
+edge-tts>=6.1            # free default voices (Microsoft Edge online TTS)
+
+# ─── LLM (text optimization + Gemini TTS) ───
+openai>=1.30             # OpenAI-compatible client (used for Groq)
+google-genai>=0.3        # Gemini SDK (LLM + premium TTS)
+google-cloud-texttospeech>=2.16  # Chirp3-HD paid voices (optional, needs GCP creds)
+
+# ─── Object storage (Cloudflare R2 / S3-compatible) ───
+boto3>=1.34
+
+# ─── Auth / notifications / utilities ───
+google-auth>=2.23        # FCM HTTP v1 push notifications
+requests>=2.31           # HTTP client (FCM push, fallback fetches)
+qrcode[pil]>=7.4         # QR codes for mobile-app job transfer
+
+# ─── Linting (dev-only in practice, but kept here for Render's build step) ───
+ruff>=0.4
