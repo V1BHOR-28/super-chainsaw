@@ -12,7 +12,6 @@ import {
   CheckCircle2,
   Trash2,
   RotateCcw,
-  Coffee,
 } from "lucide-react";
 import { AmbientGlow, GradientText } from "./primitives";
 import { ScrollReveal } from "./scroll-reveal";
@@ -188,14 +187,6 @@ export function LibraryView() {
   }, [deletedIds]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  // ARIA cold-start state: the Flask service on Render's free tier spins down
-  // after ~15 min idle. The first getMyJobs() call can take 30-90+ seconds
-  // (cold start) or hit Vercel's 60s function timeout. Without a distinct
-  // 'wakingUp' state, the user stares at a bare 'Loading your library…'
-  // with no indication that a cold start is happening (not a hang/crash).
-  // Set when the first fetch exceeds ~8s OR fails with 502/timeout/network
-  // error (then we retry with backoff before surfacing the real error).
-  const [wakingUp, setWakingUp] = useState(false);
   const [hoveredJob, setHoveredJob] = useState<string | null>(null);
   const [uploading, setUploading] = useState(false);
   const [analyzeResponse, setAnalyzeResponse] = useState<AnalyzeResponse | null>(null);
@@ -214,97 +205,49 @@ export function LibraryView() {
     }
   }, [cards]);
 
-  // ARIA: fetch with cold-start awareness. The Flask service on Render's
-  // free tier spins down after ~15 min idle, so the first request after idle
-  // can take 30-90+ seconds (or hit Vercel's 60s function timeout). Instead
-  // of surfacing a generic error, we:
-  //   1. Show a 'wakingUp' message if the first fetch exceeds ~8s.
-  //   2. On failure (502/timeout/network error), retry with backoff
-  //      (5s, 15s, 30s) BEFORE surfacing the error — cold starts are the
-  //      EXPECTED common case, not an exceptional error.
-  // The retry loop only runs for the INITIAL fetch (loading=true, no cards
-  // yet). Polling retries (during generation) use the simpler fetchJobs()
-  // path below — a failed poll just skips that cycle and tries again next
-  // interval, which is fine because the user already has cards on screen.
-  const fetchJobsWithRetry = useCallback(async (isInitial: boolean) => {
+  // Fetch the job list from the backend. The backend runs in Docker (always
+  // on — no cold start), so a simple single fetch with no retry/backoff is
+  // correct. If the fetch fails, we surface the error immediately so the
+  // user knows the backend is unreachable (e.g. Docker not running) instead
+  // of staring at a "waking up" message for 50 seconds.
+  const fetchJobsWithRetry = useCallback(async (_isInitial: boolean) => {
     if (isFetchingRef.current) return;
     isFetchingRef.current = true;
     try {
-    const RETRY_DELAYS = isInitial ? [5000, 15000, 30000] : [];
-    const WAKEUP_THRESHOLD = 8000; // show 'waking up' after 8s
-    let lastErr: unknown = null;
-    for (let attempt = 0; attempt <= RETRY_DELAYS.length; attempt++) {
-      try {
-        // Race the fetch against the wakeup threshold so we can show the
-        // 'waking up' message WITHOUT aborting the fetch (the fetch keeps
-        // running — we just flip the UI state after 8s).
-        const fetchPromise = getMyJobs();
-        if (isInitial && attempt === 0) {
-          const timer = new Promise<void>((resolve) =>
-            setTimeout(() => resolve(), WAKEUP_THRESHOLD),
-          );
-          await Promise.race([fetchPromise.then(() => undefined), timer]);
-          // If the fetch hasn't resolved yet, show the waking-up message.
-          // The fetch continues in the background — we await it next.
-          setWakingUp(true);
-        }
-        const data = await fetchPromise;
-        setWakingUp(false);
-        // Filter out job_ids the user has explicitly deleted.
-        const apiCards = data.jobs.map(toCard).filter((c) => !deletedIds.has(c.jobId));
-        setCards((prev) => {
-          const apiIds = new Set(apiCards.map((c) => c.jobId));
-          // ARIA: only keep stale cards with TERMINAL statuses. A stale
-          // generating/optimizing/translating card means the server lost the
-          // job (restart/expiry) — keeping it would leave a frozen progress
-          // bar forever and the polling effect would keep firing heartbeats
-          // to a dead job. Drop it so the UI reflects reality.
-          const _ACTIVE = new Set(["generating", "optimizing", "translating"]);
-          const staleCards = prev.filter(
-            (c) => !apiIds.has(c.jobId) && !deletedIds.has(c.jobId) && !_ACTIVE.has(c.status),
-          );
-          return [...apiCards, ...staleCards];
-        });
-        setError(null);
-        return; // success — exit the retry loop
-      } catch (err) {
-        lastErr = err;
-        console.error(`[library-view] fetch attempt ${attempt + 1} failed:`, err);
-        // If this was the initial fetch and we haven't shown the waking-up
-        // message yet, show it now (the failure is likely a cold start).
-        if (isInitial) setWakingUp(true);
-        if (attempt < RETRY_DELAYS.length) {
-          const delay = RETRY_DELAYS[attempt];
-          console.log(`[library-view] retrying in ${delay / 1000}s (attempt ${attempt + 2}/${RETRY_DELAYS.length + 1})`);
-          await new Promise((r) => setTimeout(r, delay));
-        }
+      const data = await getMyJobs();
+      // Filter out job_ids the user has explicitly deleted.
+      const apiCards = data.jobs.map(toCard).filter((c) => !deletedIds.has(c.jobId));
+      setCards((prev) => {
+        const apiIds = new Set(apiCards.map((c) => c.jobId));
+        // Only keep stale cards with TERMINAL statuses. A stale
+        // generating/optimizing/translating card means the server lost the
+        // job (restart/expiry) — keeping it would leave a frozen progress
+        // bar forever and the polling effect would keep firing heartbeats
+        // to a dead job. Drop it so the UI reflects reality.
+        const _ACTIVE = new Set(["generating", "optimizing", "translating"]);
+        const staleCards = prev.filter(
+          (c) => !apiIds.has(c.jobId) && !deletedIds.has(c.jobId) && !_ACTIVE.has(c.status),
+        );
+        return [...apiCards, ...staleCards];
+      });
+      setError(null);
+    } catch (err) {
+      console.error("[library-view] fetch failed:", err);
+      if (cards.length === 0) {
+        const msg = err instanceof Error ? err.message : String(err);
+        setError(msg);
       }
-    }
-    // All retries exhausted — surface the error to the user.
-    setWakingUp(false);
-    if (isInitial && cards.length === 0) {
-      const msg = lastErr instanceof Error ? lastErr.message : String(lastErr);
-      // Friendlier message for the common cold-start timeout case.
-      const isTimeout =
-        /timeout|502|503|504|network|fetch failed/i.test(msg);
-      setError(
-        isTimeout
-          ? "The audiobook service is still waking up. Please try again in a moment."
-          : msg,
-      );
-    }
     } finally {
       isFetchingRef.current = false;
     }
   }, [deletedIds, cards.length]);
 
-  // Simple fetch (no retry) for polling — a failed poll just skips that cycle.
   const fetchJobs = useCallback(async () => {
     await fetchJobsWithRetry(false);
   }, [fetchJobsWithRetry]);
 
   useEffect(() => {
-    // Initial fetch with cold-start retry logic.
+    // Initial fetch on mount.
     fetchJobsWithRetry(true).finally(() => setLoading(false));
   }, [fetchJobsWithRetry]);
 
@@ -573,27 +516,7 @@ export function LibraryView() {
           </div>
         </ScrollReveal>
 
-        {loading && wakingUp && cards.length === 0 ? (
-          // ARIA cold-start state: the Flask service on Render's free tier is
-          // spinning up (takes 30-90s). Show explicit copy so the user knows
-          // this is expected, not a hang. Only shown when there are NO cached
-          // cards from localStorage — if cards exist, we show them with a
-          // non-blocking banner instead (below).
-          <div className="text-center py-20">
-            <Coffee
-              size={40}
-              strokeWidth={1}
-              className="mx-auto mb-4 animate-pulse"
-              style={{ color: "var(--aria-accent-glow)" }}
-            />
-            <p className="text-sm" style={{ color: "var(--aria-fg-muted)" }}>
-              Waking up the audiobook service…
-            </p>
-            <p className="text-xs mt-2" style={{ color: "var(--aria-fg-dim)" }}>
-              This can take up to a minute on first load.
-            </p>
-          </div>
-        ) : loading && !wakingUp ? (
+        {loading && cards.length === 0 ? (
           <div className="text-center py-20" style={{ color: "var(--aria-fg-dim)" }}>
             <Loader2 size={28} strokeWidth={1} className="mx-auto mb-3 animate-spin" />
             <p className="text-sm">Loading your library…</p>
@@ -624,28 +547,6 @@ export function LibraryView() {
           </div>
         ) : (
           <div>
-            {/* ARIA cold-start banner: cards are showing (from localStorage or
-                a previous fetch), but a refresh is retrying due to a cold
-                start. Non-blocking — the user can still interact with their
-                library while the refresh runs in the background. */}
-            {wakingUp && (
-              <div
-                className="text-center mb-4 py-2 px-4 rounded-lg"
-                style={{
-                  background: "var(--aria-bg-elevated)",
-                  border: "1px solid var(--aria-border)",
-                }}
-              >
-                <p className="text-xs" style={{ color: "var(--aria-fg-muted)" }}>
-                  <Coffee
-                    size={12}
-                    className="inline animate-pulse mr-1.5"
-                    style={{ color: "var(--aria-accent-glow)" }}
-                  />
-                  Refreshing your library — the service is waking up, this can take up to a minute.
-                </p>
-              </div>
-            )}
             <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-3 gap-5 sm:gap-7">
             {cards.map((card, i) => {
               const pct = progressPct(card);
@@ -796,14 +697,15 @@ export function LibraryView() {
                               {card.progressMessage || `Converting… ${pct}%`}
                             </p>
                             {(() => {
-                              // ARIA: stall banner — if no progress for 4+ min,
-                              // the free-tier server may be waking up or restarting.
+                              // Stall banner — if no progress for 4+ min, the
+                              // generation may have stalled (backend restart,
+                              // container crash, etc.).
                               const pu = card.progressUpdatedAt ?? 0;
                               if (pu > 0 && Date.now() / 1000 - pu > 240) {
                                 return (
                                   <div className="flex items-center gap-2">
                                     <span className="text-[10px] text-[var(--aria-fg-dim)]">
-                                      No progress for a few minutes — the free-tier server may be waking up or restarting
+                                      No progress for a few minutes — the generation may have stalled
                                     </span>
                                     <button
                                       onClick={(e) => { e.stopPropagation(); fetchJobs(); }}
