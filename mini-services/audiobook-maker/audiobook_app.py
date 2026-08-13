@@ -8521,13 +8521,20 @@ def api_analyze():
     _analyzed_epub_s3_key = ""
     try:
         import storage_backend
+        # Always record the epub_s3_key path (even without Storj) so the
+        # local-first restore can find the EPUB on the Docker volume after
+        # a restart. The key shape is "epubs/{job_id}/{filename}" — the
+        # filename is the local file's basename, which is what
+        # _restore_jobs_from_local_disk uses to locate it on disk.
+        s3_key = f"epubs/{job_id}/{safe_name}"
+        with _jobs_lock:
+            jobs[job_id]["epub_s3_key"] = s3_key
+        _analyzed_epub_s3_key = s3_key
         if storage_backend.is_enabled():
-            s3_key = f"epubs/{job_id}/{safe_name}"
             storage_backend.upload_file(str(file_path), s3_key)
-            with _jobs_lock:
-                jobs[job_id]["epub_s3_key"] = s3_key
-            _analyzed_epub_s3_key = s3_key
             print(f"[{job_id}] EPUB uploaded to S3/Storj: {s3_key}")
+        else:
+            print(f"[{job_id}] EPUB saved locally (no Storj): {s3_key}")
     except Exception as _e_s3:
         print(f"[{job_id}] EPUB S3 upload failed (non-fatal): {_e_s3}")
 
@@ -10473,7 +10480,8 @@ def api_job_chapters(job_id):
         "total_chars": info.total_chars,
         "estimated_minutes": round(_total_secs / 60.0, 1),
         "chapters": chapters,
-        "has_cover": bool(job.get("cover_path") or job.get("cover_hires")),
+        "has_cover": bool(job.get("cover_path") or job.get("cover_hires")
+                          or job.get("cover_thumb") or job.get("cover_s3_key")),
         # ARIA: derive selected_chapters from chapter_mp3s (the MERGED,
         # authoritative source across all generations). The job's
         # `selected_chapters` field is OVERWRITTEN per generation (only has
@@ -16348,12 +16356,27 @@ def _restore_jobs_from_local_disk():
         if not isinstance(_rec, dict):
             continue
         _epub_s3_key = _rec.get("epub_s3_key", "")
-        if not _epub_s3_key:
-            continue
         _work_dir = UPLOAD_DIR / _jid
-        _epub_filename = os.path.basename(_epub_s3_key)
-        _local_epub = _work_dir / _epub_filename
-        if not _local_epub.is_file():
+        _local_epub = None
+        if _epub_s3_key:
+            # Normal path: the registry has the s3_key, use its basename.
+            _epub_filename = os.path.basename(_epub_s3_key)
+            _candidate = _work_dir / _epub_filename
+            if _candidate.is_file():
+                _local_epub = _candidate
+        if not _local_epub:
+            # Fallback: epub_s3_key is missing or the file isn't where the
+            # key points. Scan the job directory for any EPUB/PDF/TXT file —
+            # the original upload is still on the Docker volume even if the
+            # registry never recorded its path (e.g. Storj was disabled when
+            # the job was created, or an older code version ran).
+            if _work_dir.is_dir():
+                for _entry in _work_dir.iterdir():
+                    if _entry.is_file() and _entry.suffix.lower() in (
+                            ".epub", ".pdf", ".txt", ".abm"):
+                        _local_epub = _entry
+                        break
+        if not _local_epub:
             _skipped += 1
             continue  # local file gone — leave for lazy Storj reconstruction
         try:
@@ -16378,10 +16401,10 @@ def _restore_jobs_from_local_disk():
                 jobs[_jid] = {
                     "status": "analyzed",
                     "epub_path": str(_local_epub),
-                    "epub_s3_key": _epub_s3_key,
+                    "epub_s3_key": _epub_s3_key or f"epubs/{_jid}/{_local_epub.name}",
                     "info": _info,
                     "last_poll": time.time(),
-                    "original_filename": _rec.get("original_filename") or _tok.get("original_filename", _epub_filename),
+                    "original_filename": _rec.get("original_filename") or _tok.get("original_filename", _local_epub.name),
                     "client_id": _rec.get("client_id", ""),
                     "client_ip": "",
                     "browser_lang": "",
