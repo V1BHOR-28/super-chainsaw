@@ -16324,9 +16324,22 @@ def _restore_jobs_from_local_disk():
     a fresh 'analyzed' job — exactly what _reconstruct_job_from_storj does,
     but without the network round-trip. This makes restarts instant when
     the Docker volume is present.
+
+    The registry only stores a minimal field set (client_id, file_hash,
+    epub_s3_key, chapter_mp3s, etc.). The richer fields — cover_thumb,
+    cover_s3_key, transcript_cues, bgm_mode, bgm_cues — live in the
+    download-token snapshots (_download_tokens). We merge those in here
+    so covers + transcripts survive restarts without hitting Storj.
     """
     _restored = 0
     _skipped = 0
+    # Build a {job_id → token_snapshot} index so we can enrich registry
+    # entries with cover/transcript/bgm fields that the registry doesn't store.
+    _token_by_job_id = {}
+    with _tokens_lock:
+        for _tok, _tinfo in _download_tokens.items():
+            if isinstance(_tinfo, dict) and _tinfo.get("job_id"):
+                _token_by_job_id[_tinfo["job_id"]] = _tinfo
     with _job_registry_lock:
         _reg_snapshot = dict(_job_registry)
     for _jid, _rec in _reg_snapshot.items():
@@ -16345,6 +16358,22 @@ def _restore_jobs_from_local_disk():
             continue  # local file gone — leave for lazy Storj reconstruction
         try:
             _info = _parse_book(str(_local_epub))
+            # Merge registry fields with the token snapshot (token has the
+            # richer fields: cover, transcript_cues, bgm_mode, etc.).
+            _tok = _token_by_job_id.get(_jid, {})
+            # Disk-scan fallback for the cover: even if neither the registry
+            # nor the token snapshot has cover_thumb, the cover file is on
+            # the local volume at UPLOAD_DIR/<job_id>/cover_thumb.{jpg,png}.
+            # Find it so /api/cover can serve it without hitting Storj.
+            _cover_thumb = _tok.get("cover_thumb", _rec.get("cover_thumb", ""))
+            _cover_mime = _tok.get("cover_mime", _rec.get("cover_mime", "image/jpeg"))
+            if not _cover_thumb or not os.path.exists(_cover_thumb):
+                for _ext in (".jpg", ".png", ".jpeg"):
+                    _candidate = str(_work_dir / ("cover_thumb" + _ext))
+                    if os.path.exists(_candidate):
+                        _cover_thumb = _candidate
+                        _cover_mime = "image/png" if _ext == ".png" else "image/jpeg"
+                        break
             with _jobs_lock:
                 jobs[_jid] = {
                     "status": "analyzed",
@@ -16352,7 +16381,7 @@ def _restore_jobs_from_local_disk():
                     "epub_s3_key": _epub_s3_key,
                     "info": _info,
                     "last_poll": time.time(),
-                    "original_filename": _rec.get("original_filename", _epub_filename),
+                    "original_filename": _rec.get("original_filename") or _tok.get("original_filename", _epub_filename),
                     "client_id": _rec.get("client_id", ""),
                     "client_ip": "",
                     "browser_lang": "",
@@ -16361,12 +16390,13 @@ def _restore_jobs_from_local_disk():
                     "language_detected": _rec.get("language_detected", False),
                     "selected_chapters": _rec.get("selected_chapters", []),
                     "chapter_mp3s": _rec.get("chapter_mp3s", []),
-                    "transcript_cues": _rec.get("transcript_cues", {}) or {},
-                    "bgm_mode": _rec.get("bgm_mode", "off"),
-                    "bgm_cues": _rec.get("bgm_cues", {}) or {},
-                    "cover_thumb": _rec.get("cover_thumb", ""),
-                    "cover_s3_key": _rec.get("cover_s3_key", ""),
-                    "cover_mime": _rec.get("cover_mime", "image/jpeg"),
+                    # Rich fields from the token snapshot (NOT in the registry):
+                    "transcript_cues": _tok.get("transcript_cues", {}) or _rec.get("transcript_cues", {}) or {},
+                    "bgm_mode": _tok.get("bgm_mode", _rec.get("bgm_mode", "off")),
+                    "bgm_cues": _tok.get("bgm_cues", {}) or _rec.get("bgm_cues", {}) or {},
+                    "cover_thumb": _cover_thumb,
+                    "cover_s3_key": _tok.get("cover_s3_key", _rec.get("cover_s3_key", "")),
+                    "cover_mime": _cover_mime,
                 }
             _restored += 1
         except Exception as _e:
