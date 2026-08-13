@@ -56,6 +56,8 @@ export type AriaSettings = {
   currentStreak: number
   longestStreak: number
   lastActiveDate: string | null
+  /** Preferred OpenRouter chat model id (e.g. "deepseek/deepseek-chat"). Persisted in UserSettings. */
+  modelPreference?: string
 }
 
 export type User = {

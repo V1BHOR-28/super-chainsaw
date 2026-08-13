@@ -1,0 +1,139 @@
+# docker-compose.yml — full local ARIA stack.
+#
+# Brings up:
+#   1. `db` — Postgres 16 with the pgvector extension (required for semantic
+#      search over messages / memories / knowledge).
+#   2. `abm` — the Flask audiobook-maker backend. Receives EPUB uploads,
+#      synthesizes audio via Edge-TTS, mixes BGM, uploads to R2.
+#   3. `web` — the Next.js frontend. Talks to `db` for user data and proxies
+#      `/api/abm/*` to the `abm` service.
+#
+# ─── Quick start (local dev) ────────────────────────────────────────────────
+#   1. cp .env.example .env  → fill in real API keys (Groq, Gemini, OpenRouter,
+#      Tavily/Serper, Resend, NextAuth, Google OAuth, R2 creds for ABM).
+#   2. docker compose up --build
+#   3. Open http://localhost:3000
+#
+# ─── Notes ──────────────────────────────────────────────────────────────────
+# - Postgres data persists in a named volume `pgdata`. Wipe with
+#   `docker compose down -v` (DESTRUCTIVE — drops all user data).
+# - The ABM service needs R2 creds to persist audio. Without them, audio
+#   disappears when the container restarts (same behavior as Render's free
+#   tier). Set ABM_S3_* in .env to enable persistence.
+# - The web service runs `prisma migrate deploy` on startup via
+#   docker-entrypoint.sh — no manual DB setup needed.
+
+services:
+  # ── Postgres + pgvector ──────────────────────────────────────────────────
+  db:
+    image: pgvector/pgvector:pg16
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-aria}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-aria_dev_password}
+      POSTGRES_DB: ${POSTGRES_DB:-aria}
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      # pg_isready checks that Postgres accepts connections. The pgvector
+      # extension is created by Prisma's first migration (or manually via
+      # `CREATE EXTENSION IF NOT EXISTS vector;` — see README.md).
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-aria} -d ${POSTGRES_DB:-aria}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ── Flask audiobook-maker backend ────────────────────────────────────────
+  abm:
+    build:
+      context: ./mini-services/audiobook-maker
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "7860:7860"
+    environment:
+      # Core
+      # /data/abm-data is the path used in production on Hugging Face Spaces
+      # (HF's 10GB persistent volume is mounted at /data). Mount a Docker
+      # volume here for local parity.
+      ABM_DATA_DIR: /data/abm-data
+      ABM_JOB_RETENTION_SEC: "604800"
+      PYTHON_VERSION: "3.11"
+      PORT: "7860"
+      # LLM (Groq) — required for text optimization
+      ABM_LLM_API_KEY: ${GROQ_API_KEY:-}
+      ABM_LLM_API_BASE: https://api.groq.com/openai/v1
+      ABM_LLM_MODEL: llama-3.3-70b-versatile
+      # Gemini (premium TTS) — optional, falls back to Edge-TTS if absent
+      ABM_GEMINI_BACKEND: apikey
+      ABM_GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      # Cloudflare R2 (persistent storage)
+      ABM_S3_ENDPOINT: ${ABM_S3_ENDPOINT:-}
+      ABM_S3_ACCESS_KEY: ${ABM_S3_ACCESS_KEY:-}
+      ABM_S3_SECRET_KEY: ${ABM_S3_SECRET_KEY:-}
+      ABM_S3_BUCKET: ${ABM_S3_BUCKET:-}
+      # CORS — allow the web container + host browser
+      ABM_ALLOWED_ORIGINS: ${ABM_ALLOWED_ORIGINS:-http://localhost:3000}
+    volumes:
+      # Persist scratch data across restarts (covers, in-progress jobs).
+      # Final artifacts go to R2 if configured; this is just for the working dir.
+      # Mirrors HF Spaces' /data persistent storage.
+      - abm-data:/data/abm-data
+    healthcheck:
+      test: ["CMD", "curl", "--silent", "--fail", "http://localhost:7860/"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 30s
+
+  # ── Next.js frontend ─────────────────────────────────────────────────────
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      # Database — points at the `db` service. The `?sslmode=require` suffix
+      # is omitted because the connection is internal to the compose network
+      # (no TLS needed).
+      DATABASE_URL: postgresql://${POSTGRES_USER:-aria}:${POSTGRES_PASSWORD:-aria_dev_password}@db:5432/${POSTGRES_DB:-aria}
+      # NextAuth
+      NEXTAUTH_SECRET: ${NEXTAUTH_SECRET:-dev-only-secret-change-me}
+      NEXTAUTH_URL: ${NEXTAUTH_URL:-http://localhost:3000}
+      GOOGLE_CLIENT_ID: ${GOOGLE_CLIENT_ID:-}
+      GOOGLE_CLIENT_SECRET: ${GOOGLE_CLIENT_SECRET:-}
+      # Email
+      RESEND_API_KEY: ${RESEND_API_KEY:-}
+      EMAIL_FROM: ${EMAIL_FROM:-onboarding@resend.dev}
+      # LLM providers
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      # Web search
+      TAVILY_API_KEY: ${TAVILY_API_KEY:-}
+      SERPER_API_KEY: ${SERPER_API_KEY:-}
+      # ABM proxy
+      ABM_SERVICE_URL: http://abm:7860
+      NEXT_PUBLIC_ABM_DIRECT_URL: http://localhost:7860
+      # Cron (optional)
+      CRON_SECRET: ${CRON_SECRET:-}
+      ADMIN_EMAILS: ${ADMIN_EMAILS:-}
+    depends_on:
+      db:
+        condition: service_healthy
+      abm:
+        condition: service_started
+    healthcheck:
+      test: ["CMD-SHELL", "wget --quiet --tries=1 --spider http://localhost:3000/ || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
+volumes:
+  pgdata:
+  abm-data:

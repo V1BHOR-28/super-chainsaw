@@ -27,7 +27,12 @@ const EFFECTIVE_SECRET = NEXTAUTH_SECRET || 'dev-only-not-for-production'
  * The session callback enriches the token with the user's database ID so
  * API routes can scope data by the authenticated user.
  */
-export const authOptions: NextAuthOptions = {
+// `trustHost` is supported by next-auth v4.24+ at runtime but isn't in the
+// legacy NextAuthOptions type. We extend the type locally so TypeScript accepts
+// it without resorting to `as any` everywhere the options are consumed.
+type AuthOptionsWithTrustHost = NextAuthOptions & { trustHost?: boolean }
+
+export const authOptions: AuthOptionsWithTrustHost = {
   // Trust the host header on all domains (z.ai preview, localhost, production)
   // Without this, NextAuth rejects requests from non-localhost domains.
   cookies: {

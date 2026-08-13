@@ -16423,12 +16423,13 @@ _init_log_dedup()
 _ensure_background_threads()
 
 if __name__ == "__main__":
-    # Render provides $PORT (typically 10000) and requires binding to 0.0.0.0.
-    # Other hosts (local dev, sandbox) use ABM_PORT (default 5601) and 127.0.0.1.
-    # We detect Render by checking if $PORT is set; if so, bind to 0.0.0.0:$PORT.
-    RENDER_PORT = os.environ.get("PORT")
-    if RENDER_PORT:
-        PORT = int(RENDER_PORT)
+    # Render / Hugging Face Spaces / most cloud hosts provide $PORT and
+    # require binding to 0.0.0.0. We detect that by checking if $PORT is set;
+    # if so, bind to 0.0.0.0:$PORT. Otherwise (local dev) use ABM_PORT
+    # (default 5601) on 127.0.0.1.
+    CLOUD_PORT = os.environ.get("PORT")
+    if CLOUD_PORT:
+        PORT = int(CLOUD_PORT)
         HOST = "0.0.0.0"
     else:
         PORT = int(os.environ.get("ABM_PORT", "5601"))

@@ -1,0 +1,36 @@
+# Docker ignore for the audiobook-maker Flask backend.
+# Speeds up builds by preventing code changes from invalidating the pip cache,
+# and keeps secrets out of the image if they ever leak into the working tree.
+
+# Python caches — never useful inside a Docker image.
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# pytest caches + test artifacts
+.pytest_cache/
+.coverage
+htmlcov/
+tests/
+
+# Editor / OS noise
+.vscode/
+.idea/
+.DS_Store
+
+# Logs and local data
+*.log
+/tmp/
+/tmp/abm-data/
+
+# Local env files — secrets must never be baked into the image.
+.env
+.env.*
+!.env.example
+
+# Markdown docs — not needed at runtime, EXCEPT README.md which Hugging Face
+# Spaces requires at the repo root for the Space's frontmatter metadata
+# (title, sdk, app_port, etc.). Without README.md the Space won't build.
+*.md
+!README.md
