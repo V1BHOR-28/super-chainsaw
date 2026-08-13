@@ -9124,6 +9124,19 @@ def api_cover(job_id):
             resp = send_file(cover_path, mimetype=mime)
             resp.headers["Cache-Control"] = "public, max-age=604800, immutable"
             return resp
+    # b2. broader disk scan — if the cover was saved with a non-standard
+    # name (e.g. by _extract_cover_for_preview for certain EPUBs), scan
+    # the job directory for any .jpg/.png/.jpeg file.
+    if work_dir.is_dir():
+        for _entry in work_dir.iterdir():
+            if not _entry.is_file():
+                continue
+            if _entry.suffix.lower() in (".jpg", ".png", ".jpeg"):
+                cover_path = str(_entry)
+                mime = "image/png" if _entry.suffix.lower() == ".png" else "image/jpeg"
+                resp = send_file(cover_path, mimetype=mime)
+                resp.headers["Cache-Control"] = "public, max-age=604800, immutable"
+                return resp
     # c. R2/S3 fallback (the cover was uploaded during /api/analyze)
     cover_s3_key = job.get("cover_s3_key")
     if cover_s3_key:
@@ -11296,7 +11309,9 @@ def api_my_jobs():
             "total_chapters": tinfo.get("total_chapters", 0),
             # ARIA: has_cover from the token snapshot — check cover_s3_key too
             # so restored jobs (after Render restart) still advertise their cover.
-            "has_cover": bool(tinfo.get("has_cover", False) or tinfo.get("cover_s3_key", "")),
+            "has_cover": bool(tinfo.get("has_cover", False)
+                              or tinfo.get("cover_s3_key", "")
+                              or tinfo.get("cover_thumb", "")),
             # ARIA: bgm_mode from the token snapshot so restored jobs know
             # whether to fetch BGM cues (runtime) after a restart.
             "bgm_mode": tinfo.get("bgm_mode", "off"),
