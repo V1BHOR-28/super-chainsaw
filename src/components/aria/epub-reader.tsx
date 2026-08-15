@@ -1,217 +1,129 @@
 "use client";
 
-import { useEffect, useRef, useState, useCallback } from "react";
-import { Book, ChevronLeft, ChevronRight, Loader2, X, Type } from "lucide-react";
+import { useState, useRef, useCallback, useEffect } from "react";
+import { Book, X, Type, ChevronLeft, ChevronRight, Loader2 } from "lucide-react";
+import { ReactReader } from "react-reader";
+import type { Rendition } from "epubjs";
 import { usePlayerStore } from "@/lib/player-store";
 import { getEpubFileUrl } from "@/lib/abm-api";
 
 /**
- * EpubReader — in-browser EPUB reader using epub.js.
+ * EpubReader — in-browser EPUB reader using react-reader (epub.js wrapper).
  *
  * Renders the actual book content (real paragraphs, images, styling) in a
  * paginated book-like UI. The reader is COMPLETELY INDEPENDENT of audio
  * playback — no listeners on audio position, no auto-advance, no sync.
- * The user reads at their own pace while audio plays in the background.
  *
- * Features:
- * - Paginated rendering via epub.js (handles XHTML/CSS/images correctly)
- * - Manual page-turn (prev/next arrows + keyboard arrows)
- * - Manual chapter navigation (sidebar list, matches the app's chapter list)
- * - Font size control (smaller / larger)
- * - Light/dark theme toggle
- * - Independent from audio playback state
+ * react-reader handles all the epub.js lifecycle internally:
+ * - Proper timing for renderTo() + display() (no race conditions)
+ * - Built-in ResizeObserver / window resize handling
+ * - Built-in keyboard navigation (←/→)
+ * - Built-in TOC sidebar
+ * - Built-in loading/error states
+ *
+ * We add: font size control, light/dark theme, page counter, and
+ * fetch the EPUB as a Blob (to avoid Vercel proxy issues with large files).
  */
 
 export function EpubReader() {
   const job = usePlayerStore((s) => s.currentJob);
   const toggleReader = usePlayerStore((s) => s.toggleReader);
-  const viewerRef = useRef<HTMLDivElement | null>(null);
-  const renditionRef = useRef<unknown>(null);
-  const bookRef = useRef<unknown>(null);
+
+  const [location, setLocation] = useState<string | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [epubData, setEpubData] = useState<ArrayBuffer | null>(null);
   const [fontSize, setFontSize] = useState(100);
   const [theme, setTheme] = useState<"dark" | "light">("dark");
-  const [currentLocation, setCurrentLocation] = useState<string>("");
+  const renditionRef = useRef<Rendition | null>(null);
+  const [pageInfo, setPageInfo] = useState("");
 
-  // Load the EPUB
+  // Fetch the EPUB as an ArrayBuffer (avoids Vercel proxy issues)
   useEffect(() => {
-    if (!job?.jobId || !viewerRef.current) return;
+    if (!job?.jobId) return;
+    let cancelled = false;
 
-    setLoading(true);
-    setError(null);
-
-    // Dynamic import — epub.js is a browser-only library
-    import("epubjs").then(async (ePub) => {
-      try {
-        // Fetch the EPUB as a Blob first, then pass it to epub.js.
-        // This avoids issues with the Vercel proxy mangling the response
-        // or timing out on large EPUB files. epub.js can load from a
-        // Blob/ArrayBuffer directly.
-        const url = getEpubFileUrl(job.jobId);
-        const resp = await fetch(url, { credentials: "include" });
-        if (!resp.ok) {
-          setError(`Could not load EPUB (HTTP ${resp.status}). Make sure the backend is running.`);
-          setLoading(false);
-          return;
-        }
-        const blob = await resp.blob();
-        if (blob.size === 0) {
-          setError("EPUB file is empty or not found on the server.");
-          setLoading(false);
-          return;
-        }
-
-        const book = ePub.default(blob);
-        bookRef.current = book;
-
-        // FIX 1: Wait one animation frame so the surrounding flex layout
-        // has committed and viewerRef.current has its real, final pixel
-        // width. Without this, epub.js measures a stale/zero width
-        // synchronously and text overflows instead of paginating.
-        await new Promise((resolve) => requestAnimationFrame(resolve));
-
-        const rendition = book.renderTo(viewerRef.current, {
-          width: "100%",
-          height: "100%",
-          spread: "none",
-          flow: "paginated",
-        });
-        renditionRef.current = rendition;
-
-        // Register themes BEFORE display() — register/select don't touch
-        // layout, only fontSize() does, and we defer that to after display.
-        registerThemes(rendition);
-
-        // FIX 2: ResizeObserver — construct here, observe AFTER display
-        // resolves (see .then() callback below).
-        const resizeObserver = new ResizeObserver(() => {
-          try {
-            const r = renditionRef.current as { resize?: () => void } | null;
-            if (r?.resize) r.resize();
-          } catch {
-            // non-fatal — rendition may be destroyed during unmount
-          }
-        });
-
-        const displayed = rendition.display();
-        displayed.then(() => {
-          // Apply theme + font size AFTER display() resolves —
-          // r.themes.fontSize() triggers a layout recalculation that
-          // interferes with the initial pagination if called before
-          // display() finishes, causing "Page 1/1" with only the cover.
-          applyTheme(rendition, theme, fontSize);
-          setLoading(false);
-          updateLocation(book, rendition);
-          // Now safe to observe — initial pagination is complete.
-          resizeObserver.observe(viewerRef.current!);
-        }).catch((err: unknown) => {
-          console.error("[epub-reader] display error:", err);
-          setError("Could not open this EPUB. It may be a PDF or unsupported format.");
-          setLoading(false);
-        });
-
-        // Keyboard navigation
-        const onKey = (e: KeyboardEvent) => {
-          if (e.key === "ArrowLeft") goPrev();
-          if (e.key === "ArrowRight") goNext();
-        };
-        document.addEventListener("keydown", onKey);
-
-        rendition.on("relocated", () => {
-          updateLocation(book, rendition);
-        });
-
-        return () => {
-          document.removeEventListener("keydown", onKey);
-          resizeObserver.disconnect();
-          rendition.destroy();
-        };
-      } catch (err) {
-        console.error("[epub-reader] init error:", err);
-        setError("Failed to initialize EPUB reader.");
+    const url = getEpubFileUrl(job.jobId);
+    fetch(url, { credentials: "include" })
+      .then((resp) => {
+        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
+        return resp.arrayBuffer();
+      })
+      .then((buf) => {
+        if (cancelled) return;
+        if (buf.byteLength === 0) throw new Error("empty file");
+        setEpubData(buf);
         setLoading(false);
-      }
-    }).catch(() => {
-      setError("epub.js library failed to load.");
-      setLoading(false);
-    });
+      })
+      .catch((err) => {
+        if (cancelled) return;
+        setError(
+          err instanceof Error
+            ? `Could not load EPUB (${err.message}). Make sure the backend is running.`
+            : "Could not load EPUB."
+        );
+        setLoading(false);
+      });
+    return () => { cancelled = true; };
   }, [job?.jobId]);
 
-  // Apply theme/font changes
+  // Apply font size + theme whenever they change
   useEffect(() => {
-    if (renditionRef.current) {
-      applyTheme(renditionRef.current, theme, fontSize);
-    }
-  }, [fontSize, theme]);
+    const rendition = renditionRef.current;
+    if (!rendition) return;
 
-  // Register theme definitions — safe to call before display().
-  // register() + select() don't trigger layout recalculation.
-  function registerThemes(rendition: unknown) {
-    const r = rendition as {
-      themes: {
-        register: (name: string, styles: Record<string, unknown>) => void;
-        select: (name: string) => void;
-        fontSize: (size: string) => void;
-      };
-    };
+    // Register + apply themes
     const darkTheme = {
-      body: { "background": "#1a1a1a", "color": "#e0e0e0" },
-      a: { color: "#f59e0b" },
+      body: { background: "#1a1a1a", color: "#e0e0e0" },
       p: { "font-family": "Georgia, serif", "line-height": "1.8" },
+      a: { color: "#f59e0b" },
     };
     const lightTheme = {
-      body: { "background": "#ffffff", "color": "#1a1a1a" },
-      a: { color: "#2563eb" },
+      body: { background: "#ffffff", color: "#1a1a1a" },
       p: { "font-family": "Georgia, serif", "line-height": "1.8" },
+      a: { color: "#2563eb" },
     };
-    r.themes.register("dark", darkTheme);
-    r.themes.register("light", lightTheme);
-  }
+    rendition.themes.register("dark", darkTheme);
+    rendition.themes.register("light", lightTheme);
+    rendition.themes.select(theme);
+    rendition.themes.fontSize(`${fontSize}%`);
+  }, [fontSize, theme]);
 
-  // Apply theme + font size — MUST be called after display() resolves.
-  // fontSize() triggers a layout recalculation that interferes with
-  // initial pagination if called before display() finishes.
-  function applyTheme(rendition: unknown, t: "dark" | "light", size: number) {
-    const r = rendition as {
-      themes: {
-        register: (name: string, styles: Record<string, unknown>) => void;
-        select: (name: string) => void;
-        fontSize: (size: string) => void;
-      };
+  const handleRendition = useCallback((rendition: Rendition) => {
+    renditionRef.current = rendition;
+    // Apply initial theme
+    const darkTheme = {
+      body: { background: "#1a1a1a", color: "#e0e0e0" },
+      p: { "font-family": "Georgia, serif", "line-height": "1.8" },
+      a: { color: "#f59e0b" },
     };
-    r.themes.select(t);
-    r.themes.fontSize(`${size}%`);
-  }
-
-  function updateLocation(book: unknown, rendition: unknown) {
-    try {
-      const b = book as { navigation: { toc: unknown[] } };
-      const r = rendition as {
-        currentLocation: () => {
-          start: { cfi: string; displayed: { page: number; total: number } };
-          href: string;
-        };
-      };
-      const loc = r.currentLocation();
-      if (loc?.start) {
-        const page = loc.start.displayed?.page || 1;
-        const total = loc.start.displayed?.total || 1;
-        setCurrentLocation(`Page ${page} / ${total}`);
-      }
-    } catch {
-      // non-fatal
-    }
-  }
-
-  const goPrev = useCallback(() => {
-    const r = renditionRef.current as { prev?: () => Promise<void> } | null;
-    if (r?.prev) r.prev();
+    const lightTheme = {
+      body: { background: "#ffffff", color: "#1a1a1a" },
+      p: { "font-family": "Georgia, serif", "line-height": "1.8" },
+      a: { color: "#2563eb" },
+    };
+    rendition.themes.register("dark", darkTheme);
+    rendition.themes.register("light", lightTheme);
+    rendition.themes.select("dark");
+    rendition.themes.fontSize("100%");
   }, []);
 
-  const goNext = useCallback(() => {
-    const r = renditionRef.current as { next?: () => Promise<void> } | null;
-    if (r?.next) r.next();
+  const handleLocationChanged = useCallback((loc: string) => {
+    setLocation(loc);
+    // Update page info from the rendition
+    const rendition = renditionRef.current;
+    if (rendition) {
+      try {
+        const location = rendition.currentLocation();
+        if (location?.start?.displayed) {
+          const page = location.start.displayed.page;
+          const total = location.start.displayed.total;
+          setPageInfo(`Page ${page} / ${total}`);
+        }
+      } catch {
+        // non-fatal
+      }
+    }
   }, []);
 
   if (!job?.jobId) return null;
@@ -237,12 +149,12 @@ export function EpubReader() {
           >
             Reader
           </span>
-          {currentLocation && (
+          {pageInfo && (
             <span
               className="text-[10px] font-mono"
               style={{ color: "var(--aria-fg-dim)" }}
             >
-              {currentLocation}
+              {pageInfo}
             </span>
           )}
         </div>
@@ -293,7 +205,10 @@ export function EpubReader() {
             className="absolute inset-0 flex items-center justify-center"
             style={{ background: theme === "dark" ? "#1a1a1a" : "#fff" }}
           >
-            <Loader2 className="w-6 h-6 animate-spin" style={{ color: "var(--aria-accent-glow)" }} />
+            <Loader2
+              className="w-6 h-6 animate-spin"
+              style={{ color: "var(--aria-accent-glow)" }}
+            />
           </div>
         )}
         {error && (
@@ -306,40 +221,24 @@ export function EpubReader() {
             </p>
           </div>
         )}
-
-        {/* epub.js renders into this div */}
-        <div
-          ref={viewerRef}
-          className="w-full h-full"
-          style={{ display: loading || error ? "none" : "block" }}
-        />
-
-        {/* Page-turn arrows */}
-        {!loading && !error && (
-          <>
-            <button
-              onClick={goPrev}
-              className="absolute left-2 top-1/2 -translate-y-1/2 p-2 rounded-full transition-colors hover:bg-white/10"
-              style={{
-                background: "rgba(0,0,0,0.3)",
+        {epubData && !loading && !error && (
+          <ReactReader
+            url={epubData}
+            location={location}
+            locationChanged={handleLocationChanged}
+            getRendition={handleRendition}
+            showToc={true}
+            epubOptions={{
+              spread: "none",
+              flow: "paginated",
+            }}
+            readerStyles={{
+              container: {
+                background: theme === "dark" ? "#1a1a1a" : "#ffffff",
                 color: theme === "dark" ? "#e0e0e0" : "#1a1a1a",
-              }}
-              title="Previous page (←)"
-            >
-              <ChevronLeft className="w-5 h-5" />
-            </button>
-            <button
-              onClick={goNext}
-              className="absolute right-2 top-1/2 -translate-y-1/2 p-2 rounded-full transition-colors hover:bg-white/10"
-              style={{
-                background: "rgba(0,0,0,0.3)",
-                color: theme === "dark" ? "#e0e0e0" : "#1a1a1a",
-              }}
-              title="Next page (→)"
-            >
-              <ChevronRight className="w-5 h-5" />
-            </button>
-          </>
+              },
+            }}
+          />
         )}
       </div>
     </div>
