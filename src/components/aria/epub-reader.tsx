@@ -1,130 +1,217 @@
 "use client";
 
-import { useState, useRef, useCallback, useEffect } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 import { Book, X, Type, ChevronLeft, ChevronRight, Loader2 } from "lucide-react";
-import { ReactReader } from "react-reader";
-import type { Rendition } from "epubjs";
 import { usePlayerStore } from "@/lib/player-store";
 import { getEpubFileUrl } from "@/lib/abm-api";
 
 /**
- * EpubReader — in-browser EPUB reader using react-reader (epub.js wrapper).
+ * EpubReader — in-browser EPUB reader using foliate-js.
  *
- * Renders the actual book content (real paragraphs, images, styling) in a
- * paginated book-like UI. The reader is COMPLETELY INDEPENDENT of audio
- * playback — no listeners on audio position, no auto-advance, no sync.
+ * foliate-js uses a custom HTML element (<foliate-view>) which handles
+ * pagination, TOC, themes, and rendering internally via CSS multi-column
+ * layout. No React lifecycle timing issues — the web component manages its
+ * own lifecycle independently of React.
  *
- * react-reader handles all the epub.js lifecycle internally:
- * - Proper timing for renderTo() + display() (no race conditions)
- * - Built-in ResizeObserver / window resize handling
- * - Built-in keyboard navigation (←/→)
- * - Built-in TOC sidebar
- * - Built-in loading/error states
- *
- * We add: font size control, light/dark theme, page counter, and
- * fetch the EPUB as a Blob (to avoid Vercel proxy issues with large files).
+ * The reader is COMPLETELY INDEPENDENT of audio playback — no listeners
+ * on audio position, no auto-advance, no sync.
  */
 
 export function EpubReader() {
   const job = usePlayerStore((s) => s.currentJob);
   const toggleReader = usePlayerStore((s) => s.toggleReader);
 
-  const [location, setLocation] = useState<string | null>(null);
-  const [hasFirstLocation, setHasFirstLocation] = useState(false);
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const viewRef = useRef<HTMLElement | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [epubData, setEpubData] = useState<ArrayBuffer | null>(null);
   const [fontSize, setFontSize] = useState(100);
   const [theme, setTheme] = useState<"dark" | "light">("dark");
-  const renditionRef = useRef<Rendition | null>(null);
   const [pageInfo, setPageInfo] = useState("");
+  const [tocItems, setTocItems] = useState<{ label: string; href: string }[]>(
+    [],
+  );
+  const [showToc, setShowToc] = useState(false);
 
-  // Fetch the EPUB as an ArrayBuffer (avoids Vercel proxy issues)
+  // Load foliate-js script + initialize the reader
   useEffect(() => {
-    if (!job?.jobId) return;
-    let cancelled = false;
+    if (!job?.jobId || !containerRef.current) return;
 
-    const url = getEpubFileUrl(job.jobId);
-    fetch(url, { credentials: "include" })
-      .then((resp) => {
-        if (!resp.ok) throw new Error(`HTTP ${resp.status}`);
-        return resp.arrayBuffer();
-      })
-      .then((buf) => {
-        if (cancelled) return;
-        if (buf.byteLength === 0) throw new Error("empty file");
-        setEpubData(buf);
-        setLoading(false);
-      })
-      .catch((err) => {
-        if (cancelled) return;
-        setError(
-          err instanceof Error
-            ? `Could not load EPUB (${err.message}). Make sure the backend is running.`
-            : "Could not load EPUB."
-        );
-        setLoading(false);
+    let cancelled = false;
+    setLoading(true);
+    setError(null);
+
+    // Load foliate-js view.js (ES module — imports its own dependencies)
+    const script = document.createElement("script");
+    script.type = "module";
+    script.textContent = `
+      import '/foliate-js/view.js';
+      window.__foliateReady = true;
+      window.dispatchEvent(new Event('foliate-ready'));
+    `;
+    document.head.appendChild(script);
+
+    const init = async () => {
+      // Wait for foliate-js to be ready
+      if (!window.__foliateReady) {
+        await new Promise<void>((resolve) => {
+          window.addEventListener("foliate-ready", () => resolve(), {
+            once: true,
+          });
+        });
+      }
+
+      if (cancelled) return;
+
+      // Create the <foliate-view> custom element
+      const view = document.createElement("foliate-view") as HTMLElement & {
+        open: (file: Blob | string) => Promise<void>;
+        next: () => void;
+        prev: () => void;
+        goTo: (href: string) => void;
+        renderer: {
+          setAppearance: (opts: Record<string, unknown>) => void;
+        };
+      };
+      view.style.width = "100%";
+      view.style.height = "100%";
+      view.style.border = "none";
+
+      // Apply initial theme
+      view.renderer = view.renderer || {};
+      try {
+        view.renderer.setAppearance({
+          theme: theme === "dark" ? "dark" : "light",
+        });
+      } catch {
+        // setAppearance may not exist on all versions — use CSS instead
+      }
+
+      containerRef.current!.innerHTML = "";
+      containerRef.current!.appendChild(view);
+      viewRef.current = view;
+
+      // Listen for relocation (page changes)
+      view.addEventListener("relocate", (e: Event) => {
+        const detail = (e as CustomEvent).detail;
+        if (detail?.fraction !== undefined) {
+          const pct = Math.round(detail.fraction * 100);
+          setPageInfo(`${pct}%`);
+        }
+        if (detail?.tocItem?.label) {
+          setPageInfo(`${detail.tocItem.label}`);
+        }
       });
-    return () => { cancelled = true; };
+
+      // Fetch the EPUB and open it
+      try {
+        const url = getEpubFileUrl(job.jobId);
+        const resp = await fetch(url, { credentials: "include" });
+        if (!resp.ok) {
+          throw new Error(`HTTP ${resp.status}`);
+        }
+        const blob = await resp.blob();
+        if (blob.size === 0) {
+          throw new Error("empty file");
+        }
+
+        await view.open(blob);
+        if (!cancelled) {
+          setLoading(false);
+
+          // Try to get TOC
+          try {
+            const book = (view as unknown as { book?: { toc?: unknown[] } })
+              .book;
+            if (book?.toc) {
+              const toc = book.toc.map((item: unknown) => {
+                const i = item as {
+                  label: string;
+                  href: string;
+                  subitems?: unknown[];
+                };
+                return { label: i.label, href: i.href };
+              });
+              setTocItems(toc);
+            }
+          } catch {
+            // non-fatal
+          }
+        }
+      } catch (err) {
+        if (!cancelled) {
+          setError(
+            err instanceof Error
+              ? `Could not load EPUB (${err.message}). Make sure the backend is running.`
+              : "Could not load EPUB.",
+          );
+          setLoading(false);
+        }
+      }
+    };
+
+    init();
+
+    return () => {
+      cancelled = true;
+      if (viewRef.current) {
+        try {
+          (viewRef.current as unknown as { destroy?: () => void }).destroy?.();
+        } catch {
+          // non-fatal
+        }
+      }
+      if (containerRef.current) {
+        containerRef.current.innerHTML = "";
+      }
+      script.remove();
+    };
   }, [job?.jobId]);
 
-  // Apply font size + theme whenever they change
+  // Apply font size changes
   useEffect(() => {
-    const rendition = renditionRef.current;
-    if (!rendition) return;
+    if (!containerRef.current) return;
+    const iframe = containerRef.current.querySelector("iframe");
+    if (iframe?.contentDocument) {
+      iframe.contentDocument.documentElement.style.fontSize = `${fontSize}%`;
+    }
+  }, [fontSize]);
 
-    // Register + apply themes
-    const darkTheme = {
-      body: { background: "#1a1a1a", color: "#e0e0e0" },
-      p: { "font-family": "Georgia, serif", "line-height": "1.8" },
-      a: { color: "#f59e0b" },
-    };
-    const lightTheme = {
-      body: { background: "#ffffff", color: "#1a1a1a" },
-      p: { "font-family": "Georgia, serif", "line-height": "1.8" },
-      a: { color: "#2563eb" },
-    };
-    rendition.themes.register("dark", darkTheme);
-    rendition.themes.register("light", lightTheme);
-    rendition.themes.select(theme);
-    rendition.themes.fontSize(`${fontSize}%`);
-  }, [fontSize, theme]);
+  // Apply theme changes
+  useEffect(() => {
+    if (!containerRef.current) return;
+    const iframe = containerRef.current.querySelector("iframe");
+    if (iframe?.contentDocument) {
+      const doc = iframe.contentDocument;
+      if (theme === "dark") {
+        doc.documentElement.style.background = "#1a1a1a";
+        doc.documentElement.style.color = "#e0e0e0";
+        doc.body.style.background = "#1a1a1a";
+        doc.body.style.color = "#e0e0e0";
+      } else {
+        doc.documentElement.style.background = "#ffffff";
+        doc.documentElement.style.color = "#1a1a1a";
+        doc.body.style.background = "#ffffff";
+        doc.body.style.color = "#1a1a1a";
+      }
+    }
+  }, [theme]);
 
-  const handleRendition = useCallback((rendition: Rendition) => {
-    renditionRef.current = rendition;
-    // Apply initial theme
-    const darkTheme = {
-      body: { background: "#1a1a1a", color: "#e0e0e0" },
-      p: { "font-family": "Georgia, serif", "line-height": "1.8" },
-      a: { color: "#f59e0b" },
-    };
-    const lightTheme = {
-      body: { background: "#ffffff", color: "#1a1a1a" },
-      p: { "font-family": "Georgia, serif", "line-height": "1.8" },
-      a: { color: "#2563eb" },
-    };
-    rendition.themes.register("dark", darkTheme);
-    rendition.themes.register("light", lightTheme);
-    rendition.themes.select("dark");
-    rendition.themes.fontSize("100%");
+  const goPrev = useCallback(() => {
+    const view = viewRef.current as unknown as { prev?: () => void } | null;
+    if (view?.prev) view.prev();
   }, []);
 
-  const handleLocationChanged = useCallback((loc: string) => {
-    setLocation(loc);
-    setHasFirstLocation(true);
-    // Update page info from the rendition
-    const rendition = renditionRef.current;
-    if (rendition) {
-      try {
-        const location = rendition.currentLocation();
-        if (location?.start?.displayed) {
-          const page = location.start.displayed.page;
-          const total = location.start.displayed.total;
-          setPageInfo(`Page ${page} / ${total}`);
-        }
-      } catch {
-        // non-fatal
-      }
+  const goNext = useCallback(() => {
+    const view = viewRef.current as unknown as { next?: () => void } | null;
+    if (view?.next) view.next();
+  }, []);
+
+  const goToChapter = useCallback((href: string) => {
+    const view = viewRef.current as unknown as { goTo?: (href: string) => void } | null;
+    if (view?.goTo) {
+      view.goTo(href);
+      setShowToc(false);
     }
   }, []);
 
@@ -153,15 +240,26 @@ export function EpubReader() {
           </span>
           {pageInfo && (
             <span
-              className="text-[10px] font-mono"
+              className="text-[10px] font-mono truncate max-w-[200px]"
               style={{ color: "var(--aria-fg-dim)" }}
             >
               {pageInfo}
             </span>
           )}
+          {tocItems.length > 0 && (
+            <button
+              onClick={() => setShowToc((s) => !s)}
+              className="text-[10px] px-2 py-0.5 rounded transition-colors hover:bg-white/10"
+              style={{
+                color: "var(--aria-fg-muted)",
+                border: "1px solid var(--aria-border)",
+              }}
+            >
+              {showToc ? "Hide" : "Contents"}
+            </button>
+          )}
         </div>
         <div className="flex items-center gap-2">
-          {/* Font size controls */}
           <button
             onClick={() => setFontSize((s) => Math.max(60, s - 10))}
             className="p-1 rounded transition-colors hover:bg-white/10"
@@ -178,7 +276,6 @@ export function EpubReader() {
           >
             <Type className="w-4 h-4" />
           </button>
-          {/* Theme toggle */}
           <button
             onClick={() => setTheme((t) => (t === "dark" ? "light" : "dark"))}
             className="text-[10px] px-2 py-1 rounded transition-colors hover:bg-white/10"
@@ -189,7 +286,6 @@ export function EpubReader() {
           >
             {theme === "dark" ? "Light" : "Dark"}
           </button>
-          {/* Close */}
           <button
             onClick={toggleReader}
             className="p-1 rounded transition-colors hover:bg-white/10"
@@ -199,6 +295,28 @@ export function EpubReader() {
           </button>
         </div>
       </div>
+
+      {/* TOC sidebar */}
+      {showToc && tocItems.length > 0 && (
+        <div
+          className="max-h-40 overflow-y-auto px-4 py-2 border-b"
+          style={{
+            borderColor: "var(--aria-border)",
+            background: theme === "dark" ? "#111" : "#f5f5f5",
+          }}
+        >
+          {tocItems.map((item, i) => (
+            <button
+              key={i}
+              onClick={() => goToChapter(item.href)}
+              className="block w-full text-left text-xs py-1 px-2 rounded transition-colors hover:bg-white/10 truncate"
+              style={{ color: "var(--aria-fg-muted)" }}
+            >
+              {item.label}
+            </button>
+          ))}
+        </div>
+      )}
 
       {/* Reader content */}
       <div className="relative" style={{ height: "60vh", minHeight: "400px" }}>
@@ -223,24 +341,40 @@ export function EpubReader() {
             </p>
           </div>
         )}
-        {epubData && !loading && !error && (
-          <ReactReader
-            url={epubData}
-            location={hasFirstLocation ? location : undefined}
-            locationChanged={handleLocationChanged}
-            getRendition={handleRendition}
-            showToc={true}
-            epubOptions={{
-              spread: "none",
-              flow: "paginated",
-            }}
-            readerStyles={{
-              container: {
-                background: theme === "dark" ? "#1a1a1a" : "#ffffff",
+
+        {/* foliate-js renders into this div */}
+        <div
+          ref={containerRef}
+          className="w-full h-full"
+          style={{ display: loading || error ? "none" : "block" }}
+        />
+
+        {/* Page-turn arrows */}
+        {!loading && !error && (
+          <>
+            <button
+              onClick={goPrev}
+              className="absolute left-2 top-1/2 -translate-y-1/2 p-2 rounded-full transition-colors hover:bg-white/10"
+              style={{
+                background: "rgba(0,0,0,0.3)",
                 color: theme === "dark" ? "#e0e0e0" : "#1a1a1a",
-              },
-            }}
-          />
+              }}
+              title="Previous page (←)"
+            >
+              <ChevronLeft className="w-5 h-5" />
+            </button>
+            <button
+              onClick={goNext}
+              className="absolute right-2 top-1/2 -translate-y-1/2 p-2 rounded-full transition-colors hover:bg-white/10"
+              style={{
+                background: "rgba(0,0,0,0.3)",
+                color: theme === "dark" ? "#e0e0e0" : "#1a1a1a",
+              }}
+              title="Next page (→)"
+            >
+              <ChevronRight className="w-5 h-5" />
+            </button>
+          </>
         )}
       </div>
     </div>
