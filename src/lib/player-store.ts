@@ -79,6 +79,12 @@ interface PlayerState {
   sleepTimerMinutes: number | null;
   sleepTimerEndsAt: number | null;
 
+  // BGM (background music) — simple static ambient loops.
+  // bgmTrack: which ambient loop to play ("" = off).
+  // bgmVolume: 0-100 slider.
+  bgmTrack: string;
+  bgmVolume: number;
+
   // Actions
   play: () => void;
   pause: () => void;
@@ -88,6 +94,8 @@ interface PlayerState {
   setDuration: (d: number) => void;
   setPlaybackRate: (r: number) => void;
   setVolume: (v: number) => void;
+  setBgmTrack: (track: string) => void;
+  setBgmVolume: (v: number) => void;
   toggleMute: () => void;
 
   skip: (seconds: number) => void;
@@ -214,6 +222,8 @@ export const usePlayerStore = create<PlayerState>()(
 
       showSettings: false,
       showReader: false,
+      bgmTrack: "",
+      bgmVolume: 30,
       sleepTimerMinutes: null,
       sleepTimerEndsAt: null,
 
@@ -226,6 +236,8 @@ export const usePlayerStore = create<PlayerState>()(
       setPlaybackRate: (r) => set({ playbackRate: r }),
       setVolume: (v) => set({ volume: v, muted: v === 0 }),
       toggleMute: () => set((s) => ({ muted: !s.muted })),
+      setBgmTrack: (track) => set({ bgmTrack: track }),
+      setBgmVolume: (v) => set({ bgmVolume: Math.max(0, Math.min(100, Math.round(v))) }),
 
       skip: (seconds) => {
         const { currentTime, duration } = get();
@@ -258,6 +270,8 @@ export const usePlayerStore = create<PlayerState>()(
       partialize: (s) => ({
         playbackRate: s.playbackRate,
         volume: s.volume,
+        bgmTrack: s.bgmTrack,
+        bgmVolume: s.bgmVolume,
       }),
     }
   )

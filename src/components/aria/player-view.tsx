@@ -21,6 +21,7 @@ import {
   SkipBack,
   SkipForward,
   BookOpen,
+  Music,
 } from "lucide-react";
 import { usePlayerStore } from "@/lib/player-store";
 import { useAriaStore } from "@/lib/store";
@@ -53,6 +54,10 @@ export function PlayerView() {
   const showSettings = usePlayerStore((s) => s.showSettings);
   const showReader = usePlayerStore((s) => s.showReader);
   const toggleReader = usePlayerStore((s) => s.toggleReader);
+  const bgmTrack = usePlayerStore((s) => s.bgmTrack);
+  const bgmVolume = usePlayerStore((s) => s.bgmVolume);
+  const setBgmTrack = usePlayerStore((s) => s.setBgmTrack);
+  const setBgmVolume = usePlayerStore((s) => s.setBgmVolume);
   const sleepTimerMinutes = usePlayerStore((s) => s.sleepTimerMinutes);
   const resumedFrom = usePlayerStore((s) => s.resumedFrom);
 
@@ -334,6 +339,13 @@ export function PlayerView() {
             <SpeedControl rate={playbackRate} />
             <SleepTimerControl minutes={sleepTimerMinutes} />
             <VolumeControl volume={volume} muted={muted} />
+            <BgmControl
+              track={bgmTrack}
+              volume={bgmVolume}
+              isPlaying={isPlaying}
+              onTrackChange={setBgmTrack}
+              onVolumeChange={setBgmVolume}
+            />
           </div>
 
           {/* ARIA: EPUB reader panel. Renders the actual book content via
@@ -677,6 +689,102 @@ function VolumeControl({ volume, muted }: { volume: number; muted: boolean }) {
           aria-label="Volume"
         />
       </div>
+    </div>
+  );
+}
+
+/* ============ BGM Control ============ */
+
+const BGM_TRACKS = [
+  { id: "", name: "Off", file: "" },
+  { id: "fantasy", name: "Fantasy", file: "/bgm/fantasy.ogg" },
+  { id: "scifi", name: "Sci-Fi", file: "/bgm/scifi.ogg" },
+  { id: "mystery", name: "Mystery", file: "/bgm/mystery.ogg" },
+  { id: "romance", name: "Romance", file: "/bgm/romance.ogg" },
+  { id: "classic", name: "Classic", file: "/bgm/classic.ogg" },
+  { id: "adventure", name: "Adventure", file: "/bgm/adventure.ogg" },
+];
+
+function BgmControl({
+  track,
+  volume,
+  isPlaying,
+  onTrackChange,
+  onVolumeChange,
+}: {
+  track: string;
+  volume: number;
+  isPlaying: boolean;
+  onTrackChange: (track: string) => void;
+  onVolumeChange: (volume: number) => void;
+}) {
+  const audioRef = useRef<HTMLAudioElement | null>(null);
+  const currentTrack = BGM_TRACKS.find((t) => t.id === track);
+
+  // Play/pause BGM when narration plays/pauses
+  useEffect(() => {
+    const a = audioRef.current;
+    if (!a || !currentTrack?.file) return;
+    if (isPlaying) {
+      a.play().catch(() => {});
+    } else {
+      a.pause();
+    }
+  }, [isPlaying, currentTrack?.file]);
+
+  // Update volume
+  useEffect(() => {
+    if (audioRef.current) {
+      audioRef.current.volume = volume / 100;
+    }
+  }, [volume]);
+
+  // No track selected — don't render the audio element
+  if (!currentTrack?.file) {
+    return (
+      <div className="flex items-center gap-1.5 px-2 py-1 rounded-lg" style={{ border: "1px solid var(--aria-border)" }}>
+        <Music size={14} style={{ color: "var(--aria-fg-muted)" }} />
+        <select
+          value={track}
+          onChange={(e) => onTrackChange(e.target.value)}
+          className="text-xs bg-transparent cursor-pointer outline-none"
+          style={{ color: "var(--aria-fg-muted)" }}
+        >
+          {BGM_TRACKS.map((t) => (
+            <option key={t.id} value={t.id} style={{ background: "var(--aria-bg)" }}>
+              {t.name}
+            </option>
+          ))}
+        </select>
+      </div>
+    );
+  }
+
+  return (
+    <div className="flex items-center gap-2 px-2 py-1 rounded-lg" style={{ border: "1px solid var(--aria-border)" }}>
+      <Music size={14} style={{ color: "var(--aria-accent-glow)" }} />
+      <select
+        value={track}
+        onChange={(e) => onTrackChange(e.target.value)}
+        className="text-xs bg-transparent cursor-pointer outline-none"
+        style={{ color: "var(--aria-fg-muted)" }}
+      >
+        {BGM_TRACKS.map((t) => (
+          <option key={t.id} value={t.id} style={{ background: "var(--aria-bg)" }}>
+            {t.name}
+          </option>
+        ))}
+      </select>
+      <input
+        type="range"
+        min="0"
+        max="100"
+        value={volume}
+        onChange={(e) => onVolumeChange(Number(e.target.value))}
+        className="w-12 h-1 cursor-pointer"
+        style={{ accentColor: "var(--aria-accent-glow)" }}
+      />
+      <audio ref={audioRef} src={currentTrack.file} loop preload="auto" />
     </div>
   );
 }
