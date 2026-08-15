@@ -261,7 +261,24 @@ export async function POST(req: NextRequest) {
       if (fileName.endsWith('.epub') || file.type === 'application/epub+zip') {
         return NextResponse.json({ error: 'EPUB files should be uploaded via the audiobook upload endpoint.' }, { status: 400 })
       } else if (fileName.endsWith('.pdf') || file.type === 'application/pdf') {
-        return NextResponse.json({ error: 'PDF files are no longer supported. Please upload an .epub file.' }, { status: 400 })
+        // Size guard — unpdf loads the whole file into memory as an ArrayBuffer,
+        // and serverless functions have their own body-size ceiling on top of that.
+        if (file.size > 25 * 1024 * 1024) {
+          return NextResponse.json({ error: 'PDF too large (25MB max). Try a smaller file or split it.' }, { status: 400 })
+        }
+        try {
+          const parsed = await parsePdf(file)
+          rawFullText = parsed.raw
+          content = parsed.text
+          truncated = parsed.truncated
+          source = 'pdf'
+        } catch (e) {
+          console.error('[knowledge.upload] PDF parse failed:', e instanceof Error ? e.message : String(e))
+          return NextResponse.json(
+            { error: 'Could not parse this PDF. It may be scanned/image-only (no extractable text) or corrupted.' },
+            { status: 400 }
+          )
+        }
       } else if (fileName.endsWith('.txt') || fileName.endsWith('.md') || file.type.startsWith('text/')) {
         const fileText = await file.text()
         rawFullText = fileText
@@ -270,7 +287,7 @@ export async function POST(req: NextRequest) {
         truncated = refined.truncated
         source = 'file'
       } else {
-        return NextResponse.json({ error: 'Unsupported file type. Please upload a .txt, .md, or .epub file.' }, { status: 400 })
+        return NextResponse.json({ error: 'Unsupported file type. Please upload a .txt, .md, or .pdf file.' }, { status: 400 })
       }
     } else {
       const body = await req.json().catch(() => ({}))

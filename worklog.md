@@ -1146,3 +1146,57 @@ Stage Summary:
 - App now offers exactly 2 user-selectable models: GPT-OSS 120B (default, free) and Sarvam 105B (paid).
 - Internal last-resort fallback (Qwen3 Next 80B on 429/decommission) is untouched and still works.
 - Existing users with stale 'deepseek/deepseek-chat' DB preference will silently fall back to GPT-OSS 120B on next chat request — no migration needed.
+
+---
+Task ID: 4
+Agent: main (orchestrator)
+Task: Remove duplicate EPUB tab from Feed ARIA modal (it already exists in library-view.tsx). Add a working "Upload PDF" tab in its place — the backend already has a parsePdf() function built on unpdf that was dead code, now wired up.
+
+Work Log:
+
+BACKEND — src/app/api/knowledge/route.ts:
+- The multipart branch previously hard-rejected .pdf files with "PDF files are no longer supported." — even though a parsePdf() function (built on the `unpdf` package, lines 210-217) was already defined further up in the same file. It was dead code.
+- Replaced the PDF rejection (lines 263-264) with an actual parsePdf(file) call:
+  * Added 25MB size guard before parsing (unpdf loads the whole file into memory as an ArrayBuffer; serverless functions have their own body-size ceiling on top of that).
+  * Wrapped the parse call in try/catch — on failure returns a 400 with "Could not parse this PDF. It may be scanned/image-only (no extractable text) or corrupted." instead of a raw 500.
+  * On success: sets rawFullText from parsed.raw, content from parsed.text, truncated from parsed.truncated, and source = 'pdf' (same pattern as the existing .txt branch sets source = 'file').
+- Left the .epub branch as a hard rejection with "EPUB files should be uploaded via the audiobook upload endpoint." — EPUB was never meant to go through this route.
+- Updated "Unsupported file type" error message from ".txt, .md, or .epub" → ".txt, .md, or .pdf".
+
+FRONTEND — src/components/aria/feed-aria-modal.tsx (11 edits, -140 lines net):
+
+REMOVED (EPUB tab + all its dependencies):
+- 'file' entry from FeedTab type → replaced with 'pdf'
+- "Upload EPUB" tab button → replaced with "Upload PDF"
+- Entire FILE TAB JSX block (~125 lines): dropzone, epub-size-check onChange handler, "Upload & Generate Audiobook" button, parsing/indexing progress UI
+- handleEpubUpload function (~80 lines): the entire Flask analyzeEpub() + RAG batch-indexing pipeline
+- epubUploading and indexProgress state variables
+- 'parsing' and 'indexing' entries from FeedState type and STATE_LABELS
+- Now-unused imports: chunkText, analyzeEpub, FileUp (from lucide-react), setActiveWorkspace (from useAriaStore — only caller was handleEpubUpload)
+- EPUB pipeline check + PDF rejection in handleSubmit (lines 51-63 of old file)
+
+ADDED (PDF tab):
+- 'pdf' entry in FeedTab type
+- "Upload PDF" tab button with Upload icon (already imported, used in dropzone)
+- PDF tab JSX block (~80 lines): modeled on the removed EPUB dropzone but simpler
+  * File input: accept=".pdf,application/pdf"
+  * Client-side 25MB size guard matching the backend's cap
+  * Reuses existing 'reading' → 'refining' → 'embedding' → 'done' state progression (same as Paste Text tab — no new states needed)
+  * Submit button copy: "Feed ARIA" (not "Upload & Generate Audiobook" — this tab only adds the PDF to the RAG library)
+  * Helper text: "Scanned or image-only PDFs with no embedded text can't be parsed this way — use a text-based PDF or paste the text manually."
+- Broadened the FormData check in handleSubmit from `tab === 'file'` to `tab === 'pdf'` (both the initial submit and the 409 forceReupload resend)
+- handleTabChange now clears any staged File object + resets the file input's value when switching tabs — prevents a file picked on one tab from leaking into another tab's submission
+
+VERIFICATION:
+1. Feed ARIA modal has exactly 5 tabs: Paste Text, From URL, Upload PDF, Quotes, Library — no EPUB tab ✅
+2. grep for dead references (setActiveWorkspace, FileUp, chunkText, analyzeEpub, epubUploading, indexProgress, handleEpubUpload, 'parsing', 'indexing', 'Upload EPUB') → only legitimate matches (FormData field name 'file', source === 'file' for .txt display) ✅
+3. library-view.tsx completely untouched (git diff --name-only confirms only 2 files changed) ✅
+4. Backend parsePdf() call confirmed: 25MB guard, try/catch, source='pdf', scanned/image-only error message ✅
+5. Lint: 0 errors, 0 warnings ✅
+6. Browser: page renders cleanly, zero errors, zero console errors ✅
+
+Stage Summary:
+- 2 files modified: src/app/api/knowledge/route.ts (+18 lines), src/components/aria/feed-aria-modal.tsx (-158 lines, net -140)
+- EPUB upload is no longer duplicated — it lives only in library-view.tsx (Audiobooks workspace) where it belongs
+- PDF upload now works end-to-end: frontend dropzone → multipart FormData → backend parsePdf() (unpdf) → chunking + embeddings → stored with source='pdf' → shows up in Library tab with 📄 PDF label (already wired up)
+- The library list's source display (line 442) already had `k.source === 'pdf' ? '📄 PDF'` — no change needed there

@@ -2,36 +2,29 @@
 
 import { useState, useRef, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { BookOpen, Link2, FileText, X, Loader2, Trash2, BookMarked, Upload, FileUp, Quote, Sparkles } from 'lucide-react'
+import { BookOpen, Link2, FileText, X, Loader2, Trash2, BookMarked, Upload, Quote, Sparkles } from 'lucide-react'
 import { toast } from 'sonner'
 import { useAriaStore } from '@/lib/store'
-import { chunkText } from '@/lib/chunk-text'
-import { analyzeEpub } from '@/lib/abm-api'
 
-type FeedTab = 'text' | 'url' | 'file' | 'library' | 'quotes'
-type FeedState = 'idle' | 'reading' | 'refining' | 'embedding' | 'parsing' | 'indexing' | 'done'
+type FeedTab = 'text' | 'url' | 'pdf' | 'library' | 'quotes'
+type FeedState = 'idle' | 'reading' | 'refining' | 'embedding' | 'done'
 
 const STATE_LABELS: Record<FeedState, string> = {
   idle: '',
   reading: 'ARIA is reading the document...',
   refining: 'ARIA is analyzing what she learned...',
   embedding: 'ARIA is storing it in her library...',
-  parsing: 'Parsing the EPUB file...',
-  indexing: 'Indexing chunks into ARIA\'s library...',
   done: 'Done! ARIA now knows this.',
 }
 
 export function FeedAriaModal() {
-  const { feedAriaOpen, setFeedAriaOpen, setActiveWorkspace } = useAriaStore()
+  const { feedAriaOpen, setFeedAriaOpen } = useAriaStore()
   const [tab, setTab] = useState<FeedTab>('text')
   const [textContent, setTextContent] = useState('')
   const [url, setUrl] = useState('')
   const [file, setFile] = useState<File | null>(null)
   const [state, setState] = useState<FeedState>('idle')
   const [knowledge, setKnowledge] = useState<Array<{ id: string; title: string; source: string; contentLength: number; chunks?: number }>>([])
-  // EPUB upload progress
-  const [epubUploading, setEpubUploading] = useState(false)
-  const [indexProgress, setIndexProgress] = useState<{ current: number; total: number } | null>(null)
   const fileInputRef = useRef<HTMLInputElement>(null)
 
   const handleSubmit = async () => {
@@ -43,26 +36,12 @@ export function FeedAriaModal() {
       toast.error('Paste a URL first')
       return
     }
-    if (tab === 'file' && !file) {
-      toast.error('Choose a file first')
+    if (tab === 'pdf' && !file) {
+      toast.error('Choose a PDF file first')
       return
     }
 
-    // === EPUB PIPELINE ===
-    // EPUBs are parsed server-side by the Flask audiobook-maker service.
-    // The analyze endpoint parses the EPUB and returns the chapter list.
-    // TTS generation happens via the Flask /api/generate endpoint.
-    if (tab === 'file' && file && (file.name.toLowerCase().endsWith('.epub') || file.type === 'application/epub+zip')) {
-      return handleEpubUpload(file)
-    }
-
-    // Reject PDF files — only EPUB is supported now
-    if (tab === 'file' && file && file.name.toLowerCase().endsWith('.pdf')) {
-      toast.error('PDF files are no longer supported. Please upload an .epub file.')
-      return
-    }
-
-    // === EXISTING PATH (text, URL, TXT files) ===
+    // === EXISTING PATH (text, URL, PDF files) ===
     setState('reading')
     if (tab === 'url') {
       setTimeout(() => setState('refining'), 2000)
@@ -74,7 +53,7 @@ export function FeedAriaModal() {
 
     try {
       let res: Response
-      if (tab === 'file' && file) {
+      if (tab === 'pdf' && file) {
         const formData = new FormData()
         formData.append('file', file)
         res = await fetch('/api/knowledge', {
@@ -104,7 +83,7 @@ export function FeedAriaModal() {
           return
         }
         // Resend with forceReupload
-        if (tab === 'file' && file) {
+        if (tab === 'pdf' && file) {
           const formData = new FormData()
           formData.append('file', file)
           formData.append('forceReupload', 'true')
@@ -155,86 +134,6 @@ export function FeedAriaModal() {
     }
   }
 
-  /**
-   * EPUB upload pipeline:
-   * 1. Send the .epub file to the Flask audiobook-maker service for parsing
-   * 2. Flask parses the TOC + chapter text and returns the chapter list
-   * 3. TTS generation happens via the Flask /api/generate endpoint
-   *
-   * EPUBs are parsed server-side by the Flask audiobook-maker service, unlike the old
-   * PDF pipeline which parsed in the browser. This is simpler and more
-   * reliable — EPUBs are structured XML, not scanned images.
-   */
-  const handleEpubUpload = async (epubFile: File) => {
-    setEpubUploading(true)
-    setState('parsing')
-
-    try {
-      // Call the Flask audiobook-maker service via the /api/abm proxy.
-      // The Flask app parses the EPUB and returns the chapter list + metadata,
-      // stashing the parsed state in-memory keyed by the returned job_id.
-      const data = await analyzeEpub(epubFile)
-
-      // Also store the full text as Knowledge for chat/RAG
-      // (so ARIA can still reference the book in conversations).
-      // The analyze response doesn't include full chapter text (only word/char
-      // counts + titles), so we can't build RAG chunks from it here. RAG indexing
-      // is skipped for EPUBs in the new Flask-based architecture — the book is
-      // parsed on the Flask service, not in the Next.js process. If you need RAG
-      // over EPUB content, upload the book as text via the "Paste Text" tab instead.
-      try {
-        // Use the preview text from the analyze response as a minimal RAG entry
-        // so the book is at least searchable by title + preview.
-        const previewText = data.preview_text || ''
-        if (previewText.length > 100) {
-          const chunks = chunkText(`${data.title}\n\n${previewText}`)
-          const documentId = `epub-${data.job_id}`
-          const BATCH_SIZE = 10
-
-          for (let i = 0; i < chunks.length; i += BATCH_SIZE) {
-            const batchChunks = chunks.slice(i, i + BATCH_SIZE)
-            await fetch('/api/knowledge/batch', {
-              method: 'POST',
-              headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({
-                documentId,
-                title: data.title,
-                source: 'epub',
-                chunks: batchChunks,
-                batchIndex: Math.floor(i / BATCH_SIZE),
-                totalBatches: Math.ceil(chunks.length / BATCH_SIZE),
-                totalChunks: chunks.length,
-                chunkOffset: i,
-              }),
-            })
-          }
-        }
-      } catch (ragErr) {
-        console.error('[feed-aria] RAG indexing failed (non-blocking):', ragErr)
-        // Non-blocking — the audiobook was already created successfully
-      }
-
-      setState('done')
-      toast.success(`"${data.title}" parsed with ${data.total_chapters} chapters! Opening audiobook library…`)
-
-      setFile(null)
-      setEpubUploading(false)
-      if (fileInputRef.current) fileInputRef.current.value = ''
-
-      // Close the Feed ARIA modal and switch to the Audiobooks workspace
-      // so the user sees their book appear in the library, ready for chapter selection.
-      setTimeout(() => {
-        setState('idle')
-        setFeedAriaOpen(false)
-        setActiveWorkspace('audiobooks')
-      }, 2000)
-    } catch (err) {
-      setState('idle')
-      setEpubUploading(false)
-      toast.error((err as Error).message)
-    }
-  }
-
   const handleDelete = async (id: string) => {
     try {
       const res = await fetch(`/api/knowledge/${id}`, { method: 'DELETE' })
@@ -260,6 +159,10 @@ export function FeedAriaModal() {
   // Load knowledge when switching to library tab
   const handleTabChange = (newTab: FeedTab) => {
     setTab(newTab)
+    // Clear any staged file + reset the input so a file picked on one tab
+    // doesn't leak into another tab's submission.
+    setFile(null)
+    if (fileInputRef.current) fileInputRef.current.value = ''
     if (newTab === 'library') loadKnowledge()
   }
 
@@ -316,7 +219,7 @@ export function FeedAriaModal() {
             {([
               { id: 'text' as const, label: 'Paste Text', icon: FileText },
               { id: 'url' as const, label: 'From URL', icon: Link2 },
-              { id: 'file' as const, label: 'Upload EPUB', icon: FileUp },
+              { id: 'pdf' as const, label: 'Upload PDF', icon: Upload },
               { id: 'quotes' as const, label: 'Quotes', icon: Quote },
               { id: 'library' as const, label: 'Library', icon: BookMarked },
             ]).map(t => {
@@ -425,27 +328,22 @@ export function FeedAriaModal() {
               </div>
             )}
 
-            {/* FILE TAB (EPUB upload) */}
-            {tab === 'file' && (
+            {/* PDF TAB */}
+            {tab === 'pdf' && (
               <div className="space-y-4">
                 <input
                   ref={fileInputRef}
                   type="file"
-                  accept=".epub,application/epub+zip"
+                  accept=".pdf,application/pdf"
                   className="hidden"
                   onChange={(e) => {
                     const f = e.target.files?.[0]
                     if (f) {
-                      // EPUBs are constrained to 50MB by the Flask /api/analyze endpoint.
-                      // Reject them client-side to save a round-trip and a confusing 413.
-                      // Only accept EPUB files
-                      const isEpub = f.name.toLowerCase().endsWith('.epub') || f.type === 'application/epub+zip'
-                      if (!isEpub) {
-                        toast.error('Only EPUB files are supported. PDF is no longer accepted.')
-                        return
-                      }
-                      if (f.size > 50 * 1024 * 1024) {
-                        toast.error('EPUB too large (50MB max)')
+                      // Match the backend's 25MB cap — reject client-side so the
+                      // user gets an immediate error instead of waiting on a
+                      // round-trip only to get a 400.
+                      if (f.size > 25 * 1024 * 1024) {
+                        toast.error('PDF too large (25MB max)')
                         return
                       }
                       setFile(f)
@@ -482,55 +380,17 @@ export function FeedAriaModal() {
                   ) : (
                     <div className="text-center">
                       <div className="text-[14px] font-medium" style={{ color: 'var(--aria-fg)' }}>
-                        Drop an EPUB file here
+                        Drop a PDF file here
                       </div>
                       <div className="text-[11px] mt-1" style={{ color: 'var(--aria-fg-dim)' }}>
-                        EPUB files only · Max 50MB
+                        PDF files only · Max 25MB
                       </div>
                     </div>
                   )}
                 </button>
                 <p className="text-[11px]" style={{ color: 'var(--aria-fg-dim)' }}>
-                  Upload an EPUB file and ARIA will parse its table of contents, extract each chapter, and generate an audiobook you can listen to. The text is also indexed for chat context.
+                  ARIA will extract the text from the PDF and add it to her library. Scanned or image-only PDFs with no embedded text can&apos;t be parsed this way — use a text-based PDF or paste the text manually.
                 </p>
-
-                {/* EPUB upload progress */}
-                {state === 'parsing' && epubUploading && (
-                  <div className="rounded-xl p-4" style={{ background: 'var(--aria-bg-panel)', border: '1px solid var(--aria-border)' }}>
-                    <div className="flex items-center gap-3">
-                      <Loader2 className="w-4 h-4 animate-spin" style={{ color: 'var(--aria-accent-glow)' }} />
-                      <span className="text-[12px] font-medium" style={{ color: 'var(--aria-fg)' }}>
-                        Parsing EPUB and extracting chapters...
-                      </span>
-                    </div>
-                    <p className="text-[10px] mt-2" style={{ color: 'var(--aria-fg-dim)' }}>
-                      Reading the EPUB's table of contents and extracting chapter text.
-                    </p>
-                  </div>
-                )}
-
-                {state === 'indexing' && indexProgress && (
-                  <div className="rounded-xl p-4" style={{ background: 'var(--aria-bg-panel)', border: '1px solid var(--aria-border)' }}>
-                    <div className="flex items-center justify-between mb-2">
-                      <span className="text-[12px] font-medium" style={{ color: 'var(--aria-fg)' }}>
-                        Indexing chunk {indexProgress.current} of {indexProgress.total}
-                      </span>
-                      <span className="text-[12px] font-mono-aria" style={{ color: 'var(--aria-accent-glow)' }}>
-                        {Math.round((indexProgress.current / indexProgress.total) * 100)}%
-                      </span>
-                    </div>
-                    <div className="h-2 rounded-full overflow-hidden" style={{ background: 'rgba(252,211,77,0.08)' }}>
-                      <div
-                        className="h-full rounded-full transition-all duration-300"
-                        style={{ width: `${(indexProgress.current / indexProgress.total) * 100}%`, background: 'var(--aria-accent)' }}
-                      />
-                    </div>
-                    <p className="text-[10px] mt-2" style={{ color: 'var(--aria-fg-dim)' }}>
-                      ARIA is storing what she learned. This won't take long.
-                    </p>
-                  </div>
-                )}
-
                 <button
                   onClick={handleSubmit}
                   disabled={!file || (state !== 'idle' && state !== 'done')}
@@ -545,9 +405,9 @@ export function FeedAriaModal() {
                   {state !== 'idle' && state !== 'done' ? (
                     <span className="flex items-center gap-2"><Loader2 size={16} className="animate-spin" /> {STATE_LABELS[state]}</span>
                   ) : state === 'done' ? (
-                    <span>✓ Uploaded! Generating audiobook…</span>
+                    <span>✓ {STATE_LABELS.done}</span>
                   ) : (
-                    <span>Upload & Generate Audiobook</span>
+                    <span>Feed ARIA</span>
                   )}
                 </button>
               </div>
