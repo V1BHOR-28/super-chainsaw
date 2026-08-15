@@ -65,6 +65,12 @@ export function EpubReader() {
         const book = ePub.default(blob);
         bookRef.current = book;
 
+        // FIX 1: Wait one animation frame so the surrounding flex layout
+        // has committed and viewerRef.current has its real, final pixel
+        // width. Without this, epub.js measures a stale/zero width
+        // synchronously and text overflows instead of paginating.
+        await new Promise((resolve) => requestAnimationFrame(resolve));
+
         const rendition = book.renderTo(viewerRef.current, {
           width: "100%",
           height: "100%",
@@ -72,6 +78,20 @@ export function EpubReader() {
           flow: "paginated",
         });
         renditionRef.current = rendition;
+
+        // FIX 2: ResizeObserver — watches viewerRef.current and calls
+        // rendition.resize() whenever the container's actual size changes
+        // (font size buttons, window resize, sidebar toggle). Without this,
+        // any subsequent layout change re-triggers the overflow bug because
+        // nothing tells epub.js the container resized.
+        const resizeObserver = new ResizeObserver(() => {
+          try {
+            rendition.resize();
+          } catch {
+            // non-fatal — rendition may be destroyed during unmount
+          }
+        });
+        resizeObserver.observe(viewerRef.current);
 
         // Apply theme
         applyTheme(rendition, theme, fontSize);
@@ -99,6 +119,7 @@ export function EpubReader() {
 
         return () => {
           document.removeEventListener("keydown", onKey);
+          resizeObserver.disconnect();
           rendition.destroy();
         };
       } catch (err) {
@@ -185,7 +206,7 @@ export function EpubReader() {
 
   return (
     <div
-      className="mt-3 rounded-2xl border overflow-hidden"
+      className="mt-3 rounded-2xl border overflow-hidden max-w-full"
       style={{
         background: theme === "dark" ? "#1a1a1a" : "#ffffff",
         borderColor: "var(--aria-border)",
