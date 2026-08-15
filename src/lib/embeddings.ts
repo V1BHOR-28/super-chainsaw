@@ -84,30 +84,23 @@ export function embeddingToPgVector(embedding: number[]): string {
  */
 export const AVAILABLE_MODELS = [
   {
-    id: 'qwen/qwen3-next-80b-a3b-instruct:free',
-    name: 'Qwen3 Next 80B',
-    description: 'Multilingual, 262K context. Genuinely free.',
-    badge: 'Default',
-    tier: 'free' as const,
-  },
-  {
-    id: 'meta-llama/llama-3.3-70b-instruct:free',
-    name: 'Llama 3.3 70B',
-    description: 'Raw, unfiltered, free forever. Tuned for honest conversation.',
-    badge: 'Free',
-    tier: 'free' as const,
-  },
-  {
     id: 'openai/gpt-oss-120b:free',
     name: 'GPT-OSS 120B',
     description: 'Largest free model, 117B MoE. Great reasoning.',
-    badge: 'Free',
+    badge: 'Default',
     tier: 'free' as const,
   },
   {
     id: 'deepseek/deepseek-chat',
     name: 'DeepSeek V3',
-    description: 'Alternative. Uses credits (~$0.14/M tokens).',
+    description: 'Strong reasoning and coding. Uses paid credits (~$0.14/M tokens).',
+    badge: 'Paid',
+    tier: 'paid' as const,
+  },
+  {
+    id: 'sarvam-105b',
+    name: 'Sarvam 105B',
+    description: '128K context, strong tool-use. Uses paid credits (~₹29/M in, ~₹73/M out).',
     badge: 'Paid',
     tier: 'paid' as const,
   },
@@ -115,9 +108,13 @@ export const AVAILABLE_MODELS = [
 
 /**
  * Get the model ID from user settings, with fallback to default.
+ *
+ * The last-resort fallback model (used internally on 429 / decommission in
+ * src/app/api/chat/route.ts) is intentionally NOT in AVAILABLE_MODELS — it
+ * is never user-selectable, only used as a hardcoded safety net.
  */
 export function getModelFromSettings(modelPreference: string | null | undefined): string {
-  if (!modelPreference) return 'qwen/qwen3-next-80b-a3b-instruct:free'
+  if (!modelPreference) return 'openai/gpt-oss-120b:free'
   const isValid = AVAILABLE_MODELS.some(m => m.id === modelPreference)
-  return isValid ? modelPreference : 'qwen/qwen3-next-80b-a3b-instruct:free'
+  return isValid ? modelPreference : 'openai/gpt-oss-120b:free'
 }

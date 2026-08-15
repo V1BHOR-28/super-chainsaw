@@ -13,8 +13,9 @@ import { generateWithFallback, callGeminiForExtraction } from '@/lib/llm-fallbac
  * Detection pipeline (in order):
  *   1. Deterministic pattern-match fallback (extractObviousCandidates) —
  *      catches common preference phrasings WITHOUT depending on any LLM call.
- *   2. Groq 70B (llama-3.3-70b-versatile) via generateWithFallback — larger
- *      model, more precise named-entity extraction than the 8B default.
+ *   2. Groq (openai/gpt-oss-120b, 120B MoE — larger and more precise for
+ *      named-entity extraction than a small 8B default) via
+ *      generateWithFallback.
  *   3. Gemini 2.0 Flash via callGeminiForExtraction — enforced JSON output
  *      (responseMimeType: application/json), distinct second opinion.
  *   4. Regex fallback parse of whichever LLM responded (safety net for Groq,
@@ -128,10 +129,9 @@ Respond with ONLY JSON: {"candidates":[{"text":"...","category":"personal|prefer
 
     let raw = ''
     try {
-      // Tier 1: Groq 70B (larger model for precise named-entity extraction).
-      // generateWithFallback runs Groq + Pollinations in parallel; passing
-      // the 70B model only affects the Groq leg, not Pollinations.
-      raw = await generateWithFallback(prompt, { model: 'llama-3.3-70b-versatile' }) ?? ''
+      // Tier 1: Groq openai/gpt-oss-120b (120B MoE — larger model for precise
+      // named-entity extraction). generateWithFallback calls Groq directly.
+      raw = await generateWithFallback(prompt, { model: 'openai/gpt-oss-120b' }) ?? ''
     } catch (e) {
       console.error(`[memory.detect] generateWithFallback threw: ${e instanceof Error ? e.message : String(e)}`)
     }

@@ -488,14 +488,14 @@ export function SettingsModal() {
                 </SettingRow>
                 <SettingRow
                   title="AI Model"
-                  desc="Llama 3.3 70B is the default — free forever, tuned for raw honest conversation."
+                  desc="GPT-OSS 120B is the default — free forever, largest free model available."
                 >
                   <ModelSelector
                     value={
                       settings?.modelPreference &&
-                      ['meta-llama/llama-3.3-70b-instruct:free', 'openai/gpt-oss-120b:free', 'qwen/qwen3-next-80b-a3b-instruct:free', 'deepseek/deepseek-chat'].includes(settings.modelPreference)
+                      AI_MODELS.map(m => m.id).includes(settings.modelPreference)
                         ? settings.modelPreference
-                        : 'meta-llama/llama-3.3-70b-instruct:free'
+                        : 'openai/gpt-oss-120b:free'
                     }
                     onChange={(v) => updateField('modelPreference', v)}
                   />
@@ -749,36 +749,28 @@ export function SettingsModal() {
 
 const AI_MODELS = [
   {
-    id: 'meta-llama/llama-3.3-70b-instruct:free',
-    name: 'Llama 3.3 70B',
-    desc: 'Raw, unfiltered, tuned for honesty',
+    id: 'openai/gpt-oss-120b:free',
+    name: 'GPT-OSS 120B',
+    desc: 'Largest free model, 117B MoE',
     badge: 'Default',
     badgeColor: 'var(--aria-accent-glow)',
     cost: 'Free forever',
   },
   {
-    id: 'openai/gpt-oss-120b:free',
-    name: 'GPT-OSS 120B',
-    desc: 'Largest free model, 117B MoE',
-    badge: 'Free',
-    badgeColor: '#4ade80',
-    cost: 'Free forever',
-  },
-  {
-    id: 'qwen/qwen3-next-80b-a3b-instruct:free',
-    name: 'Qwen3 Next 80B',
-    desc: 'Multilingual, 262K context',
-    badge: 'Free',
-    badgeColor: '#4ade80',
-    cost: 'Free forever',
-  },
-  {
     id: 'deepseek/deepseek-chat',
     name: 'DeepSeek V3',
-    desc: 'Alternative — uses paid credits',
+    desc: 'Strong reasoning and coding',
     badge: 'Paid',
     badgeColor: '#f59e0b',
     cost: '~$0.14/M tokens',
+  },
+  {
+    id: 'sarvam-105b',
+    name: 'Sarvam 105B',
+    desc: '128K context, strong tool-use',
+    badge: 'Paid',
+    badgeColor: '#f59e0b',
+    cost: '~₹29/M in, ~₹73/M out',
   },
 ] as const
 

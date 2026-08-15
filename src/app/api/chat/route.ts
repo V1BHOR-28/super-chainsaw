@@ -461,33 +461,6 @@ export async function POST(req: NextRequest) {
 
     const fullToolContext = [toolContext, knowledgeContext, quoteContext, audiobookContext].filter(Boolean).join('\n\n')
 
-    // === DEEP THINKING DETECTION ===
-    // Moved here (before buildAriaSystemPrompt) so the signal can reach the
-    // prompt AND the model routing below. Word-boundary matching prevents
-    // false positives like "I think pizza sounds good" or "let's book a table."
-    const deepThinkingKeywords = [
-      'philosoph', 'book', 'read', 'author', 'chapter', 'novel', 'literat',
-      'marcus', 'aurelius', 'nietzsche', 'camus', 'sartre', 'plato', 'aristotle',
-      'kant', 'hegel', 'kierkegaard', 'stirner', 'rousseau', 'hobbes', 'locke',
-      'machiavelli', 'seneca', 'epictetus', 'stoic', 'existential', 'nihilism',
-      'absurd', 'meaning', 'purpose', 'morality', 'ethics', 'virtue', 'justice',
-      'consciousness', 'reality', 'truth', 'knowledge', 'wisdom', 'contemplat',
-      'meditat', 'argument', 'thesis', 'theory', 'concept', 'idea', 'think',
-      'critique', 'analyze', 'interpret', 'perspective', 'worldview',
-      'dostoevsky', 'tolstoy', 'kafka', 'proust', 'joyce', 'woolf', 'hemingway',
-      'orwell', 'huxley', 'carnegie', 'darwin', 'einstein', 'newton',
-      'meditation', 'moral', 'spiritual', 'soul', 'mind', 'existence',
-      'freedom', 'liberty', 'power', 'authority', 'society', 'individual',
-      'zindagi', 'tattva', 'darshan', 'satya', 'sach', 'dharma', 'karma',
-      'moksha', 'atma', 'paramatma', 'gyan', 'vigyan', 'tark',
-    ]
-    const genericWords = new Set(['think', 'read', 'book', 'idea', 'power', 'moral', 'mind', 'meaning', 'purpose'])
-    const matchedKeywords = deepThinkingKeywords.filter(kw =>
-      new RegExp(`\\b${kw}`, 'i').test(actualContent)
-    )
-    const specificMatches = matchedKeywords.filter(kw => !genericWords.has(kw))
-    const isDeepThinking = knowledgeContext !== undefined || specificMatches.length > 0 || matchedKeywords.length >= 2
-
     let systemPrompt = buildAriaSystemPrompt({
       tone: settings?.tone ?? 'Warm & Honest',
       responseLength: settings?.responseLength ?? 'Balanced',
@@ -501,7 +474,6 @@ export async function POST(req: NextRequest) {
         : null,
       toolContext: fullToolContext || undefined,
       conversationSummary: conversationSummary?.summary ?? null,
-      isDeepThinking,
     })
 
     // Map DB messages to SDK format; include vision content for the latest user message if images attached
@@ -575,25 +547,13 @@ export async function POST(req: NextRequest) {
           try {
             let text = ''
 
-            // Get user's model preference (default: Llama 3.3 70B free)
+            // Get user's model preference (default: GPT-OSS 120B free)
             const { getModelFromSettings } = await import('@/lib/embeddings')
             const selectedModel = getModelFromSettings(settings?.modelPreference)
 
-            // === SMART MODEL ROUTING ===
-            // Use the big 70B model for deep thinking (books, philosophy, literature)
-            // and the fast 8B model for casual chit-chat. This saves Groq TPM budget
-            // (8B has 30K TPM, 70B has 6K TPM) while giving quality where it matters.
-            //
-            // isDeepThinking was computed earlier (before buildAriaSystemPrompt)
-            // so it could be passed to the prompt. Reused here for model routing.
-
-            // The "selectedModel" for the fallback chain — if deep thinking, prefer
-            // the largest-context free model (Qwen3 Next 80B, 262K context) for
-            // multi-book comparison headroom. If the user has explicitly chosen a
-            // different model in settings, respect their choice.
-            const effectiveSelectedModel = isDeepThinking
-              ? 'qwen/qwen3-next-80b-a3b-instruct:free'
-              : selectedModel
+            // Which provider actually answered — logged after the call. Declared
+            // here so both the streaming and non-streaming paths can assign it.
+            let providerUsed = ''
 
             // === REAL STREAMING ===
             // Try streaming from OpenRouter first — real-time tokens instead of
@@ -612,7 +572,7 @@ export async function POST(req: NextRequest) {
                   'X-Title': 'ARIA',
                 },
                 body: JSON.stringify({
-                  model: effectiveSelectedModel,
+                  model: selectedModel,
                   messages: sdkMessages,
                   max_tokens: 1024,
                   stream: true,
@@ -652,8 +612,8 @@ export async function POST(req: NextRequest) {
                   text = streamText.trim()
                   fullText = text
                   streamedDirectly = true
-                  providerUsed = `${effectiveSelectedModel} (streamed)`
-                  console.log(`[chat.llm] Streamed directly from ${effectiveSelectedModel}`)
+                  providerUsed = selectedModel
+                  console.log(`[chat.llm] Provider: ${providerUsed} (streamed)`)
                 }
               }
             } catch (streamErr) {
@@ -661,17 +621,16 @@ export async function POST(req: NextRequest) {
             }
 
             if (!streamedDirectly) {
-            // === EXISTING NON-STREAMING FALLBACK ===
-            // ARIA will never die. When one provider fails or runs out of
-            // credits, we automatically fall through to the next:
-            //   Layer 1: OpenRouter paid model (DeepSeek — best quality, uses credits)
-            //   Layer 2: OpenRouter FREE model (llama-3.3-70b — genuinely $0 cost,
-            //            doesn't consume paid credits, same API key)
-            //   Layer 3: Pollinations keyless API (no key needed at all — the
-            //            absolute last-resort fallback that always works)
-            //
-            // Triggered fallbacks: 402 (out of credits), 429 (rate limit),
-            // 5xx (server error), network errors, empty responses.
+            // === SINGLE-MODEL CALL (with one last-resort fallback) ===
+            // Chat calls ONE model directly — no racing. The ONLY fallback
+            // allowed: if the selected model's call fails specifically due
+            // to rate limiting (HTTP 429) or the model itself is
+            // unavailable/decommissioned, retry ONCE against Qwen3 Next 80B
+            // (OpenRouter free tier). Any other failure (timeout, 5xx,
+            // network) propagates immediately — no retry, no other providers.
+
+            // OpenRouter — handles GPT-OSS 120B, DeepSeek V3, and the Qwen
+            // last-resort fallback.
             const callOpenRouter = async (model: string): Promise<string> => {
               const apiResponse = await fetch('https://openrouter.ai/api/v1/chat/completions', {
                 method: 'POST',
@@ -686,13 +645,11 @@ export async function POST(req: NextRequest) {
                   messages: sdkMessages,
                   max_tokens: 1024,
                 }),
-                // 25s timeout — generous since providers run in PARALLEL now.
-                // Total worst case: 8s (search) + 25s (parallel) = 33s — fits in 60s.
                 signal: AbortSignal.timeout(25000),
               })
               if (!apiResponse.ok) {
                 const errBody = await apiResponse.text()
-                const err = new Error(`OR ${apiResponse.status} (${model.split('/').pop()}): ${errBody.slice(0, 100)}`)
+                const err = new Error(`OR ${apiResponse.status} (${model.split('/').pop()}): ${errBody.slice(0, 200)}`)
                 ;(err as Error & { status?: number }).status = apiResponse.status
                 throw err
               }
@@ -704,220 +661,70 @@ export async function POST(req: NextRequest) {
               return content.trim()
             }
 
-            // Pollinations — keyless, free, does NOT rate-limit.
-            // Try openai-fast first (lower latency), fall back to openai.
-            const callPollinations = async (): Promise<string> => {
-              const models = ['openai-fast', 'openai']
-              let lastErr: Error | null = null
-              for (const model of models) {
-                try {
-                  const apiResponse = await fetch('https://text.pollinations.ai/openai', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ model, messages: sdkMessages }),
-                    signal: AbortSignal.timeout(25000),
-                  })
-                  if (!apiResponse.ok) {
-                    lastErr = new Error(`Poll ${model} ${apiResponse.status}`)
-                    continue
-                  }
-                  const data = await apiResponse.json()
-                  const content = data.choices?.[0]?.message?.content ?? ''
-                  if (content && content.trim()) return content.trim()
-                  lastErr = new Error(`Poll ${model} empty`)
-                } catch (e) {
-                  lastErr = e instanceof Error ? e : new Error(String(e))
-                }
-              }
-              throw lastErr || new Error('Pollinations failed')
-            }
-
-            // Groq — free tier, extremely fast (500+ tok/s on LPU chips).
-            // Different infrastructure from OpenRouter — doesn't share its rate window.
-            // Requires GROQ_API_KEY env var. If not configured, this provider is skipped.
-            //
-            // We use llama-3.1-8b-instant because it has 30,000 TPM (tokens per minute)
-            // on the free tier — 5x higher than llama-3.3-70b's 6,000 TPM. ARIA's system
-            // prompt is large (~3-4K tokens), so the 70B model hits its TPM limit after
-            // just 2 rapid requests. The 8B model can handle 8+ rapid requests before
-            // rate-limiting. ARIA's personality comes from the system prompt, not the
-            // model size — 8B is more than capable of following it.
-            const callGroq = async (): Promise<string> => {
-              if (!process.env.GROQ_API_KEY) {
-                throw new Error('Groq: no API key (GROQ_API_KEY not set)')
-              }
-              const apiResponse = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+            // Sarvam 105B — OpenAI-compatible endpoint at api.sarvam.ai.
+            // NOT available via OpenRouter, so it needs its own call path.
+            const callSarvam = async (): Promise<string> => {
+              if (!process.env.SARVAM_API_KEY) throw new Error('Sarvam: no API key')
+              const res = await fetch('https://api.sarvam.ai/v1/chat/completions', {
                 method: 'POST',
                 headers: {
                   'Content-Type': 'application/json',
-                  'Authorization': `Bearer ${process.env.GROQ_API_KEY}`,
+                  'Authorization': `Bearer ${process.env.SARVAM_API_KEY}`,
                 },
                 body: JSON.stringify({
-                  model: 'llama-3.1-8b-instant',
+                  model: 'sarvam-105b',
                   messages: sdkMessages,
                   max_tokens: 1024,
+                  temperature: 0.2,
                 }),
                 signal: AbortSignal.timeout(25000),
               })
-              if (!apiResponse.ok) {
-                const errBody = await apiResponse.text()
-                throw new Error(`Groq ${apiResponse.status}: ${errBody.slice(0, 100)}`)
+              if (!res.ok) {
+                const errBody = await res.text().catch(() => '')
+                const err = new Error(`Sarvam: ${res.status} ${errBody.slice(0, 200)}`)
+                ;(err as Error & { status?: number }).status = res.status
+                throw err
               }
-              const data = await apiResponse.json()
+              const data = await res.json()
               const content = data.choices?.[0]?.message?.content ?? ''
-              if (!content || !content.trim()) {
-                throw new Error('Groq empty content')
-              }
+              if (!content?.trim()) throw new Error('Sarvam: empty content')
               return content.trim()
             }
 
-            // Gemini — Google's free tier (15 req/min, 1,500 req/day on Flash).
-            // Runs on Google TPUs — completely separate infrastructure from Groq
-            // (LPUs) and OpenRouter (GPUs). Requires GEMINI_API_KEY env var.
-            // This is the 2nd reliable free provider alongside Groq — with both
-            // in the parallel race, ARIA has two independent generous free paths.
-            const callGemini = async (): Promise<string> => {
-              if (!process.env.GEMINI_API_KEY) {
-                throw new Error('Gemini: no API key (GEMINI_API_KEY not set)')
-              }
-              const apiResponse = await fetch('https://generativelanguage.googleapis.com/v1beta/openai/chat/completions', {
-                method: 'POST',
-                headers: {
-                  'Content-Type': 'application/json',
-                  'Authorization': `Bearer ${process.env.GEMINI_API_KEY}`,
-                },
-                body: JSON.stringify({
-                  model: 'gemini-2.0-flash',
-                  messages: sdkMessages,
-                  max_tokens: 1024,
-                }),
-                signal: AbortSignal.timeout(25000),
-              })
-              if (!apiResponse.ok) {
-                const errBody = await apiResponse.text()
-                throw new Error(`Gemini ${apiResponse.status}: ${errBody.slice(0, 100)}`)
-              }
-              const data = await apiResponse.json()
-              const content = data.choices?.[0]?.message?.content ?? ''
-              if (!content || !content.trim()) {
-                throw new Error('Gemini empty content')
-              }
-              return content.trim()
-            }
-
-            // === PARALLEL LLM EXECUTION ===
-            // Fire ALL providers SIMULTANEOUSLY. First success wins via Promise.any().
-            //
-            // We always include a FREE OpenRouter model (Llama) alongside the user's
-            // selected model — because the user's saved preference might be DeepSeek
-            // (paid, 402 out of credits) or another model that fails. The free model
-            // ensures there's always a viable OpenRouter path.
-            //
-            // Pollinations runs too as the keyless backstop.
-            const providers: Array<{ name: string; fn: () => Promise<string> }> = []
-
-            // User's selected model — uses smart routing (70B for deep thinking, 8B for casual)
-            providers.push({ name: effectiveSelectedModel, fn: () => callOpenRouter(effectiveSelectedModel) })
-
-            // ALWAYS add a free OpenRouter model (different from effectiveSelectedModel if possible)
-            const freeFallback = effectiveSelectedModel.includes(':free')
-              ? 'openai/gpt-oss-120b:free'
-              : 'meta-llama/llama-3.3-70b-instruct:free'
-            providers.push({ name: freeFallback, fn: () => callOpenRouter(freeFallback) })
-
-            // Gemini — 2nd reliable free provider (if GEMINI_API_KEY is configured).
-            // Different infrastructure from Groq — with both, ARIA has two independent
-            // generous free paths. This is what makes ARIA actually reliable.
-            if (process.env.GEMINI_API_KEY) {
-              providers.push({ name: 'gemini-2.0-flash', fn: () => callGemini() })
-            }
-
-            // === CONDITIONAL RACING ===
-            // For deep-thinking requests (philosophy, books, knowledge context), gate
-            // Groq 8B and Pollinations OUT of the primary race — they're less reliable
-            // at following the detailed system prompt under context pressure, and racing
-            // them against 70B/120B/Gemini Flash means whichever responds first wins,
-            // which can silently defeat the routing logic. They're kept as a genuine
-            // last-resort below — only used if every deep-thinking-eligible provider fails.
-            //
-            // For non-deep-thinking (casual/greeting-tier), keep the full 5-provider race
-            // unchanged — speed is the right priority there and persona-fidelity risk is
-            // lower for short/casual replies.
-            if (!isDeepThinking) {
-              // Pollinations keyless backstop
-              providers.push({ name: 'pollinations', fn: () => callPollinations() })
-
-              // Groq — the reliable primary path (if GROQ_API_KEY is configured).
-              if (process.env.GROQ_API_KEY) {
-                providers.push({ name: 'groq/llama-3.1-8b', fn: () => callGroq() })
-              }
+            // Routes the selected model id to the right underlying call.
+            // Sarvam has its own endpoint; every other supported model
+            // (GPT-OSS 120B, DeepSeek V3, and the Qwen last-resort) goes
+            // through OpenRouter.
+            const callSelectedModel = async (model: string): Promise<string> => {
+              if (model === 'sarvam-105b') return callSarvam()
+              return callOpenRouter(model)
             }
 
             try {
-              const result = await Promise.any(
-                providers.map(async (p) => {
-                  const result = await p.fn()
-                  return { name: p.name, text: result }
-                })
-              )
-              text = result.text
-              providerUsed = result.name
-              if (result.name !== effectiveSelectedModel) {
-                fallbackHappened = true
-                console.log(`[chat.llm] ${isDeepThinking ? 'Deep-thinking' : 'Casual'} tier winner: ${result.name} (selected was ${selectedModel})`)
-              } else {
-                console.log(`[chat.llm] ${isDeepThinking ? 'Deep-thinking' : 'Casual'} tier winner: ${result.name}`)
-              }
-            } catch (aggErr) {
-              // For deep-thinking requests: if all eligible providers failed, fall through
-              // to the reliability tier (Groq 8B + Pollinations) before giving up entirely.
-              // ARIA should never go fully offline — she just doesn't race a weak model
-              // against a strong one when both are live and healthy.
-              if (isDeepThinking) {
-                const reliabilityProviders: Array<{ name: string; fn: () => Promise<string> }> = []
-                if (process.env.GROQ_API_KEY) {
-                  reliabilityProviders.push({ name: 'groq/llama-3.1-8b', fn: () => callGroq() })
-                }
-                reliabilityProviders.push({ name: 'pollinations', fn: () => callPollinations() })
+              text = await callSelectedModel(selectedModel)
+              providerUsed = selectedModel
+              console.log(`[chat.llm] Provider: ${providerUsed}`)
+            } catch (err) {
+              // The ONLY fallback: HTTP 429 (rate limit) OR the model is
+              // decommissioned/unavailable (model_not_found, decommissioned,
+              // etc.). Any other failure (timeout, 5xx, network) propagates.
+              const errMsg = err instanceof Error ? err.message : String(err)
+              const errStatus = (err as Error & { status?: number }).status
+              const isRateLimitOrDecommission =
+                errStatus === 429 ||
+                /429/.test(errMsg) ||
+                /model_not_found|decommission|not available|unavailable|does not exist/i.test(errMsg)
 
-                if (reliabilityProviders.length > 0) {
-                  console.warn(`[chat.llm] Deep-thinking tier all failed — falling through to reliability tier: ${reliabilityProviders.map(p => p.name).join(', ')}`)
-                  try {
-                    const result = await Promise.any(
-                      reliabilityProviders.map(async (p) => {
-                        const result = await p.fn()
-                        return { name: p.name, text: result }
-                      })
-                    )
-                    text = result.text
-                    providerUsed = result.name
-                    fallbackHappened = true
-                    console.log(`[chat.llm] Fell through to reliability tier: ${result.name}`)
-                  } catch (aggErr2) {
-                    const providerNames = [...providers.map(p => p.name), ...reliabilityProviders.map(p => p.name)].join(', ')
-                    const errors = aggErr2 instanceof AggregateError
-                      ? aggErr2.errors.map((e, i) => `${reliabilityProviders[i]?.name}: ${e?.message?.slice(0, 150)}`).join(' | ')
-                      : 'unknown error'
-                    console.error(`[chat.llm] ALL PROVIDERS FAILED (deep-thinking + reliability tiers). Tried [${providerNames}]:`, errors)
-                    throw new Error(`All providers failed (${providers.length + reliabilityProviders.length} tried: ${providerNames}). ${errors}`)
-                  }
-                } else {
-                  const providerNames = providers.map(p => p.name).join(', ')
-                  const errors = aggErr instanceof AggregateError
-                    ? aggErr.errors.map((e, i) => `${providers[i]?.name}: ${e?.message?.slice(0, 150)}`).join(' | ')
-                    : 'unknown error'
-                  console.error(`[chat.llm] ALL PROVIDERS FAILED. Tried [${providerNames}]:`, errors)
-                  throw new Error(`All providers failed (${providers.length} tried: ${providerNames}). ${errors}`)
-                }
-              } else {
-                // Non-deep-thinking: no reliability tier needed (already in the primary race)
-                const providerNames = providers.map(p => p.name).join(', ')
-                const errors = aggErr instanceof AggregateError
-                  ? aggErr.errors.map((e, i) => `${providers[i]?.name}: ${e?.message?.slice(0, 150)}`).join(' | ')
-                  : 'unknown error'
-                console.error(`[chat.llm] ALL PROVIDERS FAILED. Tried [${providerNames}]:`, errors)
-                throw new Error(`All providers failed (${providers.length} tried: ${providerNames}). ${errors}`)
+              if (!isRateLimitOrDecommission) {
+                throw err
               }
+
+              // Last-resort fallback: retry ONCE on Qwen3 Next 80B (OpenRouter free tier).
+              const fallbackModel = 'qwen/qwen3-next-80b-a3b-instruct:free'
+              console.warn(`[chat.llm] Selected model "${selectedModel}" failed (${errMsg.slice(0, 150)}) — retrying ONCE on Qwen3 Next 80B (last-resort fallback).`)
+              text = await callOpenRouter(fallbackModel)
+              providerUsed = fallbackModel
+              console.log(`[chat.llm] Provider: ${providerUsed} (last-resort fallback)`)
             }
 
             fullText = text
@@ -1007,8 +814,7 @@ export async function POST(req: NextRequest) {
           if (knowledgeContext && fullText.length > 50) {
             try {
               // Only journal if this was a substantive book discussion
-              const isBookDiscussion = isDeepThinking ||
-                knowledgeContext !== undefined
+              const isBookDiscussion = knowledgeContext !== undefined
 
               if (isBookDiscussion) {
                 // Extract the book title from the knowledge context

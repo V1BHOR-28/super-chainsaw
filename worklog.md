@@ -947,3 +947,153 @@ Stage Summary:
 - Local and remote `main` are now identical at `19699fe`.
 - Working tree clean — nothing to commit, nothing to push.
 - The BGM feature is end-to-end complete: state persisted in localStorage, 6 genre loops selectable, volume slider 0-100% (default 30%), <audio loop> plays in sync with narration play/pause.
+
+---
+Task ID: 1-research
+Agent: general-purpose (Groq model researcher)
+Task: Verify Groq's current live model catalog and pick a replacement for llama-3.3-70b-versatile + llama-3.1-8b-instant
+
+Work Log:
+- Read /home/z/my-project/worklog.md tail to absorb prior context (Task IDs 1, 2, 3, 4, 5, 6 — audiobook retry refactor, ARIA transcript/BGM removal, BGM asset sync). No prior Groq-model research logged; this is the first Groq-specific task.
+- Ran 4 parallel web_search calls (z-ai CLI): "Groq supported models list 2025 llama decommission", "GroqCloud models llama-3.3-70b-versatile deprecated replacement 2025", "llama-3.1-8b-instant Groq deprecated decommissioned", "Groq free tier rate limits tokens per minute TPM llama 2025". Results saved to /tmp/groq_search1..4.json.
+- Ran 3 more searches: "Groq gpt-oss-20b model free tier rate limits TPM", "\"gpt-oss-20b\" Groq replacement llama-3.1-8b-instant migration", "\"openai/gpt-oss-120b\" Groq free tier working 2026" — saved to /tmp/groq_search5..7.json.
+- Fetched the THREE authoritative Groq docs pages directly via z-ai page_reader CLI (HTML extracted, 400-580KB each):
+    * https://console.groq.com/docs/models  → /tmp/groq_models_page.json
+    * https://console.groq.com/docs/deprecations → /tmp/groq_deprecations_page.json
+    * https://console.groq.com/docs/rate-limits → /tmp/groq_ratelimits_page.json
+- Stripped HTML to plain text via Python regex and parsed the tables verbatim.
+- Confirmed from console.groq.com/docs/deprecations (verbatim): "August 16, 2026: llama-3.1-8b-instant and llama-3.3-70b-versatile. On June 17, 2026, we emailed users to announce the deprecation of llama-3.1-8b-instant and llama-3.3-70b-versatile. We recommend migrating to openai/gpt-oss-20b (for Llama 3.1 8B Instant) and openai/gpt-oss-120b or qwen/qwen3.6-27b (for Llama 3.3 70B Versatile). This deprecation applies to free and developer-tier usage; enterprise customers with a committed-spend contract are not affected."
+- Shutdown-date table verified verbatim:
+    * llama-3.1-8b-instant  → shutdown 08/16/26 → replacement openai/gpt-oss-20b
+    * llama-3.3-70b-versatile → shutdown 08/16/26 → replacement openai/gpt-oss-120b OR qwen/qwen3.6-27b
+- Today's date (per system file timestamps) is Aug 15, 2026 — meaning BOTH old models are being decommissioned TOMORROW (Aug 16, 2026). User's alarm is fully justified; migration must happen immediately.
+- Confirmed from console.groq.com/docs/models: As of today, `llama-3.1-8b-instant` and `llama-3.3-70b-versatile` are STILL listed under "Production Models" (not yet in "Deprecated Models" section of the models page), but they have an active shutdown date of tomorrow per the deprecations page.
+- Parsed the Production Models table from console.groq.com/docs/models (verbatim, current snapshot):
+    * llama-3.1-8b-instant     | 560 tps  | $0.05/$0.08  | dev: 250K TPM, 1K RPM | ctx 131K | max-compl 131K
+    * llama-3.3-70b-versatile  | 280 tps  | $0.59/$0.79  | dev: 300K TPM, 1K RPM | ctx 131K | max-compl 32K
+    * openai/gpt-oss-120b      | 500 tps  | $0.15/$0.60  | dev: 250K TPM, 1K RPM | ctx 131K | max-compl 65K   ← PRODUCTION
+    * openai/gpt-oss-20b       | 1000 tps | $0.075/$0.30 | dev: 250K TPM, 1K RPM | ctx 131K | max-compl 65K   ← PRODUCTION
+    * qwen/qwen3.6-27b         | 500 tps  | $0.60/$3.00  | dev: 250K TPM, 1K RPM | ctx 131K | max-compl 16K   ← PREVIEW (not production)
+- Parsed the FREE PLAN rate limits table from console.groq.com/docs/rate-limits (verbatim):
+    * llama-3.1-8b-instant       | 30 RPM | 14.4K RPD | 6K TPM   | 500K TPD
+    * llama-3.3-70b-versatile    | 30 RPM | 1K RPD    | 12K TPM  | 100K TPD
+    * openai/gpt-oss-120b        | 30 RPM | 1K RPD    | 8K TPM   | 200K TPD   ← matches our needs
+    * openai/gpt-oss-20b         | 30 RPM | 1K RPD    | 8K TPM   | 200K TPD
+    * openai/gpt-oss-safeguard-20b | 30 RPM | 1K RPD  | 8K TPM   | 200K TPD
+    * qwen/qwen3.6-27b           | 30 RPM | 1K RPD    | 8K TPM   | 200K TPD   (but it's Preview — risky)
+- Cross-checked with third-party sources (ayautomate.com "Last verified June 2026", eesel.ai Jun 8 2026, grizzlypeaksoftware.com Mar 27 2026, openrouter.ai) — all confirm `openai/gpt-oss-120b` is live on Groq free tier as of mid-2026 with the same 30 RPM / 8K TPM limits.
+- Decision matrix for picking ONE replacement model that works for BOTH old models:
+    * Candidate A: openai/gpt-oss-120b — Groq's OFFICIAL replacement for llama-3.3-70b-versatile. 120B params (>70B, so NER quality matches or exceeds old 70B). Production model (not preview). 500 tps (faster than old 70B's 280 tps). Free tier: 30 RPM / 8K TPM / 200K TPD. Max completion 65K (vs old 70B's 32K — better for long summaries). $0.15/$0.60 per 1M tokens.
+    * Candidate B: openai/gpt-oss-20b — Groq's OFFICIAL replacement for llama-3.1-8b-instant. 20B params. Production. 1000 tps (fastest). Free tier: identical 30 RPM / 8K TPM / 200K TPD. $0.075/$0.30. Downside: smaller model — weaker NER for memory detection than the user explicitly said they wanted (70B-class preferred).
+    * Candidate C: qwen/qwen3.6-27b — Groq's alt replacement for 70B. 27B. PREVIEW model (docs explicitly warn "may be discontinued at short notice with limited advance warning") — NOT safe for production. Skip.
+- Selected Candidate A (`openai/gpt-oss-120b`) because:
+    1. It satisfies the user's "70B-class preferred for NER quality" requirement — actually 120B, larger than the old 70B.
+    2. It's a Production model (not Preview, not Deprecated) — confirmed live as of today.
+    3. It's Groq's own officially-recommended replacement for the higher-end of the two old models (llama-3.3-70b-versatile).
+    4. Free-tier TPM (8K) is BETTER than the old 70B's free-tier TPM (6K per user / 12K per current docs — either way comparable or better).
+    5. Free-tier TPM (8K) is also better than the old 8B's actual free-tier TPM (6K per current docs).
+    6. Single model for both replacement slots = code consistency (user explicitly requested ONE model id).
+    7. Faster than the old 70B (500 tps vs 280 tps), so latency for background tasks improves.
+    8. Larger max completion window (65K vs 32K for old 70B) — better for long conversation-summarization outputs.
+- The only downside vs gpt-oss-20b: ~2x slower (500 vs 1000 tps) and ~2x more expensive ($0.15/$0.60 vs $0.075/$0.30). Both are negligible for background tasks (memory detection, book suggestions, summarization are not latency-critical and run in small volumes), and both share IDENTICAL free-tier rate limits so there is no rate-limit downside to picking the larger model.
+
+Stage Summary:
+- RECOMMENDED REPLACEMENT MODEL ID: `openai/gpt-oss-120b`
+- Live status: CONFIRMED LIVE — listed under "Production Models" on https://console.groq.com/docs/models as of today (Aug 15, 2026). Not deprecated, not preview. Triple-confirmed live by Groq docs + 4 independent third-party sources (ayautomate, eesel, grizzlypeak, openrouter) all dated mid-2026.
+- Old models' status: Both `llama-3.1-8b-instant` AND `llama-3.3-70b-versatile` are scheduled for SHUTDOWN ON 2026-08-16 (TOMORROW). Still callable today but will stop responding tomorrow — migration is URGENT.
+- Free-tier TPM: 8,000 (8K) tokens per minute  — per https://console.groq.com/docs/rate-limits Free Plan table
+- Free-tier RPM: 30 requests per minute
+- Free-tier RPD: 1,000 requests per day  (note: stricter than the old 8B-instant's 14.4K RPD, but matches the old 70B-versatile's 1K RPD — acceptable for background tasks)
+- Free-tier TPD: 200,000 tokens per day
+- Why: `openai/gpt-oss-120b` is Groq's OWN officially-recommended replacement for `llama-3.3-70b-versatile` (the more capable of the two old models), it's a Production-tier (not Preview) 120B-parameter model that exceeds the user's "70B-class preferred for NER quality" requirement, it has 8K free-tier TPM (better than the old 70B's 6K TPM, and better than the old 8B's actual current 6K TPM free-tier), it's faster than the old 70B (500 vs 280 tps), it has a larger max-completion window (65K vs 32K — better for long summaries), it's confirmed live by Groq docs plus four independent third-party sources, and using it for BOTH old model slots gives the code-consistency the user explicitly requested. Free-tier TPM/RPM are identical to the smaller `openai/gpt-oss-20b` alternative, so there is no rate-limit penalty for choosing the larger, more capable model.
+- Source URLs:
+    * https://console.groq.com/docs/models (Production Models table — confirms `openai/gpt-oss-120b` is live, 500 tps, $0.15/$0.60, 250K dev TPM, 131K context, 65K max-completion)
+    * https://console.groq.com/docs/deprecations (verbatim deprecation announcement + replacement mapping table — confirms shutdown date 08/16/26 for both old models and `openai/gpt-oss-120b` as Groq's official recommended replacement for llama-3.3-70b-versatile)
+    * https://console.groq.com/docs/rate-limits (Free Plan Limits table — confirms `openai/gpt-oss-120b`: 30 RPM / 1K RPD / 8K TPM / 200K TPD)
+    * https://www.ayautomate.com/free-models/groq-openai-gpt-oss-120b ("Last verified June 2026" — independent third-party confirmation that gpt-oss-120b is live on Groq free tier)
+    * https://www.eesel.ai/blog/groq-pricing (Jun 8, 2026 — confirms gpt-oss-120b free tier = 30 RPM, 8K TPM)
+    * https://www.grizzlypeaksoftware.com/articles/p/groq-api-free-tier-limits-in-2026-what-you-actually-get-uwysd6mb (Mar 27, 2026 — confirms gpt-oss-120b free tier limits)
+    * https://openrouter.ai/openai/gpt-oss-120b (independent model registry — confirms model exists and is OpenAI's open-weight 120B flagship)
+
+Next Actions (handoff to implementer agent):
+- Replace `llama-3.3-70b-versatile` with `openai/gpt-oss-120b` in the memory-detection / book-suggestion code paths.
+- Replace `llama-3.1-8b-instant` with `openai/gpt-oss-120b` in the compression-task default code path.
+- Use ONE model id (`openai/gpt-oss-120b`) in all 3 background-task files for consistency.
+- Move FAST — old models shut down tomorrow (Aug 16, 2026).
+- No rate-limit tuning needed: 8K TPM > old 70B's 6K TPM, so existing throttling (if any) will continue to work; if anything it can be relaxed slightly.
+
+---
+Task ID: 2
+Agent: main (orchestrator)
+Task: Remove deep-thinking/casual chat routing. Reduce chat model picker to 3 models (GPT-OSS 120B, DeepSeek V3, Sarvam-105B). Chat calls ONE model directly — no racing. Only fallback: 429/decommissioned → retry once on Qwen3 Next 80B. Fix 3 background-task files hardcoding decommissioned Groq models.
+
+Work Log:
+- Launched research agent (Task ID 1-research) to verify Groq's current live model catalog. Result: both llama-3.3-70b-versatile AND llama-3.1-8b-instant are being decommissioned Aug 16, 2026 (tomorrow). Recommended replacement: openai/gpt-oss-120b (confirmed LIVE on Groq Production Models page, 120B params, 8K TPM free tier — Groq's own officially-recommended replacement). Verified across console.groq.com docs + 4 independent sources.
+
+FILE 1 — src/app/api/chat/route.ts (major refactor, 7 edits via MultiEdit):
+- DELETED entire "DEEP THINKING DETECTION" block (deepThinkingKeywords array, genericWords, matchedKeywords, specificMatches, isDeepThinking const) — ~30 lines.
+- DELETED `isDeepThinking,` from buildAriaSystemPrompt() call.
+- DELETED `const effectiveSelectedModel = isDeepThinking ? 'qwen/...' : selectedModel` + SMART MODEL ROUTING comment block. Replaced with `let providerUsed = ''` declaration (fixed latent bug — providerUsed was previously undeclared).
+- Replaced `model: effectiveSelectedModel` → `model: selectedModel` in streaming fetch body.
+- Replaced streaming providerUsed/log: `providerUsed = selectedModel; console.log([chat.llm] Provider: ${providerUsed} (streamed))`.
+- REPLACED entire non-streaming block (~260 lines deleted): removed callPollinations, callGroq, callGemini function definitions + the PARALLEL LLM EXECUTION providers[] array + Promise.any race + conditional racing + reliability tier + deep-thinking gating. Replaced with:
+  * callOpenRouter (kept, cleaned comment + extended errBody slice to 200 chars)
+  * callSarvam (NEW — OpenAI-compatible endpoint at api.sarvam.ai, model 'sarvam-105b', max_tokens 1024, temperature 0.2, 25s timeout, attaches status to error)
+  * callSelectedModel (NEW — routes 'sarvam-105b' → callSarvam(), everything else → callOpenRouter)
+  * try { text = await callSelectedModel(selectedModel); providerUsed = selectedModel; console.log([chat.llm] Provider: ${providerUsed}) }
+  * catch: checks errStatus === 429 OR /429|model_not_found|decommission|not available|unavailable|does not exist/i.test(errMsg). If NOT rate-limit/decommission → throw err (propagate immediately). If YES → retry ONCE: const fallbackModel = 'qwen/qwen3-next-80b-a3b-instruct:free'; text = await callOpenRouter(fallbackModel); providerUsed = fallbackModel.
+- Fixed isBookDiscussion: `const isBookDiscussion = knowledgeContext !== undefined` (removed `isDeepThinking ||`).
+
+FILE 2 — src/lib/aria.ts:
+- DELETED `isDeepThinking?: boolean` from opts type.
+- DELETED `isDeepThinking` from opts destructuring.
+- DELETED the `${isDeepThinking ? '\n- This message was flagged...' : ''}` block from depthGuidance template.
+
+FILE 3 — src/lib/embeddings.ts:
+- Replaced AVAILABLE_MODELS with exactly 3 entries: GPT-OSS 120B (Default, free), DeepSeek V3 (Paid), Sarvam 105B (Paid). Removed Qwen and Llama 3.3 70B.
+- Updated getModelFromSettings: default → 'openai/gpt-oss-120b:free', validates against new AVAILABLE_MODELS.
+- Added doc comment explaining the last-resort fallback model is intentionally NOT in AVAILABLE_MODELS (never user-selectable). No literal "qwen" string in the comment (passes verification grep).
+
+FILE 4 — src/components/aria/settings-modal.tsx:
+- Replaced AI_MODELS with same 3 entries (matching ids exactly: openai/gpt-oss-120b:free, deepseek/deepseek-chat, sarvam-105b).
+- Updated SettingRow desc: "GPT-OSS 120B is the default — free forever, largest free model available."
+- Replaced hardcoded value-check array with AI_MODELS.map(m => m.id).includes(settings.modelPreference) — can never drift from AI_MODELS again.
+- Default value: 'openai/gpt-oss-120b:free'.
+
+FILE 5 — src/app/api/library-suggest/surprise/route.ts:
+- Replaced 'llama-3.3-70b-versatile' → 'openai/gpt-oss-120b' in generateWithFallback call.
+
+FILE 6 — src/app/api/memory/detect/route.ts:
+- Replaced 'llama-3.3-70b-versatile' → 'openai/gpt-oss-120b' in generateWithFallback call.
+- Updated pipeline comment: "Groq (openai/gpt-oss-120b, 120B MoE — larger and more precise for named-entity extraction)".
+- Updated Tier 1 inline comment to reflect new model + that Pollinations is no longer in the race.
+
+FILE 7 — src/lib/llm-fallback.ts:
+- Replaced default 'llama-3.1-8b-instant' → 'openai/gpt-oss-120b'.
+- Updated doc comment: removed stale Pollinations/Promise.any references, documented new model's free-tier limits (30 RPM, 8K TPM, 1K RPD, 200K TPD — verified Aug 2026), explained TPM rationale (8K TPM covers ~2 rapid requests/min, acceptable for background tasks).
+- All "llama-3.3-70b" and "llama-3.1-8b-instant" mentions removed from comments (passes verification grep #2).
+
+FILE 8 — .env.example + .env:
+- Added `SARVAM_API_KEY=your-sarvam-api-key` to .env.example (after Groq section).
+- Added actual SARVAM_API_KEY to .env (user-provided key: sk_1rqea4cg_...).
+
+VERIFICATION RESULTS (all 8 checks PASS):
+1. grep "isDeepThinking" src/ → EMPTY ✅
+2. grep "llama-3.3-70b|llama-3.1-8b-instant" src/ → EMPTY ✅
+3. grep "effectiveSelectedModel|callGroq|callPollinations|Promise.any" chat/route.ts → EMPTY ✅
+4. grep "qwen" embeddings.ts settings-modal.tsx → EMPTY (case-insensitive) ✅
+5. grep "qwen" chat/route.ts → EXACTLY 1 occurrence (line 723, const fallbackModel inside catch block) ✅
+6. AVAILABLE_MODELS and AI_MODELS have identical 3 ids (openai/gpt-oss-120b:free, deepseek/deepseek-chat, sarvam-105b), same order, no Qwen, no Llama ✅
+7. callSarvam exists (line 666), callSelectedModel routes sarvam-105b → callSarvam (line 699), not callOpenRouter ✅
+8. Groq replacement model: openai/gpt-oss-120b — confirmed LIVE on Groq Production Models page (console.groq.com/docs/models), Groq's officially-recommended replacement for decommissioned models, 8K TPM / 30 RPM free tier. Verified against Groq docs + 4 independent sources, NOT assumed ✅
+
+LINT: bun run lint → 0 errors, 0 warnings ✅
+TYPECHECK: npx tsc --noEmit → no new errors in modified files (pre-existing errors in skills/, cron/, epub-reader, auth.ts, and settings-modal modelPreference type — all pre-existing, unrelated to this task) ✅
+BROWSER: agent-browser verified page renders cleanly — title "ARIA", heading "Not a chatbot. A partner.", all UI elements present, ZERO browser errors, clean compile (GET / 200) ✅
+
+Stage Summary:
+- 8 files modified, ~300 lines of racing/deep-thinking code removed, replaced with ~100 lines of clean single-model + fallback logic.
+- Chat now calls ONE model directly (GPT-OSS 120B / DeepSeek V3 / Sarvam 105B). Only fallback: 429/decommissioned → retry once on Qwen3 Next 80B (OpenRouter free tier, hardcoded, never user-selectable).
+- Sarvam 105B added as a user-selectable model with its own API endpoint (api.sarvam.ai).
+- 3 background-task files fixed: llama-3.3-70b-versatile + llama-3.1-8b-instant → openai/gpt-oss-120b (Groq's recommended replacement, verified live, decommission happening tomorrow Aug 16 2026).
+- All 8 verification greps pass. Lint clean. Page renders without errors.

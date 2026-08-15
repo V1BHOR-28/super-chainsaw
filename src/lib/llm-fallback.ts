@@ -51,23 +51,31 @@ export async function callGeminiForExtraction(prompt: string): Promise<string | 
  * generateWithFallback — a minimal, self-contained LLM call used for
  * background compression tasks (conversation summaries, memory detection).
  *
- * Mirrors the provider pattern in src/app/api/chat/route.ts: fires Groq
- * (fastest, free) and Pollinations (keyless backstop) in parallel via
- * Promise.any, first success wins.
+ * Mirrors the single-provider pattern used across the app: calls Groq
+ * directly (fastest, free tier). Pollinations was removed previously
+ * (402 errors on large requests); OpenRouter is not used here to avoid
+ * consuming paid credits on background tasks.
  *
  * Callers can override the default Groq model via opts.model — e.g. memory
- * detection passes 'llama-3.3-70b-versatile' (larger, more precise for
- * named-entity extraction); conversation-summary uses the default
- * 'llama-3.1-8b-instant' (smaller, faster for pure compression).
+ * detection passes 'openai/gpt-oss-120b' (120B MoE, larger and more precise
+ * for named-entity extraction); conversation-summary uses the default
+ * 'openai/gpt-oss-120b' too (same model — Groq's recommended production
+ * replacement after Groq's previous default models were decommissioned
+ * Aug 2026).
  *
- * Returns the trimmed text content, or null if every provider fails.
+ * Groq free-tier limits for openai/gpt-oss-120b (verified Aug 2026):
+ *   30 RPM, 8K TPM, 1K RPD, 200K TPD. ARIA's system prompt is ~3-4K tokens,
+ * so the 8K TPM budget covers roughly 2 rapid requests per minute before
+ * throttling — acceptable for background tasks which are not latency-sensitive.
+ *
+ * Returns the trimmed text content, or null if the provider fails.
  */
 export async function generateWithFallback(
   prompt: string,
   opts?: { model?: string; maxTokens?: number }
 ): Promise<string | null> {
   const messages = [{ role: 'user' as const, content: prompt }]
-  const groqModel = opts?.model ?? 'llama-3.1-8b-instant' // default stays small/fast
+  const groqModel = opts?.model ?? 'openai/gpt-oss-120b' // Groq production model (replaced decommissioned defaults Aug 2026)
   // Default max_tokens stays at 800 to preserve existing behavior for short
   // background tasks (conversation-summary, memory-detect). Chapter cleaning
   // passes a larger value sized to its input — see cleanChapterLLM.

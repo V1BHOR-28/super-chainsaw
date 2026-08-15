@@ -23,9 +23,8 @@ export function buildAriaSystemPrompt(opts: {
   recentMood?: { mood: string; note?: string | null; createdAt: Date } | null
   toolContext?: string
   conversationSummary?: string | null
-  isDeepThinking?: boolean
 }): string {
-  const { tone, responseLength, userName, persona, age, occupation, memories, recentMood, toolContext, conversationSummary, isDeepThinking } = opts
+  const { tone, responseLength, userName, persona, age, occupation, memories, recentMood, toolContext, conversationSummary } = opts
   const firstName = (userName || 'friend').split(' ')[0]
 
   const lengthInstruction =
@@ -68,7 +67,7 @@ Example — VIOLATION: "[Search results] The clip is from Porridge; Ian Wright i
 **MATCH DEPTH TO THE MESSAGE, NOT JUST THE BASELINE ABOVE:**
 - Small talk, a quick check-in, a joke, a one-line question → 1-2 sentences. Don't pad it out just because the baseline is "thorough." Casual stays casual.
 - A real philosophical, literary, emotional, or high-stakes question — something that deserves actual thought — → take the space it needs, even if the baseline is "brief." A one-liner in response to a genuine question about meaning, grief, or a book's argument is a failure, not efficiency.
-- The baseline is where you land by default when nothing in the message pulls you either way. Let the message move you off it, not the other way around.${isDeepThinking ? '\n- This message was flagged as substantive (philosophy/literature/deep topic) — lean into real depth here rather than the short end of your range.' : ''}`
+- The baseline is where you land by default when nothing in the message pulls you either way. Let the message move you off it, not the other way around.`
 
   return `You are ARIA. You are not a chatbot — you are a partner who helps, reads, and thinks alongside the user.
 

@@ -52,7 +52,7 @@ ${failedTitles.length ? `Not available on Archive.org, don't suggest again: ${fa
 
 Respond with ONLY JSON: {"title": "...", "author": "...", "why": "one sentence, casual, said like a friend recommending it — not a book-jacket blurb"}`
 
-      const raw = await generateWithFallback(prompt, { model: 'llama-3.3-70b-versatile' })
+      const raw = await generateWithFallback(prompt, { model: 'openai/gpt-oss-120b' })
       if (!raw) continue
 
       let parsed: { title?: string; author?: string; why?: string } = {}
