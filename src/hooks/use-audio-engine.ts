@@ -4,6 +4,7 @@ import { useEffect, useRef } from "react";
 import { usePlayerStore } from "@/lib/player-store";
 import { getChapterMp3Url } from "@/lib/abm-api";
 import { setAudioElement } from "@/lib/audio-element-registry";
+import { getAudioUrl } from "@/lib/audio-cache";
 
 /**
  * Audio engine — playlist player for per-chapter MP3s.
@@ -55,6 +56,8 @@ export function useAudioEngine() {
 
   // ── Chapter change: load the new chapter's MP3 ──
   // When currentChapterIdx changes (or the job opens), load the new source.
+  // Uses IndexedDB audio cache: if the chapter was played before, it loads
+  // instantly from cache (blob: URL) even when the backend is offline.
   useEffect(() => {
     const a = audioRef.current;
     if (!a || !currentJob) return;
@@ -70,10 +73,21 @@ export function useAudioEngine() {
     if (currentChapterIdx < 0 || currentChapterIdx >= currentJob.chapterMp3s.length) return;
 
     const chInfo = currentJob.chapterMp3s[currentChapterIdx];
-    const url = getChapterMp3Url(currentJob.jobId, chInfo.index);
+    const networkUrl = getChapterMp3Url(currentJob.jobId, chInfo.index);
     isLoadingNewChapter.current = true;
-    a.src = url;
-    a.load();
+
+    // Try cache first, fall back to network URL
+    getAudioUrl(currentJob.jobId, chInfo.index, networkUrl)
+      .then((url) => {
+        if (a && !a.paused) a.pause();
+        a.src = url;
+        a.load();
+      })
+      .catch(() => {
+        // Fallback: use network URL directly
+        a.src = networkUrl;
+        a.load();
+      });
   }, [currentJob, currentChapterIdx]);
 
   // ── Play / pause control ──

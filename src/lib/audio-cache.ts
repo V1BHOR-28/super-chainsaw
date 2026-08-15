@@ -1,29 +1,27 @@
 "use client";
 
 /**
- * transcript-cache — permanent browser-side cache for word-level transcript cues.
+ * audio-cache — persistent IndexedDB cache for chapter MP3 audio.
  *
- * Why: transcripts are important (karaoke-style synced text). When the backend
- * is down (Docker stopped, laptop off, network outage), the frontend can't
- * fetch /api/job_chapters — so the transcript disappears. This cache stores
- * the cues in IndexedDB so they're available INSTANTLY even with the backend
- * completely offline. The backend stays the source of truth; this is a
- * read-through cache that populates on first access and serves from disk
- * on every subsequent access.
+ * Why: when the Docker backend is stopped, chapter MP3s are unreachable.
+ * The <audio> element's src points to /api/abm/chapter_mp3/... which goes
+ * through the backend. Without caching, playback is impossible offline.
  *
- * Storage: IndexedDB (not localStorage — transcript cues can be 100KB-1MB
- * per chapter, and localStorage has a 5-10MB total budget). IndexedDB can
- * store hundreds of MB, so caching many chapters across many books is fine.
+ * This cache stores the raw MP3 bytes as a Blob in IndexedDB. When the
+ * player requests a chapter URL, the cache is checked first. If cached,
+ * a blob: URL is returned (instant, works offline). If not cached, the
+ * network URL is used and the bytes are cached in the background for
+ * next time.
  *
- * Fail-soft: every operation is wrapped in try/catch. If IndexedDB is
- * unavailable (private browsing, quota exceeded), functions return null/void
- * and the caller falls back to the network fetch.
+ * Storage: IndexedDB can store hundreds of MB. A typical chapter is
+ * ~2MB (edge-tts) or ~260KB (kokoro). A 20-chapter book = ~4-40MB.
+ * Fail-soft: every operation is wrapped in try/catch.
  *
- * Key shape: `${jobId}:${chapterIdx}` — same as the in-memory transcript store.
+ * Key shape: `${jobId}:${chapterIndex}` — same as transcript cache.
  */
 
-const DB_NAME = "aria-transcripts";
-const STORE_NAME = "cues";
+const DB_NAME = "aria-audio-cache";
+const STORE_NAME = "chapters";
 const DB_VERSION = 1;
 
 let _dbPromise: Promise<IDBDatabase | null> | null = null;
@@ -52,15 +50,15 @@ function openDB(): Promise<IDBDatabase | null> {
   return _dbPromise;
 }
 
-/** Get cached transcript cues for a chapter. Returns null on any failure. */
-export async function getCachedTranscript(
+/** Get a cached chapter audio Blob. Returns null on any failure. */
+export async function getCachedAudio(
   jobId: string,
-  chapterIdx: number,
-): Promise<number[][] | null> {
+  chapterIndex: number,
+): Promise<Blob | null> {
   try {
     const db = await openDB();
     if (!db) return null;
-    const key = `${jobId}:${chapterIdx}`;
+    const key = `${jobId}:${chapterIndex}`;
     return new Promise((resolve) => {
       try {
         const tx = db.transaction(STORE_NAME, "readonly");
@@ -68,7 +66,7 @@ export async function getCachedTranscript(
         const req = store.get(key);
         req.onsuccess = () => {
           const result = req.result;
-          if (Array.isArray(result) && result.length > 0) {
+          if (result instanceof Blob) {
             resolve(result);
           } else {
             resolve(null);
@@ -84,21 +82,21 @@ export async function getCachedTranscript(
   }
 }
 
-/** Cache transcript cues for a chapter. Fail-soft: never throws. */
-export async function cacheTranscript(
+/** Cache a chapter audio Blob. Fail-soft: never throws. */
+export async function cacheAudio(
   jobId: string,
-  chapterIdx: number,
-  cues: number[][],
+  chapterIndex: number,
+  blob: Blob,
 ): Promise<void> {
   try {
     const db = await openDB();
     if (!db) return;
-    const key = `${jobId}:${chapterIdx}`;
+    const key = `${jobId}:${chapterIndex}`;
     await new Promise<void>((resolve) => {
       try {
         const tx = db.transaction(STORE_NAME, "readwrite");
         const store = tx.objectStore(STORE_NAME);
-        store.put(cues, key);
+        store.put(blob, key);
         tx.oncomplete = () => resolve();
         tx.onerror = () => resolve();
       } catch {
@@ -110,15 +108,46 @@ export async function cacheTranscript(
   }
 }
 
-/** Remove a cached transcript (e.g. when a job is deleted). Fail-soft. */
-export async function removeCachedTranscript(
+/** Fetch a chapter URL, cache the bytes, return a blob: URL.
+ *  If already cached, returns the cached blob: URL immediately.
+ *  Falls back to the network URL if caching fails. */
+export async function getAudioUrl(
   jobId: string,
-  chapterIdx: number,
+  chapterIndex: number,
+  networkUrl: string,
+): Promise<string> {
+  // 1. Check cache first
+  const cached = await getCachedAudio(jobId, chapterIndex);
+  if (cached) {
+    return URL.createObjectURL(cached);
+  }
+
+  // 2. Fetch from network
+  try {
+    const resp = await fetch(networkUrl, { credentials: "include" });
+    if (!resp.ok) return networkUrl; // fall back to network URL
+    const blob = await resp.blob();
+    if (blob.size === 0) return networkUrl;
+
+    // 3. Cache in background
+    cacheAudio(jobId, chapterIndex, blob).catch(() => {});
+
+    // 4. Return blob URL (instant playback, no network needed)
+    return URL.createObjectURL(blob);
+  } catch {
+    return networkUrl; // network failed — return URL anyway (might retry)
+  }
+}
+
+/** Remove a cached chapter (e.g. when a job is deleted). Fail-soft. */
+export async function removeCachedAudio(
+  jobId: string,
+  chapterIndex: number,
 ): Promise<void> {
   try {
     const db = await openDB();
     if (!db) return;
-    const key = `${jobId}:${chapterIdx}`;
+    const key = `${jobId}:${chapterIndex}`;
     await new Promise<void>((resolve) => {
       try {
         const tx = db.transaction(STORE_NAME, "readwrite");
@@ -135,10 +164,8 @@ export async function removeCachedTranscript(
   }
 }
 
-/** Remove all cached transcripts for a job (e.g. when a job is deleted). */
-export async function removeCachedTranscriptsForJob(
-  jobId: string,
-): Promise<void> {
+/** Remove all cached audio for a job. Fail-soft. */
+export async function removeCachedAudioForJob(jobId: string): Promise<void> {
   try {
     const db = await openDB();
     if (!db) return;
@@ -146,7 +173,6 @@ export async function removeCachedTranscriptsForJob(
       try {
         const tx = db.transaction(STORE_NAME, "readwrite");
         const store = tx.objectStore(STORE_NAME);
-        // IndexedDB cursors let us scan all keys and delete matches
         const cursorReq = store.openCursor();
         cursorReq.onsuccess = () => {
           const cursor = cursorReq.result;
