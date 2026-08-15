@@ -115,7 +115,14 @@ export function EpubReader() {
           throw new Error("empty file");
         }
 
-        await view.open(blob);
+        // foliate-js expects a File object (with .name) or a URL string.
+        // A plain Blob has no .name → isCBZ/isFB2 crash on .endsWith().
+        // Wrap the Blob in a File with an .epub extension.
+        const file = new File([blob], "book.epub", {
+          type: "application/epub+zip",
+        });
+
+        await view.open(file);
         if (!cancelled) {
           setLoading(false);
 
