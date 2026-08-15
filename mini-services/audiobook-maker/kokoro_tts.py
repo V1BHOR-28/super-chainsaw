@@ -72,28 +72,22 @@ def _get_pipeline():
 # We expose a curated subset (grade B+ and above for quality).
 
 KOKORO_VOICES = [
-    # American English (lang_code='a')
-    # Female
-    {"id": "af_heart",   "gender": "Female", "name": "Heart (BEST)",   "grade": "A",  "locale": "en-US"},
-    {"id": "af_bella",   "gender": "Female", "name": "Bella",          "grade": "A-", "locale": "en-US"},
-    {"id": "af_nicole",  "gender": "Female", "name": "Nicole",         "grade": "B-", "locale": "en-US"},
-    {"id": "af_aoede",   "gender": "Female", "name": "Aoede",          "grade": "C+", "locale": "en-US"},
-    {"id": "af_kore",    "gender": "Female", "name": "Kore",           "grade": "C+", "locale": "en-US"},
-    {"id": "af_sarah",   "gender": "Female", "name": "Sarah",          "grade": "C+", "locale": "en-US"},
-    {"id": "af_alloy",   "gender": "Female", "name": "Alloy",          "grade": "C",  "locale": "en-US"},
-    {"id": "af_nova",    "gender": "Female", "name": "Nova",           "grade": "C",  "locale": "en-US"},
-    # Male
-    {"id": "am_michael", "gender": "Male",   "name": "Michael",        "grade": "C+", "locale": "en-US"},
-    {"id": "am_fenrir",  "gender": "Male",   "name": "Fenrir",         "grade": "C+", "locale": "en-US"},
-    {"id": "am_puck",    "gender": "Male",   "name": "Puck",           "grade": "C+", "locale": "en-US"},
-    {"id": "am_eric",    "gender": "Male",   "name": "Eric",           "grade": "D",  "locale": "en-US"},
-    # British English (lang_code='b')
-    # Female
-    {"id": "bf_emma",    "gender": "Female", "name": "Emma (British)", "grade": "B-", "locale": "en-GB"},
-    {"id": "bf_isabella","gender": "Female", "name": "Isabella (British)","grade":"C","locale": "en-GB"},
-    # Male
-    {"id": "bm_george",  "gender": "Male",   "name": "George (British)","grade": "C", "locale": "en-GB"},
-    {"id": "bm_fable",   "gender": "Male",   "name": "Fable (British)","grade": "C",  "locale": "en-GB"},
+    # Curated 10 best voices for audiobook narration: 8 Female + 2 Male.
+    # Selected by quality grade + training hours from VOICES.md.
+    # Grades: A > A- > B- > C+ > C > D
+    #
+    # Female (8):
+    {"id": "af_heart",   "gender": "Female", "name": "Heart — BEST",     "grade": "A",  "locale": "en-US"},
+    {"id": "af_bella",   "gender": "Female", "name": "Bella — Warm",     "grade": "A-", "locale": "en-US"},
+    {"id": "af_nicole",  "gender": "Female", "name": "Nicole — Clear",   "grade": "B-", "locale": "en-US"},
+    {"id": "bf_emma",    "gender": "Female", "name": "Emma — British",   "grade": "B-", "locale": "en-GB"},
+    {"id": "af_aoede",   "gender": "Female", "name": "Aoede — Soft",     "grade": "C+", "locale": "en-US"},
+    {"id": "af_kore",    "gender": "Female", "name": "Kore — Steady",    "grade": "C+", "locale": "en-US"},
+    {"id": "af_sarah",   "gender": "Female", "name": "Sarah — Calm",     "grade": "C+", "locale": "en-US"},
+    {"id": "bf_isabella","gender": "Female", "name": "Isabella — British","grade": "C", "locale": "en-GB"},
+    # Male (2):
+    {"id": "am_michael", "gender": "Male",   "name": "Michael — BEST Male", "grade": "C+", "locale": "en-US"},
+    {"id": "am_fenrir",  "gender": "Male",   "name": "Fenrir — Deep",    "grade": "C+", "locale": "en-US"},
 ]
 
 # Quick lookup: voice_id → voice info
