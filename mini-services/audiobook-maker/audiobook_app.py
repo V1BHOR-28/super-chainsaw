@@ -84,6 +84,10 @@ except ImportError:
 #  -  -  Speechify Simba-3.2 (PREMIUM, solo inglese)  -  opzionale  -  -
 import speechify_tts
 
+#  -  -  Kokoro-82M (FREE, local CPU-only, English)  -  opzionale  -  -
+#  No API key needed — runs entirely locally. Same free tier as edge-tts.
+import kokoro_tts
+
 from audio_utils import (
     _extract_cover_from_epub, _generate_fallback_cover,
     _extract_cover_for_preview, _generate_podcast_rss,
@@ -2322,6 +2326,21 @@ async def _fetch_voices():
                 languages[lc_short]["voices"].extend(v_list)
         except Exception as e:
             print(f"Error merging Speechify voices: {e}")
+
+    # 6. Kokoro-82M (Optional, free local TTS — English only) — no API key.
+    # Same free tier as edge-tts. Voices appear under "en" alongside edge-tts.
+    if kokoro_tts.is_available():
+        try:
+            kok_dict = kokoro_tts.get_voices()  # -> {"en": [entry, ...]}
+            for lc_short, v_list in kok_dict.items():
+                if lc_short not in languages:
+                    languages[lc_short] = {
+                        "name": LOCALE_NAMES.get(lc_short, lc_short.upper()),
+                        "voices": []
+                    }
+                languages[lc_short]["voices"].extend(v_list)
+        except Exception as e:
+            print(f"Error merging Kokoro voices: {e}")
 
     # Sorting
     for lang in languages.values():

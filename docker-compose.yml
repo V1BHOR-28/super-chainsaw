@@ -7,6 +7,12 @@ services:
     ports:
       - "5601:5601"
     restart: unless-stopped
+    # Memory limit: 8GB host RAM, leave headroom for ngrok (~50MB), host OS
+    # (~2GB), browser/editor (~2GB). 3GB for the audiobook container covers
+    # Flask + edge-tts + Kokoro model (~330MB) + audio processing buffers.
+    # A runaway Kokoro load degrades as a contained OOM kill, not a full
+    # host slowdown.
+    mem_limit: 3g
     volumes:
       # Named volume — survives container restarts/rebuilds/deletes.
       # This is where EPUBs, generated MP3s, tokens, and the job registry live.

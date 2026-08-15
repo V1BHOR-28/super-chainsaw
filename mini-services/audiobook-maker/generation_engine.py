@@ -45,6 +45,7 @@ import gemini_cost_audit
 import translation_cost_audit
 import optimization_cost_audit
 import speechify_tts
+import kokoro_tts
 from audio_utils import (
     _safe_filename, _include_cover_in_dir,
     _generate_silence_mp3, _concatenate_mp3,
@@ -198,6 +199,7 @@ _send_push = None  # callable(job_id, event, title): invia push FCM (non-fatal)
 # Predicato voce PREMIUM Gemini: definizione unica in voice_utils (modulo foglia).
 from voice_utils import is_gemini_voice as _is_gemini_voice
 from voice_utils import is_speechify_voice as _is_speechify_voice
+from voice_utils import is_kokoro_voice as _is_kokoro_voice
 
 
 def _retention_for_job(job):
@@ -3015,6 +3017,8 @@ def _engine_for_voice(voice):
         return "speechify"
     if _is_gemini_voice(voice):
         return "gemini"
+    if _is_kokoro_voice(voice):
+        return "kokoro"
     if _google_tts is not None and _google_tts.is_google_voice(voice):
         return "google"
     return "edge"
@@ -3772,6 +3776,7 @@ def run_generation(job_id, info, voice, rate, single_file, output_format='m4b', 
     use_google = (engine == "google")
     use_gemini = (engine == "gemini")
     use_speechify = (engine == "speechify")
+    use_kokoro = (engine == "kokoro")
     use_pcm = use_gemini or use_speechify
     if use_speechify:
         speechify_emotion = speechify_emotion or job.get("speechify_emotion")
@@ -4198,7 +4203,23 @@ def run_generation(job_id, info, voice, rate, single_file, output_format='m4b', 
                 return result, part_path
             else:
                 part_path = str(work_dir / f"chunk_{i:06d}.mp3")
-                if use_google:
+                if use_kokoro:
+                    # Kokoro-82M — local CPU-only TTS, outputs MP3 (via
+                    # internal WAV→MP3 ffmpeg conversion). No word-boundary
+                    # capture (same tradeoff as Google TTS). Free, no API.
+                    try:
+                        result = kokoro_tts.synthesize(
+                            block["text"], voice, part_path, rate=rate)
+                        _chunk_boundaries = []
+                    except Exception as _kokoro_err:
+                        print(f"[{job_id}] Kokoro chunk {i} crashed: "
+                              f"{_kokoro_err}")
+                        import traceback
+                        traceback.print_exc()
+                        _generate_silence_mp3(part_path, duration_sec=1)
+                        result = False
+                        _chunk_boundaries = []
+                elif use_google:
                     result = generate_chunk_mp3_google(block["text"], voice, rate, part_path)
                     _chunk_boundaries = []
                 else:

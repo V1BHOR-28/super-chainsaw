@@ -1,35 +1,30 @@
 # Dockerfile — audiobook-maker Flask backend (Docker, local-first).
 #
-# Build context is the repo root. The Flask app lives in
-# mini-services/audiobook-maker/audiobook_app.py and exposes `app`
-# (line 225: app = Flask(__name__)).
-#
-# Python 3.11 (matches render.yaml's PYTHON_VERSION=3.11.9).
-# Only system binary dependency is ffmpeg (ffprobe ships with it).
-# Verified via grep: audio_utils.py + bgm_mix.py + tts_split.py shell
-# out to exactly ["ffmpeg"] and ["ffprobe"] — nothing else.
+# Python 3.11. System deps: ffmpeg + espeak-ng (for Kokoro's phonemizer).
+# CPU-only torch (pinned via --index-url to avoid pulling CUDA wheels).
 
 FROM python:3.11-slim
 
-# ffmpeg + ffprobe — required by audio_utils.py (duration probing, mp3 concat,
-# m4b muxing) and tts_split.py (mp3→pcm conversion). --no-install-recommends
-# keeps the image small; rm apt lists after.
+# ffmpeg + espeak-ng — ffmpeg for audio processing, espeak-ng for Kokoro's
+# G2P phonemizer (required by the misaki library).
 RUN apt-get update \
-    && apt-get install -y --no-install-recommends ffmpeg \
+    && apt-get install -y --no-install-recommends ffmpeg espeak-ng \
     && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
 
-# Install Python dependencies first (better layer caching).
+# Install Python dependencies.
+# torch MUST be installed from the CPU-only index URL to avoid pulling
+# the 2GB+ CUDA wheel. We install it separately before requirements.txt
+# so the index-url is used exclusively for torch.
 COPY mini-services/audiobook-maker/requirements.txt ./requirements.txt
-RUN pip install --no-cache-dir -r requirements.txt
+RUN pip install --no-cache-dir torch --index-url https://download.pytorch.org/whl/cpu \
+    && pip install --no-cache-dir -r requirements.txt
 
 # Copy the application code.
 COPY mini-services/audiobook-maker/ ./mini-services/audiobook-maker/
 
 # Data directory — mounted as a named volume in docker-compose.yml.
-# This is the durable primary store (EPUBs, generated MP3s, tokens, registry).
-# Storj/R2 is an off-site backup target, not the source of truth.
 RUN mkdir -p /app/data
 ENV ABM_DATA_DIR=/app/data \
     ABM_UPLOAD_DIR=/app/data \
@@ -38,9 +33,5 @@ ENV ABM_DATA_DIR=/app/data \
 
 EXPOSE 5601
 
-# Run the Flask app directly (not gunicorn) — matches the existing __main__
-# block in audiobook_app.py which handles host/port binding via ABM_PORT.
-# The app is threaded (Flask's default dev server with threaded=True) and
-# generation runs in background threads, so a single process is fine.
 WORKDIR /app/mini-services/audiobook-maker
 CMD ["python", "audiobook_app.py"]

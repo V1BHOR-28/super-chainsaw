@@ -15,6 +15,11 @@ openai
 google-genai
 google-cloud-texttospeech
 
+# ── Kokoro-82M (free local TTS, CPU-only) ──
+# torch is installed separately in the Dockerfile from the CPU-only index.
+kokoro>=0.9.4
+soundfile
+
 # ── Storage (Storj / R2 / S3-compatible) ──
 boto3
 

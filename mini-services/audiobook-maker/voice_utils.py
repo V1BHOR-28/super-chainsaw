@@ -26,3 +26,15 @@ def is_speechify_voice(voice):
     Safe su input non-stringa/None/"": ritorna False senza sollevare.
     """
     return bool(voice) and isinstance(voice, str) and voice.startswith(SPEECHIFY_VOICE_PREFIX)
+
+
+KOKORO_VOICE_PREFIX = "kokoro:"
+
+
+def is_kokoro_voice(voice):
+    """True if the voice is a Kokoro-82M local TTS voice (format: kokoro:<name>).
+
+    Kokoro is a free, local, CPU-only TTS engine — same tier as edge-tts.
+    Safe on non-string/None/"": returns False without raising.
+    """
+    return bool(voice) and isinstance(voice, str) and voice.startswith(KOKORO_VOICE_PREFIX)
