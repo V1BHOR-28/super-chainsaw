@@ -42,10 +42,27 @@ export function EpubReader() {
     setError(null);
 
     // Dynamic import — epub.js is a browser-only library
-    import("epubjs").then((ePub) => {
+    import("epubjs").then(async (ePub) => {
       try {
+        // Fetch the EPUB as a Blob first, then pass it to epub.js.
+        // This avoids issues with the Vercel proxy mangling the response
+        // or timing out on large EPUB files. epub.js can load from a
+        // Blob/ArrayBuffer directly.
         const url = getEpubFileUrl(job.jobId);
-        const book = ePub.default(url);
+        const resp = await fetch(url, { credentials: "include" });
+        if (!resp.ok) {
+          setError(`Could not load EPUB (HTTP ${resp.status}). Make sure the backend is running.`);
+          setLoading(false);
+          return;
+        }
+        const blob = await resp.blob();
+        if (blob.size === 0) {
+          setError("EPUB file is empty or not found on the server.");
+          setLoading(false);
+          return;
+        }
+
+        const book = ePub.default(blob);
         bookRef.current = book;
 
         const rendition = book.renderTo(viewerRef.current, {
