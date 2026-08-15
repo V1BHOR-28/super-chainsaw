@@ -79,19 +79,19 @@ export function EpubReader() {
         });
         renditionRef.current = rendition;
 
-        // FIX 2: ResizeObserver — watches viewerRef.current and calls
-        // rendition.resize() whenever the container's actual size changes
-        // (font size buttons, window resize, sidebar toggle). Without this,
-        // any subsequent layout change re-triggers the overflow bug because
-        // nothing tells epub.js the container resized.
+        // FIX 2: ResizeObserver — construct it here but do NOT call
+        // .observe() yet. observe() fires its first callback almost
+        // immediately, which would race rendition.display()'s pagination
+        // and lock onto a partial page count ("Page 1/1"). We observe
+        // only AFTER display() resolves, inside the .then() callback.
         const resizeObserver = new ResizeObserver(() => {
           try {
-            rendition.resize();
+            const r = renditionRef.current as { resize?: () => void } | null;
+            if (r?.resize) r.resize();
           } catch {
             // non-fatal — rendition may be destroyed during unmount
           }
         });
-        resizeObserver.observe(viewerRef.current);
 
         // Apply theme
         applyTheme(rendition, theme, fontSize);
@@ -100,6 +100,10 @@ export function EpubReader() {
         displayed.then(() => {
           setLoading(false);
           updateLocation(book, rendition);
+          // Now safe to observe — initial pagination is complete, so
+          // resize() will only react to genuine subsequent resizes
+          // (font size change, window resize, sidebar toggle).
+          resizeObserver.observe(viewerRef.current!);
         }).catch((err: unknown) => {
           console.error("[epub-reader] display error:", err);
           setError("Could not open this EPUB. It may be a PDF or unsupported format.");
