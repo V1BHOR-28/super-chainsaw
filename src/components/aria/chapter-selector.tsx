@@ -62,7 +62,8 @@ export function ChapterSelector({
   // automatically but can toggle it off in the player settings.
   const [bgmMode, setBgmMode] = useState<"off" | "runtime" | "prerender">("runtime");
 
-  // Edge-TTS only — exactly 10 voices, no Google/Gemini.
+  // Curated Edge-TTS voices — always available (free, no API key needed).
+  // Kokoro voices are fetched from the API and appended dynamically.
   const CURATED_VOICES: AbmVoice[] = [
     { id: "en-US-AriaNeural", name: "Aria — BEST Female", engine: "edge", gender: "Female", gender_icon: "♀", locale: "en-US" },
     { id: "en-US-JennyNeural", name: "Jenny — Clear Female", engine: "edge", gender: "Female", gender_icon: "♀", locale: "en-US" },
@@ -76,12 +77,44 @@ export function ChapterSelector({
     { id: "en-GB-RyanNeural", name: "Ryan — British Male", engine: "edge", gender: "Male", gender_icon: "♂", locale: "en-GB" },
   ];
 
-  // No need to fetch voices from the API — all voices are edge-tts.
+  // Fetch voices from the backend — merges Edge-TTS (always) + Kokoro
+  // (if installed). Falls back to the curated list if the backend is
+  // unreachable.
   useEffect(() => {
-    setVoicesLoading(false);
-  }, [analyzeResponse]);
+    let cancelled = false;
+    (async () => {
+      try {
+        const resp = await getVoices();
+        if (!cancelled && resp) {
+          setVoices(resp);
+        }
+      } catch {
+        // Backend unreachable — fall back to curated Edge-TTS only.
+      } finally {
+        if (!cancelled) setVoicesLoading(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, []);
 
-  const availableVoices = CURATED_VOICES;
+  // Build the merged voice list: curated Edge-TTS + any Kokoro voices
+  // from the API response. Kokoro voices have engine="kokoro".
+  const availableVoices = useMemo(() => {
+    const kokoroVoices: AbmVoice[] = [];
+    if (voices) {
+      for (const [, group] of Object.entries(voices)) {
+        const g = group as AbmLanguageGroup;
+        if (g.voices) {
+          for (const v of g.voices) {
+            if (v.engine === "kokoro") {
+              kokoroVoices.push(v);
+            }
+          }
+        }
+      }
+    }
+    return [...CURATED_VOICES, ...kokoroVoices];
+  }, [voices]);
 
   const chapters = analyzeResponse?.chapters ?? [];
 
