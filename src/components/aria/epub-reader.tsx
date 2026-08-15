@@ -30,6 +30,7 @@ export function EpubReader() {
   const toggleReader = usePlayerStore((s) => s.toggleReader);
 
   const [location, setLocation] = useState<string | null>(null);
+  const [hasFirstLocation, setHasFirstLocation] = useState(false);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [epubData, setEpubData] = useState<ArrayBuffer | null>(null);
@@ -110,6 +111,7 @@ export function EpubReader() {
 
   const handleLocationChanged = useCallback((loc: string) => {
     setLocation(loc);
+    setHasFirstLocation(true);
     // Update page info from the rendition
     const rendition = renditionRef.current;
     if (rendition) {
@@ -224,7 +226,7 @@ export function EpubReader() {
         {epubData && !loading && !error && (
           <ReactReader
             url={epubData}
-            location={location}
+            location={hasFirstLocation ? location : undefined}
             locationChanged={handleLocationChanged}
             getRendition={handleRendition}
             showToc={true}
