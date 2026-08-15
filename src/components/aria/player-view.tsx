@@ -20,8 +20,6 @@ import {
   PlayCircle,
   SkipBack,
   SkipForward,
-  AlignLeft,
-  Music,
   BookOpen,
 } from "lucide-react";
 import { usePlayerStore } from "@/lib/player-store";
@@ -31,7 +29,6 @@ import { cn } from "@/lib/utils";
 import { AmbientGlow, StatusPill, AriaDivider } from "./primitives";
 import { NowPlayingBars } from "./waveform";
 import { BookCover } from "./book-cover";
-import { TranscriptView } from "./transcript-view";
 import { EpubReader } from "./epub-reader";
 import { getJobChapters, type AnalyzeResponse, type ChapterMp3Info } from "@/lib/abm-api";
 
@@ -54,9 +51,7 @@ export function PlayerView() {
   const volume = usePlayerStore((s) => s.volume);
   const muted = usePlayerStore((s) => s.muted);
   const showSettings = usePlayerStore((s) => s.showSettings);
-  const showTranscript = usePlayerStore((s) => s.showTranscript);
   const showReader = usePlayerStore((s) => s.showReader);
-  const toggleTranscript = usePlayerStore((s) => s.toggleTranscript);
   const toggleReader = usePlayerStore((s) => s.toggleReader);
   const sleepTimerMinutes = usePlayerStore((s) => s.sleepTimerMinutes);
   const resumedFrom = usePlayerStore((s) => s.resumedFrom);
@@ -99,17 +94,6 @@ export function PlayerView() {
       if (usePlayerStore.getState().showSettings) toggleSettings();
       loadChapters();
     }
-  };
-
-  // ARIA: transcript toggle. Closes the chapters drawer + settings panel
-  // (mutually exclusive UI surfaces) so the transcript panel has the user's
-  // full attention when opened.
-  const handleToggleTranscript = () => {
-    if (!usePlayerStore.getState().showTranscript) {
-      if (showChapters) setShowChapters(false);
-      if (usePlayerStore.getState().showSettings) toggleSettings();
-    }
-    toggleTranscript();
   };
 
   if (!job) return null;
@@ -161,19 +145,11 @@ export function PlayerView() {
             onClick={toggleChapters}
           />
           <SidePanelToggle
-            kind="transcript"
-            active={showTranscript}
-            icon={AlignLeft}
-            label="Transcript"
-            onClick={handleToggleTranscript}
-          />
-          <SidePanelToggle
             kind="reader"
             active={showReader}
             icon={BookOpen}
             label="Reader"
             onClick={() => {
-              if (usePlayerStore.getState().showTranscript) toggleTranscript();
               if (usePlayerStore.getState().showSettings) toggleSettings();
               toggleReader();
             }}
@@ -360,11 +336,6 @@ export function PlayerView() {
             <VolumeControl volume={volume} muted={muted} />
           </div>
 
-          {/* ARIA: synced-transcript panel. Word-by-word highlighting
-              driven by useWordSync's rAF loop reading audio.currentTime
-              directly. Toggle is the AlignLeft icon in the header. */}
-          {showTranscript && <TranscriptView />}
-
           {/* ARIA: EPUB reader panel. Renders the actual book content via
               epub.js. Completely independent of audio playback — manual
               navigation only. Toggle is the BookOpen icon in the header. */}
@@ -442,7 +413,7 @@ function SidePanelToggle({
   label,
   onClick,
 }: {
-  kind: "settings" | "chapters" | "transcript";
+  kind: "settings" | "chapters" | "reader";
   active: boolean;
   icon: React.ElementType;
   label: string;
@@ -789,10 +760,6 @@ function SettingsPanel() {
   const setVolume = usePlayerStore((s) => s.setVolume);
   const muted = usePlayerStore((s) => s.muted);
   const toggleMute = usePlayerStore((s) => s.toggleMute);
-  const bgmEnabled = usePlayerStore((s) => s.bgmEnabled);
-  const bgmVolume = usePlayerStore((s) => s.bgmVolume);
-  const toggleBgm = usePlayerStore((s) => s.toggleBgm);
-  const setBgmVolume = usePlayerStore((s) => s.setBgmVolume);
 
   return (
     <>
@@ -846,37 +813,6 @@ function SettingsPanel() {
             onChange={(e) => setVolume(parseFloat(e.target.value))}
             className="w-full accent-[var(--aria-accent)]"
           />
-        </div>
-
-        {/* Background music */}
-        <div>
-          <div className="flex items-center justify-between mb-3">
-            <label className="text-sm text-[var(--aria-fg)] flex items-center gap-2">
-              <Music className="w-4 h-4 text-[var(--aria-accent)]" />
-              Background music
-            </label>
-            <button
-              onClick={toggleBgm}
-              className="font-mono text-xs text-[var(--aria-fg-muted)] hover:text-[var(--aria-accent-glow)]"
-            >
-              {bgmEnabled ? "on" : "off"}
-            </button>
-          </div>
-          <input
-            type="range"
-            min={0}
-            max={100}
-            step={1}
-            value={bgmVolume}
-            disabled={!bgmEnabled}
-            onChange={(e) => setBgmVolume(parseFloat(e.target.value))}
-            className="w-full accent-[var(--aria-accent)] disabled:opacity-40"
-          />
-          <div className="flex justify-between mt-1 font-mono text-[10px] text-[var(--aria-fg-dim)]">
-            <span>0%</span>
-            <span>{bgmVolume}%</span>
-            <span>100%</span>
-          </div>
         </div>
 
         <AriaDivider />

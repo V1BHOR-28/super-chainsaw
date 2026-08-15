@@ -812,3 +812,112 @@ CONSTRAINTS honored:
 - Did NOT modify use-word-sync.ts, transcript-view.tsx, transcript-store.ts, or the cue/timing format.
 - No new Python dependencies — reused storage_backend + ffmpeg CLI.
 - Every new code path fails soft: missing R2 → disk fallback → monogram; missing IndexedDB → network URL; failed cover upload → non-fatal; failed progress write → non-fatal.
+
+---
+Task ID: REMOVE-TRANSCRIPT-BGM
+Agent: main (strip synced transcript + BGM features from ARIA frontend)
+Task: Remove ALL frontend code for the synced-transcript feature (karaoke-style word highlighting) AND the BGM (background music) runtime mixer feature. Leave no dead imports, no commented-out code, no orphan state/types/API helpers. Backend Python files are untouched (backend can keep its BGM/transcript code).
+
+Work Log:
+- Read prior worklog entries (Tasks 1, TRANSCRIPT-2-5, BGM-1, BUGFIX-1-2) for context on what was added and how it interconnects.
+- Mapped all consumers via Grep: confirmed the transcript/bgm surface is fully self-contained — every importer of the 7 deleted modules was either a file I was already going to clean (player-store, player-view, chapter-selector, audiobook-workspace, use-audio-engine) or another deleted module.
+- Audited 4 incidental "transcript" mentions to confirm they are UNRELATED to the audiobook synced-transcript feature and must be left alone:
+  - src/app/globals.css `.aria-voice-transcript` — CSS class for the live voice chat transcript bubble (different feature).
+  - src/lib/conversation-summary.ts — local var `transcript` holding chat message text for LLM summarization (different feature).
+  - src/app/api/conversations/[id]/export/route.ts — comment about "human-readable transcript" for chat conversation exports (different feature).
+  - src/lib/audio-cache.ts line 20 — comment "same as transcript cache" was a stale cross-reference; updated to just "Key shape: `${jobId}:${chapterIndex}`." since transcript-cache is being deleted.
+
+DELETED (7 files):
+- src/components/aria/transcript-view.tsx
+- src/lib/transcript-store.ts
+- src/lib/transcript-cache.ts
+- src/hooks/use-word-sync.ts
+- src/lib/audio-element-registry.ts
+- src/lib/bgm-cues-store.ts
+- src/hooks/use-bgm-engine.ts
+
+MODIFIED — src/lib/player-store.ts (-25 lines):
+- Removed `showTranscript: boolean` from PlayerState interface.
+- Removed `toggleTranscript` action declaration + implementation + the "not persisted (we want it closed by default...)" comment.
+- Removed BGM state fields: `bgmEnabled`, `bgmVolume` and their explanatory comments.
+- Removed BGM actions: `toggleBgm`, `setBgmVolume`.
+- Removed `bgmEnabled` + `bgmVolume` from the persist `partialize` selector (kept `playbackRate` + `volume`).
+- Removed initial state values `bgmEnabled: true`, `bgmVolume: 70` and the "enabled by default at 70% volume..." comment.
+- Removed `showTranscript: false` initial value.
+
+MODIFIED — src/lib/abm-api.ts (-58 lines):
+- Removed `transcript_cues?: number[][]` from `AnalyzeChapter` (and the doc comment).
+- Removed `transcript_cues?: Record<string, number[][]>` + its doc comment from `AnalyzeResponse`.
+- Removed `bgm_mode?: "off" | "runtime" | "prerender"` + its doc comment from `AnalyzeResponse`.
+- Removed the entire `BgmCue` interface (and its doc comment).
+- Removed `has_transcript?: boolean` + its doc comment from `ChapterMp3Info`.
+- Removed `bgmMode` parameter from `generate()` signature + `bgm_mode: bgmMode` from the POST body.
+- Removed `getBgmCues()` function + its doc comment (the function the task spec calls "fetchBgmCues" — actual name was getBgmCues).
+- Removed `getBgmAssetUrl()` function + its doc comment.
+
+MODIFIED — src/hooks/use-audio-engine.ts (-5 lines):
+- Removed `import { setAudioElement } from "@/lib/audio-element-registry";`.
+- Removed `setAudioElement(a)` call + its 3-line "register the audio element so the word-sync hook can read audio.currentTime..." comment.
+- Removed `setAudioElement(null)` from the cleanup return.
+
+MODIFIED — src/components/aria/player-view.tsx (-65 lines):
+- Removed `AlignLeft` and `Music` from lucide-react imports (both were used only for transcript toggle + BGM settings respectively).
+- Removed `import { TranscriptView } from "./transcript-view";`.
+- Removed `showTranscript` + `toggleTranscript` selectors from usePlayerStore.
+- Removed `handleToggleTranscript` function + its 4-line comment.
+- Removed the transcript `<SidePanelToggle kind="transcript" ... />` button from the header.
+- Updated the Reader SidePanelToggle's onClick to no longer reference showTranscript/toggleTranscript (kept the showSettings close-on-open behavior).
+- Removed the `{showTranscript && <TranscriptView />}` render + its 3-line "synced-transcript panel" comment.
+- Updated `SidePanelToggle`'s `kind` union type from `"settings" | "chapters" | "transcript"` to `"settings" | "chapters" | "reader"` (reader was already in use but missing from the type — fixed the type to match reality now that transcript is gone).
+- In `SettingsPanel`: removed `bgmEnabled`, `bgmVolume`, `toggleBgm`, `setBgmVolume` selectors and the entire "Background music" UI block (label, on/off toggle button, 0-100% range slider with `disabled={!bgmEnabled}`, the 0%/current%/100% labels).
+
+MODIFIED — src/components/aria/chapter-selector.tsx (-22 lines):
+- Removed `Music` from lucide-react imports.
+- Removed `bgmMode` state + its 3-line "BGM delivery mode" comment.
+- Removed `bgmMode` argument from the `generate()` call.
+- Removed the entire BGM mode selector block (label with Music icon, `<select>` with Runtime mix / Prerender / Off options).
+
+MODIFIED — src/components/aria/audiobook-workspace.tsx (-3 lines):
+- Removed `import { useBgmEngine } from "@/hooks/use-bgm-engine";`.
+- Removed `useBgmEngine();` call + its 2-line "mixes background music in lockstep with the main audio..." comment.
+
+MODIFIED — src/lib/audio-cache.ts (-1 word):
+- Updated the module header comment from "Key shape: `${jobId}:${chapterIndex}` — same as transcript cache." to "Key shape: `${jobId}:${chapterIndex}`." (the transcript-cache module no longer exists, so the cross-reference was stale).
+
+VERIFICATION:
+- Verification grep (per task spec): `grep -rni "transcript\|bgm\|bgmEnabled\|bgmVolume\|toggleBgm\|showTranscript\|toggleTranscript\|TranscriptView\|wordSync\|word.sync\|audio-element-registry\|bgmCues\|bgm_cues\|BgmCue\|getBgmAssetUrl\|fetchBgmCues" src/ --include="*.ts" --include="*.tsx" --exclude-dir=node_modules` returns ONLY 4 unrelated matches in chat-conversation files (conversation-summary.ts uses `transcript` as a local var name for chat message text; conversations/[id]/export/route.ts has a comment about "human-readable transcript" for chat exports). These predate the audiobook transcript feature and refer to ARIA's chat workspace (a completely separate feature) — left untouched per the task's "chapter-summary is separate from transcript" guidance, which by analogy extends to conversation-summary.
+- Tighter grep for audiobook-specific symbols (transcript_cues, has_transcript, bgm_mode, BgmCue, useBgmEngine, useWordSync, useBgmCuesStore, useTranscriptStore, setAudioElement, getAudioElement, etc.): ZERO_RESULTS.
+- Dangling-import grep (any `from "@/lib/transcript-store"` etc.): NO_DANGLING_IMPORTS.
+- `bun run lint`: PASSES (0 errors, 0 warnings).
+- `npx tsc --noEmit` filtered for modified files: zero errors in player-store, abm-api, player-view, chapter-selector, audiobook-workspace, use-audio-engine, audio-cache (and no transcript/bgm-related errors anywhere).
+- dev.log: caught the expected transient `Module not found: '@/hooks/use-bgm-engine'` immediately after deletion (before the workspace edit landed), then re-compiled cleanly — `✓ Compiled in 669ms` → `✓ Compiled in 309ms` → `✓ Compiled in 168ms` with `GET / 200 in 92ms`. Page loads fine.
+
+Stage Summary:
+Files deleted (7):
+- src/components/aria/transcript-view.tsx
+- src/lib/transcript-store.ts
+- src/lib/transcript-cache.ts
+- src/hooks/use-word-sync.ts
+- src/lib/audio-element-registry.ts
+- src/lib/bgm-cues-store.ts
+- src/hooks/use-bgm-engine.ts
+
+Files modified (7):
+- src/lib/player-store.ts (-25 lines)
+- src/lib/abm-api.ts (-58 lines)
+- src/hooks/use-audio-engine.ts (-5 lines)
+- src/components/aria/player-view.tsx (-65 lines)
+- src/components/aria/chapter-selector.tsx (-22 lines)
+- src/components/aria/audiobook-workspace.tsx (-3 lines)
+- src/lib/audio-cache.ts (1 comment word)
+
+CONSTRAINTS honored:
+- Did NOT touch src/components/aria/epub-reader.tsx.
+- Did NOT touch src/components/aria/chapter-summary-card.tsx.
+- Did NOT touch any backend Python files (audiobook_app.py, generation_engine.py, bgm_*.py, etc.) — backend can keep its BGM/transcript code.
+- Did NOT touch src/app/page.tsx.
+- Did NOT touch player-view.tsx's audio playback logic (play/pause/seek/skip/transport/progress bar/chapter browser) — only removed transcript + BGM UI.
+- Left the 4 unrelated "transcript" mentions in chat-workspace files alone (they refer to ARIA's chat conversation transcripts, not the audiobook synced-transcript feature being removed).
+- No commented-out code left behind. No dead imports.
+
+Git: commit + push to follow.

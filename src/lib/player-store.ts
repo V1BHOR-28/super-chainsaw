@@ -75,18 +75,9 @@ interface PlayerState {
 
   // UI
   showSettings: boolean;
-  showTranscript: boolean;
   showReader: boolean;
   sleepTimerMinutes: number | null;
   sleepTimerEndsAt: number | null;
-
-  // BGM (background music) — runtime mixing controls.
-  // bgmEnabled: master on/off toggle. When false, all BGM <audio> elements
-  //   are silenced regardless of the cue data.
-  // bgmVolume: 0-100 slider. Multiplied with the per-cue gain_db to produce
-  //   the final linear volume of each mood loop.
-  bgmEnabled: boolean;
-  bgmVolume: number;
 
   // Actions
   play: () => void;
@@ -102,14 +93,9 @@ interface PlayerState {
   skip: (seconds: number) => void;
 
   toggleSettings: () => void;
-  toggleTranscript: () => void;
   toggleReader: () => void;
   setSleepTimer: (minutes: number | null) => void;
   clearSleepTimer: () => void;
-
-  // BGM actions
-  toggleBgm: () => void;
-  setBgmVolume: (v: number) => void;
 }
 
 // ── Playback progress persistence (localStorage) ──
@@ -227,15 +213,9 @@ export const usePlayerStore = create<PlayerState>()(
       clearResumedFrom: () => set({ resumedFrom: null }),
 
       showSettings: false,
-      showTranscript: false,
       showReader: false,
       sleepTimerMinutes: null,
       sleepTimerEndsAt: null,
-
-      // BGM: enabled by default at 70% volume. Assets are mastered at -20 LUFS
-      // and duck under speech, so 70% gives clearly audible background music.
-      bgmEnabled: true,
-      bgmVolume: 70,
 
       play: () => set({ isPlaying: true }),
       pause: () => set({ isPlaying: false }),
@@ -256,12 +236,6 @@ export const usePlayerStore = create<PlayerState>()(
       toggleSettings: () =>
         set((s) => ({ showSettings: !s.showSettings })),
 
-      // ARIA: transcript panel toggle. Not persisted (we want it closed by
-      // default on each fresh page load — keeps the player UI clean until
-      // the user explicitly asks for the transcript).
-      toggleTranscript: () =>
-        set((s) => ({ showTranscript: !s.showTranscript })),
-
       toggleReader: () =>
         set((s) => ({ showReader: !s.showReader })),
 
@@ -277,9 +251,6 @@ export const usePlayerStore = create<PlayerState>()(
       },
       clearSleepTimer: () =>
         set({ sleepTimerMinutes: null, sleepTimerEndsAt: null }),
-
-      toggleBgm: () => set((s) => ({ bgmEnabled: !s.bgmEnabled })),
-      setBgmVolume: (v) => set({ bgmVolume: Math.max(0, Math.min(100, Math.round(v))) }),
     }),
     {
       name: "aria-audiobooks",
@@ -287,8 +258,6 @@ export const usePlayerStore = create<PlayerState>()(
       partialize: (s) => ({
         playbackRate: s.playbackRate,
         volume: s.volume,
-        bgmEnabled: s.bgmEnabled,
-        bgmVolume: s.bgmVolume,
       }),
     }
   )

@@ -17,7 +17,7 @@
  * ~2MB (edge-tts) or ~260KB (kokoro). A 20-chapter book = ~4-40MB.
  * Fail-soft: every operation is wrapped in try/catch.
  *
- * Key shape: `${jobId}:${chapterIndex}` — same as transcript cache.
+ * Key shape: `${jobId}:${chapterIndex}`.
  */
 
 const DB_NAME = "aria-audio-cache";

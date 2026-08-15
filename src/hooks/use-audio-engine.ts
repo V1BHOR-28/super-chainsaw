@@ -3,7 +3,6 @@
 import { useEffect, useRef } from "react";
 import { usePlayerStore } from "@/lib/player-store";
 import { getChapterMp3Url } from "@/lib/abm-api";
-import { setAudioElement } from "@/lib/audio-element-registry";
 import { getAudioUrl } from "@/lib/audio-cache";
 
 /**
@@ -43,14 +42,9 @@ export function useAudioEngine() {
     const a = new Audio();
     a.preload = "auto";
     audioRef.current = a;
-    // ARIA: register the audio element so the word-sync hook can read
-    // `audio.currentTime` directly from a rAF loop (60fps) without going
-    // through the player store (which only updates ~4×/sec via timeupdate).
-    setAudioElement(a);
     return () => {
       a.pause();
       a.src = "";
-      setAudioElement(null);
     };
   }, []);
 
