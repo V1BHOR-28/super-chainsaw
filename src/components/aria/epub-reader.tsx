@@ -79,11 +79,12 @@ export function EpubReader() {
         });
         renditionRef.current = rendition;
 
-        // FIX 2: ResizeObserver — construct it here but do NOT call
-        // .observe() yet. observe() fires its first callback almost
-        // immediately, which would race rendition.display()'s pagination
-        // and lock onto a partial page count ("Page 1/1"). We observe
-        // only AFTER display() resolves, inside the .then() callback.
+        // Register themes BEFORE display() — register/select don't touch
+        // layout, only fontSize() does, and we defer that to after display.
+        registerThemes(rendition);
+
+        // FIX 2: ResizeObserver — construct here, observe AFTER display
+        // resolves (see .then() callback below).
         const resizeObserver = new ResizeObserver(() => {
           try {
             const r = renditionRef.current as { resize?: () => void } | null;
@@ -93,16 +94,16 @@ export function EpubReader() {
           }
         });
 
-        // Apply theme
-        applyTheme(rendition, theme, fontSize);
-
         const displayed = rendition.display();
         displayed.then(() => {
+          // Apply theme + font size AFTER display() resolves —
+          // r.themes.fontSize() triggers a layout recalculation that
+          // interferes with the initial pagination if called before
+          // display() finishes, causing "Page 1/1" with only the cover.
+          applyTheme(rendition, theme, fontSize);
           setLoading(false);
           updateLocation(book, rendition);
-          // Now safe to observe — initial pagination is complete, so
-          // resize() will only react to genuine subsequent resizes
-          // (font size change, window resize, sidebar toggle).
+          // Now safe to observe — initial pagination is complete.
           resizeObserver.observe(viewerRef.current!);
         }).catch((err: unknown) => {
           console.error("[epub-reader] display error:", err);
@@ -144,7 +145,9 @@ export function EpubReader() {
     }
   }, [fontSize, theme]);
 
-  function applyTheme(rendition: unknown, t: "dark" | "light", size: number) {
+  // Register theme definitions — safe to call before display().
+  // register() + select() don't trigger layout recalculation.
+  function registerThemes(rendition: unknown) {
     const r = rendition as {
       themes: {
         register: (name: string, styles: Record<string, unknown>) => void;
@@ -153,25 +156,30 @@ export function EpubReader() {
       };
     };
     const darkTheme = {
-      body: {
-        "background": "#1a1a1a",
-        "color": "#e0e0e0",
-        "font-size": `${size}%`,
-      },
+      body: { "background": "#1a1a1a", "color": "#e0e0e0" },
       a: { color: "#f59e0b" },
       p: { "font-family": "Georgia, serif", "line-height": "1.8" },
     };
     const lightTheme = {
-      body: {
-        "background": "#ffffff",
-        "color": "#1a1a1a",
-        "font-size": `${size}%`,
-      },
+      body: { "background": "#ffffff", "color": "#1a1a1a" },
       a: { color: "#2563eb" },
       p: { "font-family": "Georgia, serif", "line-height": "1.8" },
     };
     r.themes.register("dark", darkTheme);
     r.themes.register("light", lightTheme);
+  }
+
+  // Apply theme + font size — MUST be called after display() resolves.
+  // fontSize() triggers a layout recalculation that interferes with
+  // initial pagination if called before display() finishes.
+  function applyTheme(rendition: unknown, t: "dark" | "light", size: number) {
+    const r = rendition as {
+      themes: {
+        register: (name: string, styles: Record<string, unknown>) => void;
+        select: (name: string) => void;
+        fontSize: (size: string) => void;
+      };
+    };
     r.themes.select(t);
     r.themes.fontSize(`${size}%`);
   }
