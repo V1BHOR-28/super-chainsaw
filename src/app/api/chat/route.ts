@@ -718,9 +718,11 @@ export async function POST(req: NextRequest) {
                 throw err
               }
 
-              // Last-resort fallback: retry ONCE on Qwen3 Next 80B (OpenRouter free tier).
-              const fallbackModel = 'qwen/qwen3-next-80b-a3b-instruct:free'
-              console.warn(`[chat.llm] Selected model "${selectedModel}" failed (${errMsg.slice(0, 150)}) — retrying ONCE on Qwen3 Next 80B (last-resort fallback).`)
+              // Last-resort fallback: retry ONCE on OpenRouter's auto-routing free alias.
+              // 'openrouter/free' resolves to whatever free model is currently live, so this
+              // can't go dead the way a fixed slug could.
+              const fallbackModel = 'openrouter/free'
+              console.warn(`[chat.llm] Selected model "${selectedModel}" failed (${errMsg.slice(0, 150)}) — retrying ONCE on OpenRouter auto-routed free model (last-resort fallback).`)
               text = await callOpenRouter(fallbackModel)
               providerUsed = fallbackModel
               console.log(`[chat.llm] Provider: ${providerUsed} (last-resort fallback)`)
