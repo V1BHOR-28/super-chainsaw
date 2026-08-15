@@ -91,13 +91,6 @@ export const AVAILABLE_MODELS = [
     tier: 'free' as const,
   },
   {
-    id: 'deepseek/deepseek-chat',
-    name: 'DeepSeek V3',
-    description: 'Strong reasoning and coding. Uses paid credits (~$0.14/M tokens).',
-    badge: 'Paid',
-    tier: 'paid' as const,
-  },
-  {
     id: 'sarvam-105b',
     name: 'Sarvam 105B',
     description: '128K context, strong tool-use. Uses paid credits (~₹29/M in, ~₹73/M out).',

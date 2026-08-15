@@ -223,7 +223,7 @@ export function MessageBubble({ message }: { message: ChatMessage }) {
           ) : null}
         </div>
 
-        {/* Web sources bar — "Found N web pages" with favicon logos (like DeepSeek) */}
+        {/* Web sources bar — "Found N web pages" with favicon logos */}
         {!isUser && message.sources && message.sources.length > 0 && (
           <div
             className="flex items-center gap-2 mt-2 flex-wrap"

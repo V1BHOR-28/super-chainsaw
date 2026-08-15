@@ -535,7 +535,7 @@ export async function POST(req: NextRequest) {
         try {
           // Send web search sources to the frontend BEFORE the response streams.
           // The UI renders a "Found N web pages" bar with favicon logos (like
-          // DeepSeek/ChatGPT) so the user sees where ARIA pulled data from.
+          // ChatGPT) so the user sees where ARIA pulled data from.
           if (webSources.length > 0) {
             send({ type: 'sources', sources: webSources })
           }
@@ -629,8 +629,8 @@ export async function POST(req: NextRequest) {
             // (OpenRouter free tier). Any other failure (timeout, 5xx,
             // network) propagates immediately — no retry, no other providers.
 
-            // OpenRouter — handles GPT-OSS 120B, DeepSeek V3, and the Qwen
-            // last-resort fallback.
+            // OpenRouter — handles GPT-OSS 120B and the Qwen last-resort
+            // fallback.
             const callOpenRouter = async (model: string): Promise<string> => {
               const apiResponse = await fetch('https://openrouter.ai/api/v1/chat/completions', {
                 method: 'POST',
@@ -693,8 +693,7 @@ export async function POST(req: NextRequest) {
 
             // Routes the selected model id to the right underlying call.
             // Sarvam has its own endpoint; every other supported model
-            // (GPT-OSS 120B, DeepSeek V3, and the Qwen last-resort) goes
-            // through OpenRouter.
+            // (GPT-OSS 120B, plus the Qwen last-resort) goes through OpenRouter.
             const callSelectedModel = async (model: string): Promise<string> => {
               if (model === 'sarvam-105b') return callSarvam()
               return callOpenRouter(model)

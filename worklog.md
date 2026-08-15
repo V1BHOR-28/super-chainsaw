@@ -1097,3 +1097,52 @@ Stage Summary:
 - Sarvam 105B added as a user-selectable model with its own API endpoint (api.sarvam.ai).
 - 3 background-task files fixed: llama-3.3-70b-versatile + llama-3.1-8b-instant → openai/gpt-oss-120b (Groq's recommended replacement, verified live, decommission happening tomorrow Aug 16 2026).
 - All 8 verification greps pass. Lint clean. Page renders without errors.
+
+---
+Task ID: 3
+Agent: main (orchestrator)
+Task: Remove DeepSeek V3 from the AI model list entirely. App now offers exactly 2 user-selectable models: GPT-OSS 120B (free, default) and Sarvam-105B (paid). Internal last-resort fallback (openrouter/free Qwen) unaffected.
+
+Work Log:
+- Initial grep for "deepseek" (case-insensitive) across src/ found 7 matches across 4 files:
+  * src/lib/embeddings.ts:94-95 — DeepSeek entry in AVAILABLE_MODELS
+  * src/components/aria/settings-modal.tsx:760-761 — DeepSeek entry in AI_MODELS
+  * src/components/aria/message-bubble.tsx:226 — UI comment "like DeepSeek" (web sources bar comparison)
+  * src/app/api/chat/route.ts:538 — comment "DeepSeek/ChatGPT" (web sources bar comparison)
+  * src/app/api/chat/route.ts:632 — comment "OpenRouter — handles GPT-OSS 120B, DeepSeek V3, and the Qwen"
+  * src/app/api/chat/route.ts:696 — comment "(GPT-OSS 120B, DeepSeek V3, and the Qwen last-resort)"
+
+FILE 1 — src/lib/embeddings.ts:
+- Deleted the DeepSeek V3 entry from AVAILABLE_MODELS (id 'deepseek/deepseek-chat', name, description, badge, tier — 6 lines).
+- AVAILABLE_MODELS now has exactly 2 entries: openai/gpt-oss-120b:free, sarvam-105b.
+- getModelFromSettings unchanged (already defaults to 'openai/gpt-oss-120b:free'; its isValid check now naturally rejects deepseek/deepseek-chat since it's no longer in the array).
+
+FILE 2 — src/components/aria/settings-modal.tsx:
+- Deleted the DeepSeek V3 entry from AI_MODELS (id, name, desc, badge, badgeColor, cost — 7 lines).
+- AI_MODELS now has exactly 2 entries: openai/gpt-oss-120b:free, sarvam-105b.
+- ModelSelector value-check (AI_MODELS.map(m => m.id).includes(settings.modelPreference)) automatically stops accepting deepseek/deepseek-chat — no separate edit needed, as task spec noted.
+
+FILE 3 — src/app/api/chat/route.ts (comments only, no logic changes):
+- Line 537-538: "favicon logos (like DeepSeek/ChatGPT)" → "favicon logos (like ChatGPT)" — dropped DeepSeek from the UI comparison.
+- Line 632-633: "OpenRouter — handles GPT-OSS 120B, DeepSeek V3, and the Qwen last-resort fallback" → "OpenRouter — handles GPT-OSS 120B and the Qwen last-resort fallback" — dropped DeepSeek V3 from the model list comment.
+- Line 695-696: "(GPT-OSS 120B, DeepSeek V3, and the Qwen last-resort) goes through OpenRouter" → "(GPT-OSS 120B, plus the Qwen last-resort) goes through OpenRouter" — dropped DeepSeek V3.
+- No actual logic touched — callSelectedModel, callOpenRouter, callSarvam, and the openrouter/free fallback all work generically off selectedModel, as task spec confirmed.
+
+BONUS — src/components/aria/message-bubble.tsx:
+- Line 226: "favicon logos (like DeepSeek)" → "favicon logos" — dropped the DeepSeek UI comparison from this web-sources-bar comment so the codebase-wide grep returns zero.
+
+VERIFICATION RESULTS (all 3 checks PASS):
+1. grep -in "deepseek" src/ → ZERO results anywhere in the codebase ✅
+2. AVAILABLE_MODELS and AI_MODELS each have exactly 2 entries, identical ids, same order (openai/gpt-oss-120b:free → sarvam-105b) ✅
+3. Stale deepseek/deepseek-chat preference fallback — CONFIRMED via executable test:
+   Ran the actual getModelFromSettings logic against the actual AVAILABLE_MODELS array with 8 test inputs. The stale 'deepseek/deepseek-chat' preference returns 'openai/gpt-oss-120b:free' (isValid = false → default). Also verified 7 other cases (null, undefined, empty, valid GPT-OSS, valid Sarvam, Qwen-never-selectable, old Llama-removed-last-commit) — all pass. Not assumed, executed. ✅
+
+LINT: bun run lint → 0 errors, 0 warnings ✅
+BROWSER: agent-browser verified page renders cleanly — title "ARIA", heading "Not a chatbot. A partner.", all UI elements present, ZERO browser errors, clean compile (GET / 200) ✅
+
+Stage Summary:
+- 4 files modified (3 from task spec + 1 bonus comment cleanup in message-bubble.tsx).
+- DeepSeek V3 fully removed from the codebase — grep returns zero.
+- App now offers exactly 2 user-selectable models: GPT-OSS 120B (default, free) and Sarvam 105B (paid).
+- Internal last-resort fallback (Qwen3 Next 80B on 429/decommission) is untouched and still works.
+- Existing users with stale 'deepseek/deepseek-chat' DB preference will silently fall back to GPT-OSS 120B on next chat request — no migration needed.

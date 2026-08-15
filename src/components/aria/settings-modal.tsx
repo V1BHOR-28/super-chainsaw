@@ -757,14 +757,6 @@ const AI_MODELS = [
     cost: 'Free forever',
   },
   {
-    id: 'deepseek/deepseek-chat',
-    name: 'DeepSeek V3',
-    desc: 'Strong reasoning and coding',
-    badge: 'Paid',
-    badgeColor: '#f59e0b',
-    cost: '~$0.14/M tokens',
-  },
-  {
     id: 'sarvam-105b',
     name: 'Sarvam 105B',
     desc: '128K context, strong tool-use',
