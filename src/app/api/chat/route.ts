@@ -691,11 +691,46 @@ export async function POST(req: NextRequest) {
               return content.trim()
             }
 
+            // Groq — hosts the same openai/gpt-oss-120b model on its own quota,
+            // separate from OpenRouter's shared 50-req/day account-wide :free cap.
+            // Routing GPT-OSS 120B here (instead of through OpenRouter) avoids
+            // exhausting the OpenRouter free budget that the last-resort
+            // fallback still depends on. Full max_tokens (1024) since this is a
+            // primary user-facing chat call, not a background task.
+            const callGroqGptOss = async (): Promise<string> => {
+              if (!process.env.GROQ_API_KEY) throw new Error('Groq: no API key')
+              const res = await fetch('https://api.groq.com/openai/v1/chat/completions', {
+                method: 'POST',
+                headers: {
+                  'Content-Type': 'application/json',
+                  'Authorization': `Bearer ${process.env.GROQ_API_KEY}`,
+                },
+                body: JSON.stringify({
+                  model: 'openai/gpt-oss-120b',
+                  messages: sdkMessages,
+                  max_tokens: 1024,
+                }),
+                signal: AbortSignal.timeout(25000),
+              })
+              if (!res.ok) {
+                const errBody = await res.text().catch(() => '')
+                const err = new Error(`Groq GPT-OSS: ${res.status} ${errBody.slice(0, 200)}`)
+                ;(err as Error & { status?: number }).status = res.status
+                throw err
+              }
+              const data = await res.json()
+              const content = data.choices?.[0]?.message?.content ?? ''
+              if (!content?.trim()) throw new Error('Groq GPT-OSS: empty content')
+              return content.trim()
+            }
+
             // Routes the selected model id to the right underlying call.
-            // Sarvam has its own endpoint; every other supported model
-            // (GPT-OSS 120B, plus the Qwen last-resort) goes through OpenRouter.
+            //   - Sarvam 105B → its own endpoint (api.sarvam.ai)
+            //   - GPT-OSS 120B → Groq (separate quota from OpenRouter's :free cap)
+            //   - everything else (incl. the openrouter/free last-resort) → OpenRouter
             const callSelectedModel = async (model: string): Promise<string> => {
               if (model === 'sarvam-105b') return callSarvam()
+              if (model === 'openai/gpt-oss-120b:free') return callGroqGptOss()
               return callOpenRouter(model)
             }
 
