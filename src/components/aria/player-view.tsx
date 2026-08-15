@@ -22,6 +22,7 @@ import {
   SkipForward,
   AlignLeft,
   Music,
+  BookOpen,
 } from "lucide-react";
 import { usePlayerStore } from "@/lib/player-store";
 import { useAriaStore } from "@/lib/store";
@@ -31,6 +32,7 @@ import { AmbientGlow, StatusPill, AriaDivider } from "./primitives";
 import { NowPlayingBars } from "./waveform";
 import { BookCover } from "./book-cover";
 import { TranscriptView } from "./transcript-view";
+import { EpubReader } from "./epub-reader";
 import { getJobChapters, type AnalyzeResponse, type ChapterMp3Info } from "@/lib/abm-api";
 
 /**
@@ -53,7 +55,9 @@ export function PlayerView() {
   const muted = usePlayerStore((s) => s.muted);
   const showSettings = usePlayerStore((s) => s.showSettings);
   const showTranscript = usePlayerStore((s) => s.showTranscript);
+  const showReader = usePlayerStore((s) => s.showReader);
   const toggleTranscript = usePlayerStore((s) => s.toggleTranscript);
+  const toggleReader = usePlayerStore((s) => s.toggleReader);
   const sleepTimerMinutes = usePlayerStore((s) => s.sleepTimerMinutes);
   const resumedFrom = usePlayerStore((s) => s.resumedFrom);
 
@@ -162,6 +166,17 @@ export function PlayerView() {
             icon={AlignLeft}
             label="Transcript"
             onClick={handleToggleTranscript}
+          />
+          <SidePanelToggle
+            kind="reader"
+            active={showReader}
+            icon={BookOpen}
+            label="Reader"
+            onClick={() => {
+              if (usePlayerStore.getState().showTranscript) toggleTranscript();
+              if (usePlayerStore.getState().showSettings) toggleSettings();
+              toggleReader();
+            }}
           />
           <SidePanelToggle
             kind="settings"
@@ -349,6 +364,11 @@ export function PlayerView() {
               driven by useWordSync's rAF loop reading audio.currentTime
               directly. Toggle is the AlignLeft icon in the header. */}
           {showTranscript && <TranscriptView />}
+
+          {/* ARIA: EPUB reader panel. Renders the actual book content via
+              epub.js. Completely independent of audio playback — manual
+              navigation only. Toggle is the BookOpen icon in the header. */}
+          {showReader && <EpubReader />}
         </div>
       </main>
 

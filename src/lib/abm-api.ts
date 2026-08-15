@@ -439,3 +439,12 @@ export function getCoverUrl(jobId: string, hasCover: boolean): string {
   if (!hasCover) return "";
   return `${ABM_BASE}/cover/${jobId}`;
 }
+
+/**
+ * Returns the URL for the raw EPUB file (for in-browser reading via epub.js).
+ * Serves the original .epub file uploaded by the user — not the extracted
+ * chapter text. epub.js needs the actual EPUB archive to render properly.
+ */
+export function getEpubFileUrl(jobId: string): string {
+  return `${ABM_BASE}/epub_file/${jobId}`;
+}

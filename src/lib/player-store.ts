@@ -76,6 +76,7 @@ interface PlayerState {
   // UI
   showSettings: boolean;
   showTranscript: boolean;
+  showReader: boolean;
   sleepTimerMinutes: number | null;
   sleepTimerEndsAt: number | null;
 
@@ -102,6 +103,7 @@ interface PlayerState {
 
   toggleSettings: () => void;
   toggleTranscript: () => void;
+  toggleReader: () => void;
   setSleepTimer: (minutes: number | null) => void;
   clearSleepTimer: () => void;
 
@@ -226,6 +228,7 @@ export const usePlayerStore = create<PlayerState>()(
 
       showSettings: false,
       showTranscript: false,
+      showReader: false,
       sleepTimerMinutes: null,
       sleepTimerEndsAt: null,
 
@@ -258,6 +261,9 @@ export const usePlayerStore = create<PlayerState>()(
       // the user explicitly asks for the transcript).
       toggleTranscript: () =>
         set((s) => ({ showTranscript: !s.showTranscript })),
+
+      toggleReader: () =>
+        set((s) => ({ showReader: !s.showReader })),
 
       setSleepTimer: (minutes) => {
         if (minutes === null) {

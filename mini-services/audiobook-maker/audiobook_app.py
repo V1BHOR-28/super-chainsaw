@@ -10594,6 +10594,59 @@ def api_chapter_mp3(job_id, chapter_index):
     )
 
 
+@app.route("/api/epub_file/<job_id>")
+def api_epub_file(job_id):
+    """Serve the raw EPUB file for in-browser reading (epub.js).
+
+    The EPUB is stored at job["epub_path"] during /api/analyze.
+    If the job is in memory, serve directly. If only in the token snapshot
+    (after restart), reconstruct the path from UPLOAD_DIR/{job_id}/.
+    Falls back to R2/Storj if the local file is missing.
+    """
+    job, err, sc = _check_job_owner(job_id)
+    if err is not None:
+        if sc == 404:
+            return jsonify({"error": "Job not found"}), 404
+        return err, sc
+
+    # Try in-memory job's epub_path first
+    epub_path = ""
+    if isinstance(job, dict):
+        epub_path = job.get("epub_path", "") or job.get("input_path", "")
+
+    # Fallback: reconstruct from UPLOAD_DIR (token snapshot case)
+    if not epub_path or not os.path.isfile(epub_path):
+        # Try to find any .epub/.pdf/.txt file in the job's data dir
+        work_dir = UPLOAD_DIR / job_id
+        if work_dir.is_dir():
+            for entry in work_dir.iterdir():
+                if entry.is_file() and entry.suffix.lower() in (
+                        ".epub", ".pdf", ".txt", ".abm"):
+                    epub_path = str(entry)
+                    break
+
+    if epub_path and os.path.isfile(epub_path):
+        return send_file(epub_path, as_attachment=False,
+                         download_name=os.path.basename(epub_path),
+                         mimetype="application/epub+zip",
+                         conditional=True)
+
+    # Fall back to R2/Storj if configured
+    epub_s3_key = ""
+    if isinstance(job, dict):
+        epub_s3_key = job.get("epub_s3_key", "") or job.get("input_s3_key", "")
+    if epub_s3_key:
+        try:
+            import storage_backend
+            if storage_backend.is_enabled():
+                url = storage_backend.presigned_get_url(epub_s3_key)
+                return redirect(url)
+        except Exception as _e:
+            print(f"[epub_file] R2 redirect failed: {_e}")
+
+    return jsonify({"error": "EPUB file not found"}), 404
+
+
 @app.route("/api/chapter_durations/<job_id>")
 def api_chapter_durations(job_id):
     """Return exact chapter durations for a per-chapter-mode job.
