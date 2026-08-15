@@ -4,6 +4,7 @@ import { useState, useRef, useEffect, useCallback } from "react";
 import { Book, X, Type, ChevronLeft, ChevronRight, Loader2 } from "lucide-react";
 import { usePlayerStore } from "@/lib/player-store";
 import { getEpubFileUrl } from "@/lib/abm-api";
+import { getCachedEpub, cacheEpub } from "@/lib/epub-cache";
 
 /**
  * EpubReader — in-browser EPUB reader using foliate-js.
@@ -103,16 +104,28 @@ export function EpubReader() {
         }
       });
 
-      // Fetch the EPUB and open it
+      // Fetch the EPUB — check IndexedDB cache first, then network.
+      // This makes the reader work offline (Docker stopped) after the
+      // first open, same pattern as audio-cache + cover-cache.
       try {
-        const url = getEpubFileUrl(job.jobId);
-        const resp = await fetch(url, { credentials: "include" });
-        if (!resp.ok) {
-          throw new Error(`HTTP ${resp.status}`);
-        }
-        const blob = await resp.blob();
-        if (blob.size === 0) {
-          throw new Error("empty file");
+        let blob: Blob | null = null;
+
+        // 1. Check cache
+        blob = await getCachedEpub(job.jobId);
+
+        // 2. If not cached, fetch from network
+        if (!blob) {
+          const url = getEpubFileUrl(job.jobId);
+          const resp = await fetch(url, { credentials: "include" });
+          if (!resp.ok) {
+            throw new Error(`HTTP ${resp.status}`);
+          }
+          blob = await resp.blob();
+          if (blob.size === 0) {
+            throw new Error("empty file");
+          }
+          // Cache for next time (non-blocking)
+          cacheEpub(job.jobId, blob).catch(() => {});
         }
 
         // foliate-js expects a File object (with .name) or a URL string.
