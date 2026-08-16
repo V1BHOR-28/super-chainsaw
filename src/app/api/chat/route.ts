@@ -427,7 +427,29 @@ export async function POST(req: NextRequest) {
       ? `\n\n--- USER'S AUDIOBOOK LIBRARY ---\n${audiobooks.map(a => `"${a.title}"${a.author ? ` by ${a.author}` : ''}`).join('\n')}`
       : ''
 
-    const fullToolContext = [toolContext, knowledgeContext, quoteContext, audiobookContext].filter(Boolean).join('\n\n')
+    // Pull the user's incomplete reminders so ARIA can answer "do I have any
+    // reminders?" from real data instead of hallucinating "no reminders." This
+    // is the sync point between the Reminder table and ARIA's conversational
+    // memory — without it, the sidebar shows "Air Fryer, Due today" but ARIA
+    // has no idea it exists when asked in chat. Always injected (not gated on
+    // semantic relevance) because reminders are time-sensitive and small.
+    const upcomingReminders = await db.reminder.findMany({
+      where: { userId, completed: false },
+      orderBy: { dueAt: 'asc' },
+      take: 10,
+    }).catch(() => [])
+    const reminderContext = upcomingReminders.length
+      ? `\n\n--- USER'S REMINDERS (incomplete, sorted by due date) ---\n${upcomingReminders.map(r => {
+          const due = r.dueAt ? new Date(r.dueAt).toLocaleDateString('en-US', { month: 'short', day: 'numeric', year: r.dueAt.getFullYear() !== new Date().getFullYear() ? 'numeric' : undefined }) : 'no due date'
+          const now = new Date()
+          const isOverdue = r.dueAt && new Date(r.dueAt) < now
+          const isToday = r.dueAt && new Date(r.dueAt).toDateString() === now.toDateString()
+          const badge = isToday ? ' (DUE TODAY)' : isOverdue ? ' (OVERDUE)' : ''
+          return `- ${r.title} — due ${due}${badge}`
+        }).join('\n')}\n(If the user asks about reminders, due dates, or what they need to do, reference these. Never say "no reminders" when this list is non-empty.)`
+      : ''
+
+    const fullToolContext = [toolContext, knowledgeContext, quoteContext, audiobookContext, reminderContext].filter(Boolean).join('\n\n')
 
     let systemPrompt = buildAriaSystemPrompt({
       tone: settings?.tone ?? 'Warm & Honest',
