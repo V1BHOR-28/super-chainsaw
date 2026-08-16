@@ -946,31 +946,53 @@ def _build_chapters_from_raw(raw_chapters: list, pdf_path: str) -> list:
     """Pulisce e filtra i capitoli grezzi, restituendo una lista di Chapter.
 
     Applica pulizia PDF, pulizia TTS e filtra le sezioni non-contenuto.
+    Deduplica capitoli con lo stesso titolo tenendo quello con più testo
+    (es. "CHAPTER I" appare nell'indice e come heading reale — l'indice
+    ha poco testo, l'heading reale ha il contenuto del capitolo).
     """
-    chapters = []
-    chapter_index = 0
+    # Prima passa: pulisci tutto e filtra non-contenuto
+    cleaned_chapters = []
     for title, raw_text in raw_chapters:
-        # Pulizia specifica PDF
         cleaned = _clean_pdf_text(raw_text)
-
-        # Pulizia generica TTS (condivisa con epub_to_tts)
         cleaned = clean_text_for_tts(cleaned)
-
-        # Filtro contenuto
         if _is_non_content_section(title, cleaned):
             continue
+        cleaned_chapters.append((title.strip(), cleaned.strip()))
 
+    # Seconda passa: deduplica per titolo — se lo stesso titolo appare
+    # più volte (tipico: indice + heading reale), tieni quello con più testo.
+    seen = {}  # title_lower → (index in cleaned_chapters, text_length)
+    deduped = []
+    for title, text in cleaned_chapters:
+        if not text:
+            continue
+        key = title.lower() if title else ""
+        text_len = len(text)
+        if key and key in seen:
+            existing_idx, existing_len = seen[key]
+            if text_len > existing_len:
+                # Sostituisci — questo ha più contenuto (è il capitolo reale)
+                deduped[existing_idx] = (title, text)
+                seen[key] = (existing_idx, text_len)
+            # altrimenti scarta questo (è l'indice, con meno testo)
+        else:
+            seen[key] = (len(deduped), text_len)
+            deduped.append((title, text))
+
+    # Terza passa: costruisci i Chapter con indici sequenziali
+    chapters = []
+    chapter_index = 0
+    for title, text in deduped:
+        if not text:
+            continue
         chapter_index += 1
-        # Fallback per capitoli senza titolo (es. testo che precede il primo
-        # heading riconosciuto): etichetta generica in inglese.
-        chapter_title = title.strip() or f"Chapter {chapter_index}"
-        chapter = Chapter(
+        chapter_title = title or f"Chapter {chapter_index}"
+        chapters.append(Chapter(
             index=chapter_index,
             title=chapter_title,
-            text=cleaned.strip(),
+            text=text,
             source_file=os.path.basename(pdf_path),
-        )
-        chapters.append(chapter)
+        ))
 
     return chapters
 
@@ -1042,10 +1064,19 @@ def parse_pdf(pdf_path: str) -> BookInfo:
     strategies = []
 
     # Strategia 1: outline/bookmarks
+    # A single-chapter outline (the whole book as one entry) is useless for TTS
+    # splitting — it means the PDF has a top-level bookmark like "Wuthering
+    # Heights" pointing at the entire document. Skip it so the heading strategy
+    # (which finds "CHAPTER I", "CHAPTER II", etc.) gets to run instead.
+    # This mirrors how the EPUB parser works: the spine/TOC is only useful when
+    # it has multiple distinct sections, not when it's a single whole-book entry.
     if outline:
         raw = _detect_chapters_from_outline(doc, outline, body_font_size, repeated_headers)
-        if raw:
+        if raw and len(raw) >= 2:
             strategies.append(("outline", raw))
+        elif raw:
+            print(f"[pdf] Outline strategy skipped: only {len(raw)} chapter(s) "
+                  f"(single-chapter outline is useless for splitting)", file=sys.stderr)
 
     # Strategia 2: titoli per stile (font size / grassetto) o pattern testuale
     raw = _detect_chapters_from_headings(doc, body_font_size, repeated_headers)
