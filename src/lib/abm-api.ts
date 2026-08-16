@@ -176,7 +176,7 @@ export function isPollingStatus(status: JobStatus | string | undefined): boolean
  * The Flask app parses the book and returns the chapter list + metadata,
  * stashing the parsed state in-memory keyed by the returned job_id.
  */
-export async function analyzeEpub(file: File): Promise<AnalyzeResponse> {
+export async function analyzeBook(file: File): Promise<AnalyzeResponse> {
   const form = new FormData();
   form.append("epub", file);
   const res = await fetch(`${ABM_BASE}/analyze`, {
@@ -285,7 +285,7 @@ export async function resetToChapters(jobId: string): Promise<void> {
  *
  * Used when the user clicks "More chapters" on a done job — we need the
  * chapter list to re-render the chapter selector with per-chapter checkboxes
- * instead of the "whole book" fallback. Returns the same shape as analyzeEpub
+ * instead of the "whole book" fallback. Returns the same shape as analyzeBook
  * (minus preview_text) so the frontend can reuse the same component.
  *
  * Returns the AnalyzeResponse. Throws if the job has expired (18h retention)

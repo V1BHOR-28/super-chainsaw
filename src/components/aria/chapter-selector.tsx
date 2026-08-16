@@ -15,7 +15,7 @@ import { toast } from "@/hooks/use-toast";
 
 interface ChapterSelectorProps {
   /**
-   * The result from `analyzeEpub`. When provided, the chapter list is
+   * The result from `analyzeBook`. When provided, the chapter list is
    * shown with per-chapter checkboxes. When null (e.g. re-clicking an
    * "analyzed" job from the library), the selector runs in "whole-book"
    * mode — just voice selection + a Convert button that generates the

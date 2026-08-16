@@ -21,7 +21,7 @@ import { usePlayerStore } from "@/lib/player-store";
 import { useAriaStore } from "@/lib/store";
 import {
   getMyJobs,
-  analyzeEpub,
+  analyzeBook,
   getDownloadUrl,
   getCoverUrl,
   sendHeartbeat,
@@ -277,7 +277,7 @@ export function LibraryView() {
     if (!file) return;
     setUploading(true);
     try {
-      const resp = await analyzeEpub(file);
+      const resp = await analyzeBook(file);
       // If the user previously deleted this job_id (e.g. the old backend
       // resurrected it via file_hash dedup), un-delete it so it shows in
       // the library again. The user explicitly re-uploaded the EPUB, so
@@ -480,7 +480,7 @@ export function LibraryView() {
             </div>
             <div className="flex items-center gap-3">
               <p className="text-sm text-[var(--aria-fg-muted)] max-w-xs hidden sm:block">
-                Upload an EPUB and ARIA narrates it — free, fast,
+                Upload a book (EPUB, PDF, TXT, or ABM) and ARIA narrates it — free, fast,
                 and yours to keep.
               </p>
               <input
