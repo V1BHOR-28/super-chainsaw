@@ -57,6 +57,7 @@ try:
         BookInfo, Chapter, clean_text_for_tts, is_content_chapter,
         _title_is_non_content,
         is_chapter_marker_line as _is_chapter_marker_line,
+        _author_from_filename as _author_from_filename_epub,
     )
 except ImportError:
     # Fallback: definisci localmente se epub_to_tts non è disponibile
@@ -210,16 +211,30 @@ MIN_REPEAT_FOR_HEADER = 3  # minimo ripetizioni per considerare una riga header/
 # Copertura minima di testo per accettare una strategia di riconoscimento titoli
 # (outline, heading font-size, indice visuale). Se una di queste strategie cattura
 # meno di questa frazione del testo complessivo estratto dal documento — cioè
-# scarta più del 5% — la si considera inaffidabile (tipicamente un titolo non
+# scarta più del 20% — la si considera inaffidabile (tipicamente un titolo non
 # riconosciuto fa collassare intere sezioni in un unico capitolo, perdendo tutto
 # il testo che le precede) e si passa alla strategia successiva.
-MIN_TITLE_STRATEGY_COVERAGE = 0.95
+# Abbassata da 0.95 a 0.80: molti PDF (specie Project Gutenberg) hanno front
+# matter esteso (titolo, copyright, nota del traduttore) che la strategia di
+# heading correttamente esclude — ma questo spingeva la copertura sotto il 95%,
+# facendo scartare la giusta segmentazione in capitoli e cadendo sul fallback
+# "documento singolo". 80% è ancora abbastanza severo da rifiutare una strategia
+# che cattura meno della metà del testo.
+MIN_TITLE_STRATEGY_COVERAGE = 0.80
 
 # ── Rilevamento suddivisioni per pattern testuale ──
 # Definito una sola volta in epub_to_tts (modulo base condiviso) per evitare
 # divergenze fra parser PDF ed EPUB. Alias locale `_line_is_chapter_marker`
 # mantenuto per compatibilità con il codice e i test esistenti.
 _line_is_chapter_marker = _is_chapter_marker_line
+
+# Alias per il fallback filename-based dell'autore (importato da epub_to_tts
+# se disponibile, altrimenti definito localmente sotto).
+try:
+    _author_from_filename = _author_from_filename_epub
+except NameError:
+    def _author_from_filename(path: str) -> str:
+        return ""
 
 
 # ═══════════════════════════════════════════════════════════════════
@@ -986,7 +1001,13 @@ def parse_pdf(pdf_path: str) -> BookInfo:
     info = BookInfo()
     metadata = doc.metadata or {}
     info.title = (metadata.get("title") or "").strip() or Path(pdf_path).stem
-    info.author = (metadata.get("author") or "").strip() or ""
+    # Author: try PDF metadata first, then filename fallback (same pattern as
+    # epub_to_tts.py). Many PDFs — especially from Project Gutenberg — have
+    # empty author metadata but the filename follows conventions like
+    # 'Title_by_Author.pdf' or 'Author - Title.pdf'.
+    info.author = (metadata.get("author") or "").strip() or _author_from_filename(pdf_path)
+    if not info.author:
+        print(f"[pdf] No author found in metadata or filename for {Path(pdf_path).name}", file=sys.stderr)
     # PyMuPDF non ha un campo "language" standard; proviamo dal metadata
     info.language = (metadata.get("language") or "").strip()
     info.publisher = (metadata.get("producer") or metadata.get("creator") or "").strip()
