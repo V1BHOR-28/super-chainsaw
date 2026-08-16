@@ -104,6 +104,7 @@ export async function makePDF(file) {
 function createPageSection(pdf, pageNum) {
     const index = pageNum - 1
     let cachedDoc = null
+    let cachedUrl = null
 
     return {
         id: `page-${pageNum}`,
@@ -111,9 +112,24 @@ function createPageSection(pdf, pageNum) {
         linear: 'yes',
         size: 0, // unknown until loaded
         cfi: `epubcfi(/6/${index * 2}!/4)`,
+        // foliate-js's paginator calls load() and expects a STRING (a URL
+        // it can set as an iframe src). It does NOT accept a Document object.
+        // Return a blob URL pointing to the page's HTML content.
         load: async () => {
+            if (cachedUrl) return cachedUrl
             const doc = await createDocument()
-            return doc
+            const html = '<!DOCTYPE html>\n<html><head><meta charset="utf-8">' +
+                '<style>body{font-family:serif;margin:1em;line-height:1.6;}</style>' +
+                '</head><body>' + doc.body.innerHTML + '</body></html>'
+            const blob = new Blob([html], { type: 'text/html' })
+            cachedUrl = URL.createObjectURL(blob)
+            return cachedUrl
+        },
+        unload: () => {
+            if (cachedUrl) {
+                URL.revokeObjectURL(cachedUrl)
+                cachedUrl = null
+            }
         },
         createDocument: async () => {
             if (cachedDoc) return cachedDoc
