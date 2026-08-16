@@ -10626,9 +10626,18 @@ def api_epub_file(job_id):
                     break
 
     if epub_path and os.path.isfile(epub_path):
+        # Detect the correct MIME type from the file extension so the
+        # browser (and foliate-js) can route to the right parser.
+        ext = os.path.splitext(epub_path)[1].lower()
+        mime = {
+            ".epub": "application/epub+zip",
+            ".pdf": "application/pdf",
+            ".txt": "text/plain",
+            ".abm": "application/octet-stream",
+        }.get(ext, "application/octet-stream")
         return send_file(epub_path, as_attachment=False,
                          download_name=os.path.basename(epub_path),
-                         mimetype="application/epub+zip",
+                         mimetype=mime,
                          conditional=True)
 
     # Fall back to R2/Storj if configured

@@ -190,10 +190,15 @@ export function EpubReader() {
 
         // foliate-js expects a File object (with .name) or a URL string.
         // A plain Blob has no .name → isCBZ/isFB2 crash on .endsWith().
-        // Wrap the Blob in a File with an .epub extension.
-        const file = new File([blob], "book.epub", {
-          type: "application/epub+zip",
-        });
+        // Detect the file type from the magic bytes (first 5 bytes) and set
+        // the correct extension + MIME type so foliate-js routes to the right
+        // parser (EPUB parser for .epub, PDF parser for .pdf).
+        const header = new Uint8Array(await blob.slice(0, 5).arrayBuffer());
+        const isPdf = header[0] === 0x25 && header[1] === 0x50
+          && header[2] === 0x44 && header[3] === 0x46 && header[4] === 0x2d;
+        const fileName = isPdf ? "book.pdf" : "book.epub";
+        const mimeType = isPdf ? "application/pdf" : "application/epub+zip";
+        const file = new File([blob], fileName, { type: mimeType });
 
         await view.open(file);
         if (!cancelled) {
