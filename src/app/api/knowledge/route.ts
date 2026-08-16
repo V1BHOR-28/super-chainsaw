@@ -136,6 +136,24 @@ async function fetchUrlContent(url: string): Promise<{ title: string; content: s
     throw new Error('This URL cannot be fetched (blocked for security reasons).')
   }
 
+  // Headers that make the request look like a real browser visit, not a bot.
+  // The previous User-Agent ('Mozilla/5.0 (compatible; ARIA/1.0)') was a dead
+  // giveaway — sites like Substack returned 403 for it on sight. A realistic
+  // Chrome UA + Accept/Accept-Language headers get past most basic bot filters.
+  // (Sites with aggressive protection like Medium still 403 — see the error
+  // handling below, which points the user at the Paste Text tab for those.)
+  const browserHeaders: Record<string, string> = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,*/*;q=0.8',
+    'Accept-Language': 'en-US,en;q=0.9',
+    'Accept-Encoding': 'gzip, deflate, br',
+    'Sec-Fetch-Dest': 'document',
+    'Sec-Fetch-Mode': 'navigate',
+    'Sec-Fetch-Site': 'none',
+    'Sec-Fetch-User': '?1',
+    'Upgrade-Insecure-Requests': '1',
+  }
+
   // Archive.org _djvu.txt files are plain text — skip the HTML/cheerio path entirely.
   const parsedUrl = new URL(url)
   const isArchiveOrgText = (parsedUrl.hostname === 'archive.org' || parsedUrl.hostname === 'www.archive.org')
@@ -155,7 +173,7 @@ async function fetchUrlContent(url: string): Promise<{ title: string; content: s
     try {
       res = await fetch(url, {
         signal: AbortSignal.timeout(45000),
-        headers: { 'User-Agent': 'Mozilla/5.0 (compatible; ARIA/1.0)' },
+        headers: browserHeaders,
       })
     } catch (err) {
       // AbortSignal.timeout() rejects with a DOMException whose name is
@@ -180,9 +198,18 @@ async function fetchUrlContent(url: string): Promise<{ title: string; content: s
 
   const res = await fetch(url, {
     signal: AbortSignal.timeout(15000),
-    headers: { 'User-Agent': 'Mozilla/5.0 (compatible; ARIA/1.0)' },
+    headers: browserHeaders,
   })
-  if (!res.ok) throw new Error(`Failed to fetch URL (HTTP ${res.status})`)
+  if (!res.ok) {
+    // 403 / 401 usually means the site has bot protection (Cloudflare, Medium,
+    // etc.) that blocks server-side fetches regardless of headers. Be honest
+    // about this and point the user at the Paste Text tab instead of leaving
+    // them with a cryptic status code.
+    if (res.status === 403 || res.status === 401) {
+      throw new Error(`This site blocks automated fetching (HTTP ${res.status}). Open the page in your browser, copy the text, and use the Paste Text tab instead.`)
+    }
+    throw new Error(`Failed to fetch URL (HTTP ${res.status})`)
+  }
   const html = await res.text()
   const cheerio = await import('cheerio')
   const $ = cheerio.load(html)
