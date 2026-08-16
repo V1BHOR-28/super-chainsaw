@@ -1,7 +1,7 @@
 "use client";
 
 import { useState, useRef, useEffect, useCallback } from "react";
-import { Book, X, Type, ChevronLeft, ChevronRight, Loader2 } from "lucide-react";
+import { Book, X, Type, ChevronLeft, ChevronRight, Loader2, Bookmark } from "lucide-react";
 import { usePlayerStore } from "@/lib/player-store";
 import { getEpubFileUrl } from "@/lib/abm-api";
 import { getCachedEpub, cacheEpub } from "@/lib/epub-cache";
@@ -33,6 +33,50 @@ export function EpubReader() {
     [],
   );
   const [showToc, setShowToc] = useState(false);
+  // Saved reading position for the current book — restored on open, updated
+  // on every page turn. Stored in localStorage keyed by jobId so each book
+  // remembers its own position independently.
+  const [savedPosition, setSavedPosition] = useState<{ label: string; pct: number } | null>(null);
+
+  const positionKey = job?.jobId ? `aria:epub-position:${job.jobId}` : null;
+
+  // Persist the current reading position to localStorage. Called on every
+  // relocate event (page turn) so the position is always up to date.
+  const savePosition = useCallback(
+    (cfi: string, fraction: number, tocLabel: string | null) => {
+      if (!positionKey) return;
+      const pct = Math.round(fraction * 100);
+      const data = { cfi, fraction, label: tocLabel || "", pct, ts: Date.now() };
+      try {
+        localStorage.setItem(positionKey, JSON.stringify(data));
+        setSavedPosition(tocLabel ? { label: tocLabel, pct } : { label: "", pct });
+      } catch {
+        // localStorage full or disabled — non-fatal, position just won't persist
+      }
+    },
+    [positionKey],
+  );
+
+  // Load the saved position from localStorage on mount (before the book opens)
+  useEffect(() => {
+    if (!positionKey) {
+      setSavedPosition(null);
+      return;
+    }
+    try {
+      const raw = localStorage.getItem(positionKey);
+      if (raw) {
+        const data = JSON.parse(raw);
+        if (data?.label !== undefined && typeof data.pct === "number") {
+          setSavedPosition({ label: data.label, pct: data.pct });
+        }
+      } else {
+        setSavedPosition(null);
+      }
+    } catch {
+      setSavedPosition(null);
+    }
+  }, [positionKey]);
 
   // Load foliate-js script + initialize the reader
   useEffect(() => {
@@ -88,11 +132,17 @@ export function EpubReader() {
         // setAppearance may not exist on all versions — use CSS instead
       }
 
+      // Enable smooth page-turn animation (300ms ease-out scroll built into
+      // foliate-js paginator). Without this, pages snap instantly; with it,
+      // turning pages feels like swiping through a Kindle app.
+      view.setAttribute("animated", "");
+
       containerRef.current!.innerHTML = "";
       containerRef.current!.appendChild(view);
       viewRef.current = view;
 
-      // Listen for relocation (page changes)
+      // Listen for relocation (page changes) — persist the position so the
+      // reader can auto-resume on next open.
       view.addEventListener("relocate", (e: Event) => {
         const detail = (e as CustomEvent).detail;
         if (detail?.fraction !== undefined) {
@@ -101,6 +151,16 @@ export function EpubReader() {
         }
         if (detail?.tocItem?.label) {
           setPageInfo(`${detail.tocItem.label}`);
+        }
+        // Persist position for auto-resume next time the book is opened.
+        // detail.cfi is the Canonical Fragment Identifier — a precise
+        // position string that view.goTo() can navigate back to.
+        if (detail?.cfi && typeof detail.fraction === "number") {
+          savePosition(
+            detail.cfi,
+            detail.fraction,
+            detail?.tocItem?.label ?? null,
+          );
         }
       });
 
@@ -138,6 +198,29 @@ export function EpubReader() {
         await view.open(file);
         if (!cancelled) {
           setLoading(false);
+
+          // === AUTO-RESUME: jump to the saved reading position ===
+          // After the book opens, check localStorage for a saved CFI and
+          // navigate to it. This makes the reader open to the exact page the
+          // user left off on, not the cover/title page. Wrapped in try/catch
+          // — if the CFI is stale (e.g. different edition), foliate-js logs
+          // an error and stays on the first page, which is fine.
+          if (positionKey) {
+            try {
+              const raw = localStorage.getItem(positionKey);
+              if (raw) {
+                const saved = JSON.parse(raw);
+                if (saved?.cfi) {
+                  const v = viewRef.current as unknown as {
+                    goTo?: (target: string) => Promise<unknown>;
+                  } | null;
+                  await v?.goTo?.(saved.cfi);
+                }
+              }
+            } catch {
+              // Stale/invalid CFI — non-fatal, reader stays on first page
+            }
+          }
 
           // Try to get TOC
           try {
@@ -264,6 +347,19 @@ export function EpubReader() {
               style={{ color: "var(--aria-fg-dim)" }}
             >
               {pageInfo}
+            </span>
+          )}
+          {savedPosition && savedPosition.pct > 0 && (
+            <span
+              className="flex items-center gap-1 text-[10px] font-mono px-1.5 py-0.5 rounded"
+              title={`Resume: ${savedPosition.label || "page"} — ${savedPosition.pct}%`}
+              style={{
+                color: "var(--aria-accent-glow)",
+                background: "rgba(245,158,11,0.08)",
+              }}
+            >
+              <Bookmark className="w-2.5 h-2.5" />
+              {savedPosition.pct}%
             </span>
           )}
           {tocItems.length > 0 && (
