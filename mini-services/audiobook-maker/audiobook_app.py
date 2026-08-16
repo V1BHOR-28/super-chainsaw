@@ -11274,6 +11274,7 @@ def api_my_jobs():
             "status": status,
             "title": (getattr(info, "title", "") or
                       job.get("original_filename", "")),
+            "author": getattr(info, "author", "") or "",
             "output_format": job.get("output_format", ""),
             "created_at": job.get("start_time") or job.get("last_poll") or 0,
             "selected_chapters": _derived_selected,

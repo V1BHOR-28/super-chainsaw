@@ -1121,7 +1121,7 @@ def parse_epub(epub_path: str, include_toc_chapters: bool = False) -> BookInfo:
     # Metadati
     info = BookInfo()
     info.title = _get_metadata(book, "title") or Path(epub_path).stem
-    info.author = _get_metadata(book, "creator") or "Sconosciuto"
+    info.author = _get_book_author(book)
     info.language = _get_metadata(book, "language") or ""
     info.publisher = _get_metadata(book, "publisher") or ""
     info.description = _get_metadata(book, "description") or ""
@@ -1403,6 +1403,59 @@ def _get_metadata(book: epub.EpubBook, field: str) -> Optional[str]:
     except Exception:
         pass
     return None
+
+
+def _get_book_author(book: epub.EpubBook) -> str:
+    """Extract the author from an EPUB, trying multiple metadata conventions.
+
+    EPUBs store the author in different ways depending on the tool that
+    produced them:
+      1. <dc:creator opf:role="aut">Name</dc:creator>  (Calibre, standard)
+      2. <dc:creator>Name</dc:creator>  (simple, no role attribute)
+      3. <meta name="author" content="Name">  (older EPUB2 convention)
+      4. <dc:creator opf:file-as="Last, First">Name</dc:creator>
+         (ebooklib returns the file-as as a dict attribute on the value)
+
+    Returns an empty string (not the Italian 'Sconosciuto') when no author
+    is found, so the frontend's 'Author unknown' fallback handles it cleanly
+    instead of showing Italian text in an English UI.
+    """
+    # 1. Try DC:creator — the standard EPUB author field. ebooklib returns
+    #    a list of (value, attrs) tuples. Filter for role="aut" first (the
+    #    explicit "this is the author" attribute Calibre writes), then fall
+    #    back to any creator entry.
+    try:
+        creators = book.get_metadata("DC", "creator")
+        if creators:
+            # Prefer creators explicitly marked as role="aut"
+            for value, attrs in creators:
+                role = attrs.get("role", "") if attrs else ""
+                if role.lower() == "aut" and isinstance(value, str) and value.strip():
+                    return value.strip()
+            # No role="aut" — take the first non-empty creator
+            for value, attrs in creators:
+                if isinstance(value, str) and value.strip():
+                    return value.strip()
+    except Exception:
+        pass
+
+    # 2. Try <meta name="author" content="..."> — older EPUB2 convention
+    #    used by some conversion tools when DC:creator is absent.
+    try:
+        metas = book.get_metadata("OPF", "meta")
+        if metas:
+            for value, attrs in metas:
+                if not attrs:
+                    continue
+                name = attrs.get("name", "").lower()
+                if name == "author":
+                    content = attrs.get("content", "")
+                    if isinstance(content, str) and content.strip():
+                        return content.strip()
+    except Exception:
+        pass
+
+    return ""
 
 
 def _body_has_skip_type(html_content: str) -> bool:
