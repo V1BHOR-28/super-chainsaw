@@ -946,9 +946,17 @@ def _build_chapters_from_raw(raw_chapters: list, pdf_path: str) -> list:
     """Pulisce e filtra i capitoli grezzi, restituendo una lista di Chapter.
 
     Applica pulizia PDF, pulizia TTS e filtra le sezioni non-contenuto.
-    Deduplica capitoli con lo stesso titolo tenendo quello con più testo
-    (es. "CHAPTER I" appare nell'indice e come heading reale — l'indice
-    ha poco testo, l'heading reale ha il contenuto del capitolo).
+    MERGE same-titled chapters (running headers) and skip TOC entries.
+
+    A PDF running header like "CHAPTER I" appears at the top of every page
+    within Chapter 1. The heading strategy detects it once per page,
+    splitting one chapter into N fragments. This function merges those
+    fragments back together by concatenating text from entries with the
+    same title.
+
+    TOC entries (same title but very little text — just a page number or
+    short description) are filtered out before merging so they don't
+    contaminate the real chapter text.
     """
     # Prima passa: pulisci tutto e filtra non-contenuto
     cleaned_chapters = []
@@ -959,38 +967,43 @@ def _build_chapters_from_raw(raw_chapters: list, pdf_path: str) -> list:
             continue
         cleaned_chapters.append((title.strip(), cleaned.strip()))
 
-    # Seconda passa: deduplica per titolo — se lo stesso titolo appare
-    # più volte (tipico: indice + heading reale), tieni quello con più testo.
-    seen = {}  # title_lower → (index in cleaned_chapters, text_length)
-    deduped = []
+    # Seconda passa: filtra TOC entries (poco testo) e MERGE same-titled
+    # entries (running headers). A TOC entry has < 200 chars of text
+    # (just a page number or short description). A real chapter page
+    # has substantially more. Skip TOC entries, then merge the rest by title.
+    MIN_REAL_CHAPTER_CHARS = 200
+    merged = {}  # title_lower → {"title": str, "parts": [text, ...]}
+    order = []   # preserve first-occurrence order for sequential indexing
     for title, text in cleaned_chapters:
         if not text:
             continue
         key = title.lower() if title else ""
-        text_len = len(text)
-        if key and key in seen:
-            existing_idx, existing_len = seen[key]
-            if text_len > existing_len:
-                # Sostituisci — questo ha più contenuto (è il capitolo reale)
-                deduped[existing_idx] = (title, text)
-                seen[key] = (existing_idx, text_len)
-            # altrimenti scarta questo (è l'indice, con meno testo)
+        # Skip TOC entries: same title but very little text. These appear
+        # in the table of contents and would contaminate the real chapter.
+        if key and key in merged and len(text) < MIN_REAL_CHAPTER_CHARS:
+            continue  # TOC entry — skip
+        if key and key in merged:
+            # Same title already seen — this is a running header on another
+            # page of the same chapter. Append the text to the existing entry.
+            merged[key]["parts"].append(text)
         else:
-            seen[key] = (len(deduped), text_len)
-            deduped.append((title, text))
+            merged[key] = {"title": title, "parts": [text]}
+            order.append(key)
 
     # Terza passa: costruisci i Chapter con indici sequenziali
     chapters = []
     chapter_index = 0
-    for title, text in deduped:
-        if not text:
+    for key in order:
+        entry = merged[key]
+        full_text = "\n\n".join(entry["parts"]).strip()
+        if not full_text:
             continue
         chapter_index += 1
-        chapter_title = title or f"Chapter {chapter_index}"
+        chapter_title = entry["title"] or f"Chapter {chapter_index}"
         chapters.append(Chapter(
             index=chapter_index,
             title=chapter_title,
-            text=text,
+            text=full_text,
             source_file=os.path.basename(pdf_path),
         ))
 
