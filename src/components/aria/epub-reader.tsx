@@ -202,6 +202,17 @@ export function EpubReader() {
 
         await view.open(file);
         if (!cancelled) {
+          // foliate-js's open() sets up the renderer but does NOT display the
+          // first page — init() is what triggers the initial page render.
+          // Without this, the reader shows a blank page (especially for PDFs
+          // and first-time EPUB opens with no saved position).
+          const v = view as unknown as {
+            init?: (opts: { lastLocation?: string | null; showTextStart?: boolean }) => Promise<void>;
+          };
+          if (v.init) {
+            await v.init({ lastLocation: null, showTextStart: false });
+          }
+
           setLoading(false);
 
           // === AUTO-RESUME: jump to the saved reading position ===

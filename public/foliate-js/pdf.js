@@ -68,32 +68,6 @@ export async function makePDF(file) {
         },
         rendition: { layout: 'reflowable' },
         dir: 'ltr',
-        // Navigation helpers — foliate-js uses these for TOC clicks + CFI
-        splitTOCHref: href => {
-            const [index, anchor] = href.split('#')
-            return [parseInt(index, 10) || 0, anchor || null]
-        },
-        getTOCFragment: async (index, anchor) => {
-            const doc = await sections[index]?.createDocument?.()
-            if (!doc) return null
-            if (anchor) {
-                const el = doc.getElementById(anchor) || doc.querySelector(`[name="${anchor}"]`)
-                if (el) return el
-            }
-            return doc.body?.firstElementChild || doc.body
-        },
-        resolveCFI: cfi => {
-            // Simple CFI resolution: CFI format is epubcfi(/6/N[...]!/4...)
-            // The section index is encoded in the first step. For PDFs we
-            // just parse the index from a simplified CFI.
-            const match = cfi.match(/\/6\/(\d+)/)
-            const index = match ? Math.floor(parseInt(match[1], 10) / 2) : 0
-            return { index: Math.min(index, sections.length - 1), anchor: undefined }
-        },
-        resolveRef: ref => {
-            const [index, anchor] = String(ref).split('#')
-            return { index: parseInt(index, 10) || 0, anchor }
-        },
     }
 }
 
