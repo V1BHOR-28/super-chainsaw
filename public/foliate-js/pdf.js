@@ -239,37 +239,51 @@ function createPageSection(pdf, pageNum) {
 
 /**
  * Build a foliate-js-compatible TOC from the PDF's outline (bookmarks).
+ *
+ * Recursively resolves EACH outline node's own destination — not just the
+ * root's. Most PDFs structure their outline as one root entry (the book
+ * title) with the real chapters nested underneath as `item.items`. The old
+ * code gave every subitem the parent's resolved href, so every "chapter"
+ * link pointed at the same page. Now each node gets its own dest resolved
+ * at any nesting depth.
  */
 async function buildTocFromOutline(pdf) {
     try {
         const outline = await pdf.getOutline()
         if (!outline || outline.length === 0) return []
 
-        const toc = []
-        for (const item of outline) {
-            const entry = { label: item.title || 'Untitled', href: '' }
-            if (item.dest) {
-                // Resolve the destination to a page number
-                try {
-                    let dest = item.dest
-                    if (typeof dest === 'string') {
-                        dest = await pdf.getDestination(dest)
-                    }
-                    if (dest && dest[0]) {
-                        const pageIndex = await pdf.getPageIndex(dest[0])
-                        entry.href = `${pageIndex}`
-                    }
-                } catch {
-                    entry.href = '0'
+        const resolveOutlineHref = async (item) => {
+            if (!item.dest) return ''
+            try {
+                let dest = item.dest
+                if (typeof dest === 'string') {
+                    dest = await pdf.getDestination(dest)
+                }
+                if (dest && dest[0]) {
+                    const pageIndex = await pdf.getPageIndex(dest[0])
+                    return `${pageIndex}`
+                }
+            } catch {
+                return '0'
+            }
+            return ''
+        }
+
+        const buildOutlineNode = async (item) => {
+            const href = await resolveOutlineHref(item)
+            const node = { label: item.title || 'Untitled', href }
+            if (item.items && item.items.length > 0) {
+                node.subitems = []
+                for (const sub of item.items) {
+                    node.subitems.push(await buildOutlineNode(sub))
                 }
             }
-            if (item.items && item.items.length > 0) {
-                entry.subitems = item.items.map(sub => ({
-                    label: sub.title || 'Untitled',
-                    href: entry.href,
-                }))
-            }
-            toc.push(entry)
+            return node
+        }
+
+        const toc = []
+        for (const item of outline) {
+            toc.push(await buildOutlineNode(item))
         }
         return toc
     } catch {

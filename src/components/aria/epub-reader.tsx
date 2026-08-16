@@ -29,7 +29,7 @@ export function EpubReader() {
   const [fontSize, setFontSize] = useState(100);
   const [theme, setTheme] = useState<"dark" | "light">("dark");
   const [pageInfo, setPageInfo] = useState("");
-  const [tocItems, setTocItems] = useState<{ label: string; href: string }[]>(
+  const [tocItems, setTocItems] = useState<{ label: string; href: string; depth: number }[]>(
     [],
   );
   const [showToc, setShowToc] = useState(false);
@@ -253,20 +253,32 @@ export function EpubReader() {
             }
           }
 
-          // Try to get TOC
+          // Try to get TOC — recursively flatten the tree (including nested
+          // subitems) into a flat list with depth, so chapters nested under a
+          // root title entry still show up in the Contents panel.
           try {
             const book = (view as unknown as { book?: { toc?: unknown[] } })
               .book;
             if (book?.toc) {
-              const toc = book.toc.map((item: unknown) => {
-                const i = item as {
-                  label: string;
-                  href: string;
-                  subitems?: unknown[];
-                };
-                return { label: i.label, href: i.href };
-              });
-              setTocItems(toc);
+              const flattenToc = (
+                items: unknown[],
+                depth = 0,
+              ): { label: string; href: string; depth: number }[] => {
+                const out: { label: string; href: string; depth: number }[] = [];
+                for (const item of items) {
+                  const i = item as {
+                    label: string;
+                    href: string;
+                    subitems?: unknown[];
+                  };
+                  out.push({ label: i.label, href: i.href, depth });
+                  if (i.subitems && i.subitems.length > 0) {
+                    out.push(...flattenToc(i.subitems, depth + 1));
+                  }
+                }
+                return out;
+              };
+              setTocItems(flattenToc(book.toc));
             }
           } catch {
             // non-fatal
@@ -458,7 +470,10 @@ export function EpubReader() {
               key={i}
               onClick={() => goToChapter(item.href)}
               className="block w-full text-left text-xs py-1 px-2 rounded transition-colors hover:bg-white/10 truncate"
-              style={{ color: "var(--aria-fg-muted)" }}
+              style={{
+                color: "var(--aria-fg-muted)",
+                paddingLeft: `${8 + item.depth * 12}px`,
+              }}
             >
               {item.label}
             </button>

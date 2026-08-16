@@ -85,9 +85,20 @@ export function useAudioEngine() {
   }, [currentJob, currentChapterIdx]);
 
   // ── Play / pause control ──
+  // NOTE: this effect reacts ONLY to explicit user play/pause intent
+  // (isPlaying toggled), NOT to chapter changes. Reacting to currentChapterIdx
+  // here was the source of the chapter-boundary glitch: it fired the instant
+  // the chapter index changed and called a.play() while a.src still pointed
+  // at the OLD chapter's audio (the source swap happens asynchronously in the
+  // chapter-load effect above). Resumption after a chapter switch is now
+  // handled exclusively by onLoadedMetadata, which fires only after the new
+  // source is actually ready — race-free.
   useEffect(() => {
     const a = audioRef.current;
     if (!a || !currentJob) return;
+    // Guard: if a new chapter is loading, don't touch playback here —
+    // onLoadedMetadata will resume once the new source is ready.
+    if (isLoadingNewChapter.current) return;
     if (isPlaying) {
       if (a.paused) {
         a.play().catch(() => usePlayerStore.getState().pause());
@@ -95,7 +106,7 @@ export function useAudioEngine() {
     } else {
       if (!a.paused) a.pause();
     }
-  }, [isPlaying, currentJob, currentChapterIdx]);
+  }, [isPlaying, currentJob]);
 
   // ── Audio event handlers: timeupdate, loadedmetadata, ended ──
   useEffect(() => {
@@ -167,27 +178,31 @@ export function useAudioEngine() {
       } else if (a.duration && isFinite(a.duration)) {
         setDuration(a.duration);
       }
+
+      // === SOLE RESUME POINT after a chapter switch ===
+      // This is the only place that resumes playback after the source changes.
+      // The browser fires loadedmetadata only after the new audio file is
+      // actually loaded and ready — so a.play() here is race-free. The old
+      // code had THREE places trying to control this (this effect, the
+      // play/pause effect reacting to currentChapterIdx, and onEnded's
+      // setTimeout) with no coordination — whichever won produced the glitch.
+      if (usePlayerStore.getState().isPlaying && a.paused) {
+        a.play().catch(() => {});
+      }
     };
 
     const onEnded = () => {
       const job = usePlayerStore.getState().currentJob;
       if (!job) return;
 
-      // In playlist mode, advance to the next chapter
+      // In playlist mode, advance to the next chapter. Resumption is handled
+      // by onLoadedMetadata (the sole resume point) — no setTimeout needed.
+      // The old setTimeout(..., 100) here was the third source of the
+      // chapter-boundary glitch: it fired blindly 100ms after advancement,
+      // with no check that the new source had actually loaded.
       if (job.chapterMp3s && job.chapterMp3s.length > 0) {
-        const hasNext = usePlayerStore.getState().advanceToNextChapter();
-        if (hasNext) {
-          // The chapter change effect will load the next chapter's MP3.
-          // If we were playing, auto-play the next chapter.
-          if (usePlayerStore.getState().isPlaying) {
-            // Small delay to let the new src load
-            setTimeout(() => {
-              const a2 = audioRef.current;
-              if (a2) a2.play().catch(() => {});
-            }, 100);
-          }
-          return;
-        }
+        usePlayerStore.getState().advanceToNextChapter();
+        return;
       }
       // No next chapter or single-file mode — stop
       usePlayerStore.getState().pause();
