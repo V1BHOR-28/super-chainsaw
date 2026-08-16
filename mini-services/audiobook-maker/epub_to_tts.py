@@ -1121,7 +1121,9 @@ def parse_epub(epub_path: str, include_toc_chapters: bool = False) -> BookInfo:
     # Metadati
     info = BookInfo()
     info.title = _get_metadata(book, "title") or Path(epub_path).stem
-    info.author = _get_book_author(book)
+    info.author = _get_book_author(book) or _author_from_filename(epub_path)
+    if not info.author:
+        print(f"[epub] No author found in metadata or filename for {Path(epub_path).name}", file=sys.stderr)
     info.language = _get_metadata(book, "language") or ""
     info.publisher = _get_metadata(book, "publisher") or ""
     info.description = _get_metadata(book, "description") or ""
@@ -1455,6 +1457,45 @@ def _get_book_author(book: epub.EpubBook) -> str:
     except Exception:
         pass
 
+    return ""
+
+
+def _author_from_filename(epub_path: str) -> str:
+    """Last-resort fallback: extract author from the filename.
+
+    Many downloaded EPUBs follow naming conventions like:
+      - "The Three-Body Problem_by_Liu Cixin.epub"
+      - "Title - Author.epub"
+      - "Title by Author.epub"
+
+    This catches those patterns when the EPUB's internal metadata has no
+    DC:creator field. Returns empty string if no pattern matches.
+    """
+    import re
+    name = Path(epub_path).stem  # filename without .epub extension
+    # Pattern 1: "_by_Author" or " by Author" (case-insensitive)
+    m = re.search(r'_by_(.+)$', name, re.IGNORECASE)
+    if m:
+        author = m.group(1).strip().replace('_', ' ')
+        # Clean up: collapse multiple spaces
+        author = re.sub(r'\s+', ' ', author).strip()
+        if author:
+            return author
+    # Pattern 2: " - Author" (dash separator, author is last segment)
+    if ' - ' in name:
+        parts = name.split(' - ')
+        if len(parts) >= 2:
+            author = parts[-1].strip().replace('_', ' ')
+            author = re.sub(r'\s+', ' ', author).strip()
+            if author:
+                return author
+    # Pattern 3: " by Author" (space-separated)
+    m = re.search(r'\sby\s(.+)$', name, re.IGNORECASE)
+    if m:
+        author = m.group(1).strip().replace('_', ' ')
+        author = re.sub(r'\s+', ' ', author).strip()
+        if author:
+            return author
     return ""
 
 
