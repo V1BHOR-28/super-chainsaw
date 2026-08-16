@@ -450,9 +450,16 @@ export function LibraryView() {
         prev.map((c) => (c.jobId === jobId ? { ...c, status: "generating" } : c)),
       );
     }
-    // Conversion started — the job is now wanted, so don't delete it on close.
+    // IMPORTANT: do NOT call handleCloseSelector() here. That function deletes
+    // the job from the backend when analyzeFromUpload is true — and because
+    // React state updates are async, setAnalyzeFromUpload(false) hasn't applied
+    // yet when handleCloseSelector reads it. So handleCloseSelector would see
+    // analyzeFromUpload=true (from the fresh upload) and call deleteJob(),
+    // cancelling the generation that just started. Clear the local state
+    // directly instead, skipping the delete path entirely.
+    setAnalyzeResponse(null);
+    setWholeBookJob(null);
     setAnalyzeFromUpload(false);
-    handleCloseSelector();
     fetchJobs();
   };
 
