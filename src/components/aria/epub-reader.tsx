@@ -202,18 +202,34 @@ export function EpubReader() {
 
         await view.open(file);
         if (!cancelled) {
-          // foliate-js's open() sets up the renderer but does NOT display the
-          // first page — init() is what triggers the initial page render.
-          // Without this, the reader shows a blank page (especially for PDFs
-          // and first-time EPUB opens with no saved position).
-          const v = view as unknown as {
-            init?: (opts: { lastLocation?: string | null; showTextStart?: boolean }) => Promise<void>;
-          };
-          if (v.init) {
-            await v.init({ lastLocation: null, showTextStart: false });
-          }
-
           setLoading(false);
+
+          // === TRIGGER INITIAL PAGE RENDER ===
+          // foliate-js's open() sets up the renderer but doesn't display the
+          // first page. For EPUBs with a saved position, the goTo(savedCfi)
+          // call below triggers the render. For first-time opens (no saved
+          // position) and PDFs, we need to explicitly navigate to the first
+          // section. Using renderer.firstSection() instead of view.init()
+          // because init() → next() → #scrollNext → #turnPage has a code path
+          // that crashes when this.#view is undefined on first render
+          // ("Cannot read properties of undefined (reading 'element')").
+          // firstSection() goes directly to #goTo({index: 0}) which creates
+          // the view via #createView() before accessing it.
+          try {
+            const v = viewRef.current as unknown as {
+              renderer?: { firstSection?: () => Promise<void> };
+            } | null;
+            // Only call firstSection if there's no saved position to restore
+            // (the goTo below handles the saved-position case).
+            const hasSavedPosition = positionKey
+              ? !!localStorage.getItem(positionKey)
+              : false;
+            if (!hasSavedPosition) {
+              await v?.renderer?.firstSection?.();
+            }
+          } catch (err) {
+            console.warn("[epub-reader] firstSection failed:", err);
+          }
 
           // === AUTO-RESUME: jump to the saved reading position ===
           // After the book opens, check localStorage for a saved CFI and
