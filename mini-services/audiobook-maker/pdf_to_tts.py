@@ -677,23 +677,37 @@ def _detect_chapters_from_headings(doc: fitz.Document, body_font_size: float,
 
     # ── Classifica ogni riga come heading o contenuto ──
     lines_seq = []
+    n_by_size = n_by_bold = n_by_pattern = 0
+    pattern_matches = []
     for max_size, is_all_bold, line_text in raw_lines:
         words = len(line_text.split())
         short = len(line_text) < 150 and words < 20
         by_size = short and max_size >= heading_threshold
-        # Grassetto: vincoli più stretti (riga molto corta, dimensione >= body)
-        # per evitare falsi positivi da enfasi in linea nel corpo del testo.
         by_bold = (
             is_all_bold
             and max_size >= body_font_size * 0.98
             and len(line_text) < 60
             and words <= 8
         )
-        # Pattern testuale: cattura i marcatori anche a dimensione-corpo.
         by_pattern = _line_is_chapter_marker(line_text)
+        if by_size: n_by_size += 1
+        if by_bold: n_by_bold += 1
+        if by_pattern:
+            n_by_pattern += 1
+            if len(pattern_matches) < 10:
+                pattern_matches.append(line_text)
         lines_seq.append((by_size or by_bold or by_pattern, line_text))
 
+    print(f"[pdf] Heading detection: {len(raw_lines)} lines scanned, "
+          f"threshold={heading_threshold:.1f}pt, body={body_font_size:.1f}pt | "
+          f"by_size={n_by_size}, by_bold={n_by_bold}, by_pattern={n_by_pattern}",
+          file=sys.stderr)
+    if pattern_matches:
+        print(f"[pdf] Pattern matches (first {len(pattern_matches)}): "
+              f"{pattern_matches}", file=sys.stderr)
+
     if not any(is_h for is_h, _ in lines_seq):
+        print("[pdf] No headings detected by any signal", file=sys.stderr)
         return []
 
     n = len(lines_seq)
@@ -1059,22 +1073,71 @@ def parse_pdf(pdf_path: str) -> BookInfo:
     for strategy_name, raw_chapters in strategies:
         # Guardia di copertura: applicata solo alle strategie di riconoscimento
         # titoli, NON al fallback "documento singolo" (che È il testo completo).
-        if strategy_name != "documento singolo" and full_text_chars > 0:
+        # Skip the coverage guard when the heading strategy found textual pattern
+        # matches (e.g. "Canto I", "Chapter 4") — these are authoritative
+        # chapter boundaries that should always be trusted, even if the captured
+        # text is a small fraction of the full document (e.g. poetry with lots
+        # of white space, or a PDF with extensive front matter).
+        has_pattern_matches = any(
+            _line_is_chapter_marker(title) for title, _ in raw_chapters if title
+        )
+        if strategy_name != "documento singolo" and full_text_chars > 0 and not has_pattern_matches:
             captured = sum(len(t or "") for _, t in raw_chapters)
             coverage = captured / full_text_chars
+            print(f"[pdf] Strategy '{strategy_name}': {len(raw_chapters)} raw chapters, "
+                  f"coverage={coverage:.1%} (threshold={MIN_TITLE_STRATEGY_COVERAGE:.0%})",
+                  file=sys.stderr)
             if coverage < MIN_TITLE_STRATEGY_COVERAGE:
-                print(f"[pdf] Strategia '{strategy_name}' scarta "
-                      f"{100 * (1 - coverage):.0f}% del testo "
-                      f"(soglia max 5%): ignorata")
+                print(f"[pdf] Strategy '{strategy_name}' rejected — coverage too low "
+                      f"({100 * (1 - coverage):.0f}% of text excluded)", file=sys.stderr)
                 continue
+        elif has_pattern_matches:
+            print(f"[pdf] Strategy '{strategy_name}': {len(raw_chapters)} raw chapters, "
+                  f"has pattern matches → coverage guard BYPASSED", file=sys.stderr)
 
         chapters = _build_chapters_from_raw(raw_chapters, pdf_path)
         if chapters:
             print(f"[pdf] Capitoli da {strategy_name}: {len(chapters)}")
             info.chapters = chapters
             break
+        else:
+            print(f"[pdf] Strategy '{strategy_name}' produced 0 chapters after filtering "
+                  f"({len(raw_chapters)} raw → 0 kept)", file=sys.stderr)
 
-    # ── Recovery di ultima istanza ──
+    # ── Recovery 1: pattern-matched headings bypass content filter ──
+    # If the heading strategy detected chapter markers (by_pattern) but ALL
+    # chapters were filtered out by _is_non_content_section, re-run the heading
+    # strategy WITHOUT the content filter. The pattern matches are trustworthy
+    # — "Canto I", "Chapter 4" etc. are real chapter boundaries, and filtering
+    # them out (e.g. because the chapter text is short poetry) is a false
+    # negative. This catches the case where a poetry-heavy PDF (like Dante's
+    # Divine Comedy) has real Canto divisions that get rejected as "non-content."
+    if not info.chapters:
+        for strategy_name, raw_chapters in strategies:
+            if strategy_name == "documento singolo":
+                continue
+            # Re-build WITHOUT the content filter — just clean the text.
+            chapters = []
+            chapter_index = 0
+            for title, raw_text in raw_chapters:
+                cleaned = _clean_pdf_text(raw_text)
+                cleaned = clean_text_for_tts(cleaned)
+                if cleaned.strip() and len(cleaned.split()) >= 10:
+                    chapter_index += 1
+                    chapter_title = title.strip() or f"Chapter {chapter_index}"
+                    chapters.append(Chapter(
+                        index=chapter_index,
+                        title=chapter_title,
+                        text=cleaned.strip(),
+                        source_file=os.path.basename(pdf_path),
+                    ))
+            if chapters:
+                print(f"[pdf] Recovery (no-filter): {len(chapters)} chapters from '{strategy_name}' "
+                      f"(content filter was rejecting them all)", file=sys.stderr)
+                info.chapters = chapters
+                break
+
+    # ── Recovery 2: tutto il documento come singolo capitolo ──
     # Se tutte le strategie hanno prodotto 0 capitoli dopo il filtro,
     # ma c'è testo nel documento, forza l'inclusione senza filtri.
     if not info.chapters and full_text.strip():
