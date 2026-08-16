@@ -2,11 +2,11 @@
 
 import { useState, useRef, useEffect } from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
-import { BookOpen, Link2, FileText, X, Loader2, Trash2, BookMarked, Upload, Quote, Sparkles } from 'lucide-react'
+import { BookOpen, FileText, X, Loader2, Trash2, BookMarked, Upload, Quote, Sparkles } from 'lucide-react'
 import { toast } from 'sonner'
 import { useAriaStore } from '@/lib/store'
 
-type FeedTab = 'text' | 'url' | 'pdf' | 'library' | 'quotes'
+type FeedTab = 'text' | 'pdf' | 'library' | 'quotes'
 type FeedState = 'idle' | 'reading' | 'refining' | 'embedding' | 'done'
 
 const STATE_LABELS: Record<FeedState, string> = {
@@ -21,7 +21,6 @@ export function FeedAriaModal() {
   const { feedAriaOpen, setFeedAriaOpen } = useAriaStore()
   const [tab, setTab] = useState<FeedTab>('text')
   const [textContent, setTextContent] = useState('')
-  const [url, setUrl] = useState('')
   const [file, setFile] = useState<File | null>(null)
   const [state, setState] = useState<FeedState>('idle')
   const [knowledge, setKnowledge] = useState<Array<{ id: string; title: string; source: string; contentLength: number; chunks?: number }>>([])
@@ -32,24 +31,15 @@ export function FeedAriaModal() {
       toast.error('Paste some text first')
       return
     }
-    if (tab === 'url' && !url.trim()) {
-      toast.error('Paste a URL first')
-      return
-    }
     if (tab === 'pdf' && !file) {
       toast.error('Choose a PDF file first')
       return
     }
 
-    // === EXISTING PATH (text, URL, PDF files) ===
+    // === EXISTING PATH (text, PDF files) ===
     setState('reading')
-    if (tab === 'url') {
-      setTimeout(() => setState('refining'), 2000)
-      setTimeout(() => setState('embedding'), 4000)
-    } else {
-      setState('refining')
-      setTimeout(() => setState('embedding'), 2000)
-    }
+    setState('refining')
+    setTimeout(() => setState('embedding'), 2000)
 
     try {
       let res: Response
@@ -67,7 +57,6 @@ export function FeedAriaModal() {
           body: JSON.stringify({
             type: tab,
             content: textContent,
-            url: url,
           }),
         })
       }
@@ -92,7 +81,7 @@ export function FeedAriaModal() {
           res = await fetch('/api/knowledge', {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ type: tab, content: textContent, url: url, forceReupload: true }),
+            body: JSON.stringify({ type: tab, content: textContent, forceReupload: true }),
           })
         }
         // Re-parse the response from the forced upload
@@ -120,7 +109,6 @@ export function FeedAriaModal() {
       }, ...prev])
 
       setTextContent('')
-      setUrl('')
       setFile(null)
       if (fileInputRef.current) fileInputRef.current.value = ''
 
@@ -218,7 +206,6 @@ export function FeedAriaModal() {
           <div className="flex gap-1 px-8 mt-4 flex-wrap">
             {([
               { id: 'text' as const, label: 'Paste Text', icon: FileText },
-              { id: 'url' as const, label: 'From URL', icon: Link2 },
               { id: 'pdf' as const, label: 'Upload PDF', icon: Upload },
               { id: 'quotes' as const, label: 'Quotes', icon: Quote },
               { id: 'library' as const, label: 'Library', icon: BookMarked },
@@ -282,47 +269,6 @@ export function FeedAriaModal() {
                     <span>✓ {STATE_LABELS.done}</span>
                   ) : (
                     <span>Feed ARIA</span>
-                  )}
-                </button>
-              </div>
-            )}
-
-            {/* URL TAB */}
-            {tab === 'url' && (
-              <div className="space-y-4">
-                <input
-                  type="url"
-                  value={url}
-                  onChange={(e) => setUrl(e.target.value)}
-                  placeholder="https://example.com/article-about-fifa-fantasy"
-                  className="w-full rounded-xl p-4 text-[14px] outline-none transition-colors placeholder:text-[var(--aria-fg-dim)] focus:border-[rgba(245,158,11,0.45)]"
-                  style={{
-                    background: 'var(--aria-bg-panel)',
-                    border: '1px solid var(--aria-border)',
-                    color: 'var(--aria-fg)',
-                    fontFamily: 'inherit',
-                  }}
-                />
-                <p className="text-[11px]" style={{ color: 'var(--aria-fg-dim)' }}>
-                  ARIA will fetch the page, extract the text, refine it, and store it. She'll use this knowledge when you ask related questions.
-                </p>
-                <button
-                  onClick={handleSubmit}
-                  disabled={!url.trim() || state !== 'idle'}
-                  className="w-full py-3 rounded-xl flex items-center justify-center gap-2 text-[14px] font-medium transition-all disabled:opacity-50"
-                  style={{
-                    background: url.trim() ? 'var(--aria-accent)' : 'var(--aria-fg-dim)',
-                    color: 'var(--aria-bg)',
-                    border: 'none',
-                    cursor: url.trim() ? 'pointer' : 'not-allowed',
-                  }}
-                >
-                  {state !== 'idle' && state !== 'done' ? (
-                    <span className="flex items-center gap-2"><Loader2 size={16} className="animate-spin" /> {STATE_LABELS[state]}</span>
-                  ) : state === 'done' ? (
-                    <span>✓ {STATE_LABELS.done}</span>
-                  ) : (
-                    <span>Fetch & Feed ARIA</span>
                   )}
                 </button>
               </div>
