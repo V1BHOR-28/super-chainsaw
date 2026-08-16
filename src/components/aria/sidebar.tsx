@@ -347,7 +347,7 @@ export function Sidebar() {
                 {user?.name || 'friend'}
               </div>
               <div className="text-[11px]" style={{ color: 'var(--aria-fg-dim)' }}>
-                {settings?.currentStreak && settings.currentStreak > 0 ? `🔥 ${settings.currentStreak}-day streak` : `${user?.tier || 'Free'} Tier`}
+                {user?.tier || 'Free'} Tier
               </div>
             </div>
             <ChevronDown size={16} style={{ color: 'var(--aria-fg-muted)' }} />

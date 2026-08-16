@@ -166,9 +166,6 @@ model UserSettings {
   trainingOptIn    Boolean  @default(false)
   autoDestruct     Boolean  @default(false)
   voiceEnabled     Boolean  @default(true)
-  currentStreak    Int      @default(0)
-  longestStreak    Int      @default(0)
-  lastActiveDate   DateTime?
   createdAt        DateTime @default(now())
   updatedAt        DateTime @updatedAt
 
