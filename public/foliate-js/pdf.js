@@ -120,7 +120,6 @@ function createPageSection(pdf, pageNum) {
             body.style.fontFamily = 'serif'
             body.style.margin = '1em'
 
-            // Group text items into paragraphs based on Y position
             const items = textContent.items
             if (items.length === 0) {
                 // No extractable text — probably a scanned/image-only page
@@ -130,41 +129,97 @@ function createPageSection(pdf, pageNum) {
                 p.style.fontStyle = 'italic'
                 body.appendChild(p)
             } else {
-                let currentY = null
-                let currentLine = []
+                // === STEP 1: Group text items into LINES by Y position ===
+                // pdfjs returns text as individual span fragments. Items on the
+                // same visual line share (approximately) the same Y coordinate.
+                // Use a font-size-relative threshold — typical line height is
+                // 1.2× font size, so items within 0.5× font size of each other
+                // vertically are on the same line.
+                const avgFontSize = items.reduce((s, it) => s + (it.height || 12), 0) / items.length
+                const yThreshold = avgFontSize * 0.5
 
+                // Build a map: Y position → list of items on that line
+                const lineMap = new Map()
                 for (const item of items) {
-                    const y = item.transform?.[5]
-                    if (currentY !== null && Math.abs(y - currentY) > 3) {
-                        // New line — flush current line as a paragraph
-                        if (currentLine.length > 0) {
-                            const text = currentLine.join('').trim()
-                            if (text) {
-                                const p = doc.createElement('p')
-                                p.textContent = text
-                                body.appendChild(p)
+                    if (!item.str) continue
+                    const y = item.transform?.[5] ?? 0
+                    // Find an existing line within threshold
+                    let foundKey = null
+                    for (const [existingY] of lineMap) {
+                        if (Math.abs(y - existingY) < yThreshold) {
+                            foundKey = existingY
+                            break
+                        }
+                    }
+                    const key = foundKey ?? y
+                    if (!lineMap.has(key)) lineMap.set(key, [])
+                    lineMap.get(key).push(item)
+                }
+
+                // === STEP 2: Sort lines top-to-bottom and build line text ===
+                // PDF coordinate system: Y=0 at bottom, increasing upward.
+                // Sort descending by Y so top-of-page lines come first.
+                const sortedLines = [...lineMap.entries()]
+                    .sort((a, b) => b[0] - a[0])
+
+                const lines = sortedLines.map(([_, lineItems]) => {
+                    // Sort items left-to-right within the line
+                    lineItems.sort((a, b) =>
+                        (a.transform?.[4] ?? 0) - (b.transform?.[4] ?? 0))
+
+                    // Join items, inserting spaces when there's an X gap
+                    let text = ''
+                    let prevEndX = null
+                    for (const item of lineItems) {
+                        const x = item.transform?.[4] ?? 0
+                        if (prevEndX !== null) {
+                            const gap = x - prevEndX
+                            // Insert a space if the gap is > 0.2× font size
+                            // (covers missing spaces between word fragments)
+                            if (gap > avgFontSize * 0.2 && !text.endsWith(' ')) {
+                                text += ' '
                             }
                         }
-                        currentLine = []
+                        text += item.str
+                        prevEndX = x + (item.width || item.str.length * avgFontSize * 0.5)
                     }
-                    currentY = y
-                    currentLine.push(item.str)
-                    if (item.hasEOL) {
-                        const text = currentLine.join('').trim()
-                        if (text) {
-                            const p = doc.createElement('p')
-                            p.textContent = text
-                            body.appendChild(p)
+                    return text.trim()
+                }).filter(t => t.length > 0)
+
+                // === STEP 3: Group lines into PARAGRAPHS ===
+                // Consecutive lines with small Y gaps are the same paragraph.
+                // A larger Y gap (paragraph break) starts a new <p>.
+                // Use the average line gap to detect paragraph breaks: if the
+                // gap between two lines is > 1.5× the average line gap, it's
+                // a paragraph break.
+                const paragraphs = []
+                let currentParagraph = []
+
+                for (let i = 0; i < lines.length; i++) {
+                    currentParagraph.push(lines[i])
+                    // Check if the NEXT line starts a new paragraph
+                    if (i < lines.length - 1) {
+                        const [y1] = sortedLines[i]
+                        const [y2] = sortedLines[i + 1]
+                        const gap = y1 - y2  // positive: next line is below
+                        // Estimate average line height from font size
+                        const lineGap = avgFontSize * 1.2
+                        // If gap > 1.8× normal line gap → paragraph break
+                        if (gap > lineGap * 1.8) {
+                            paragraphs.push(currentParagraph.join(' '))
+                            currentParagraph = []
                         }
-                        currentLine = []
                     }
                 }
-                // Flush remaining
-                if (currentLine.length > 0) {
-                    const text = currentLine.join('').trim()
-                    if (text) {
+                if (currentParagraph.length > 0) {
+                    paragraphs.push(currentParagraph.join(' '))
+                }
+
+                // === STEP 4: Create <p> elements ===
+                for (const para of paragraphs) {
+                    if (para.trim()) {
                         const p = doc.createElement('p')
-                        p.textContent = text
+                        p.textContent = para
                         body.appendChild(p)
                     }
                 }
