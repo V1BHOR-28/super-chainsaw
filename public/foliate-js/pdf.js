@@ -7,24 +7,26 @@
  * size control, and smooth pagination — better for reading than rendering
  * each page as a fixed image.
  *
- * pdfjs-dist is loaded from a CDN (jsdelivr) because these files live in
- * /public and are served as static ES modules — they can't import from
- * node_modules. The worker is also loaded from the CDN.
+ * pdfjs-dist build files are copied locally into ./vendor/ (same origin as
+ * this module) to avoid CORS/CSP issues with cross-origin dynamic imports.
  */
-
-const PDFJS_VERSION = '4.8.69'
-const PDFJS_CDN = `https://cdn.jsdelivr.net/npm/pdfjs-dist@${PDFJS_VERSION}/build`
-const WORKER_URL = `${PDFJS_CDN}/pdf.worker.min.mjs`
 
 let pdfjsLib = null
 
 async function loadPdfjs() {
     if (pdfjsLib) return pdfjsLib
-    // Dynamic import from CDN — pdfjs-dist v4 ships as an ES module
-    pdfjsLib = await import(/* @vite-ignore */ `${PDFJS_CDN}/pdf.min.mjs`)
-    // Set the worker URL (required for pdfjs-dist to function)
-    pdfjsLib.GlobalWorkerOptions.workerSrc = WORKER_URL
-    return pdfjsLib
+    try {
+        // Import from same-origin — no CORS/CSP issues
+        pdfjsLib = await import('./vendor/pdf.min.mjs')
+        // Set the worker URL (required for pdfjs-dist to function).
+        // Use same-origin worker path.
+        pdfjsLib.GlobalWorkerOptions.workerSrc = new URL('./vendor/pdf.worker.min.mjs', import.meta.url).href
+        console.log('[pdf.js] pdfjs-dist loaded successfully')
+        return pdfjsLib
+    } catch (err) {
+        console.error('[pdf.js] Failed to load pdfjs-dist:', err)
+        throw new Error(`PDF library load failed: ${err.message}`)
+    }
 }
 
 /**
@@ -32,13 +34,17 @@ async function loadPdfjs() {
  * Each PDF page becomes a "section" with extracted text content.
  */
 export async function makePDF(file) {
+    console.log('[pdf.js] makePDF called, file size:', file.size, 'name:', file.name)
     const pdfjs = await loadPdfjs()
     const data = new Uint8Array(await file.arrayBuffer())
+    console.log('[pdf.js] Loading PDF document...')
     const pdf = await pdfjs.getDocument({ data }).promise
+    console.log('[pdf.js] PDF loaded, pages:', pdf.numPages)
 
     const numPages = pdf.numPages
     const metadata = await pdf.getMetadata().catch(() => ({}))
     const info = metadata?.info || {}
+    console.log('[pdf.js] Metadata:', info.Title, info.Author)
 
     // Extract text from all pages (lazy — each section loads on demand)
     const sections = []
@@ -111,8 +117,10 @@ function createPageSection(pdf, pageNum) {
         },
         createDocument: async () => {
             if (cachedDoc) return cachedDoc
+            console.log('[pdf.js] Extracting text from page', pageNum)
             const page = await pdf.getPage(pageNum)
             const textContent = await page.getTextContent()
+            console.log('[pdf.js] Page', pageNum, ':', textContent.items.length, 'text items')
 
             // Build an HTML document with the page's text
             const doc = document.implementation.createHTMLDocument(`Page ${pageNum}`)

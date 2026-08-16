@@ -248,10 +248,11 @@ export function EpubReader() {
         }
       } catch (err) {
         if (!cancelled) {
+          console.error("[epub-reader] Failed to open book:", err);
           setError(
             err instanceof Error
-              ? `Could not load EPUB (${err.message}). Make sure the backend is running.`
-              : "Could not load EPUB.",
+              ? `Could not load book (${err.message}). Make sure the backend is running.`
+              : "Could not load book.",
           );
           setLoading(false);
         }
