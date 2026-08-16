@@ -197,10 +197,16 @@ export function useAudioEngine() {
 
       // In playlist mode, advance to the next chapter. Resumption is handled
       // by onLoadedMetadata (the sole resume point) — no setTimeout needed.
-      // The old setTimeout(..., 100) here was the third source of the
-      // chapter-boundary glitch: it fired blindly 100ms after advancement,
-      // with no check that the new source had actually loaded.
       if (job.chapterMp3s && job.chapterMp3s.length > 0) {
+        // Set the loading guard BEFORE advancing the chapter index. Without
+        // this, a spurious 'timeupdate' event can fire between onEnded
+        // returning and the chapter-load effect running — it would read the
+        // NEW chapter index but the OLD audio's currentTime (at ~duration-3s),
+        // setting store.currentTime to near the END of the new chapter. Then
+        // onLoadedMetadata would seek to that position, making every chapter
+        // start at its last ~3 seconds. Setting this synchronously here
+        // prevents that race.
+        isLoadingNewChapter.current = true;
         usePlayerStore.getState().advanceToNextChapter();
         return;
       }
