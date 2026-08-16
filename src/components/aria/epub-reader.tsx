@@ -209,13 +209,14 @@ export function EpubReader() {
           // first page. For EPUBs with a saved position, the goTo(savedCfi)
           // call below triggers the render. For first-time opens (no saved
           // position) and PDFs, we need to explicitly navigate to the first
-          // section. Using renderer.firstSection() instead of view.init()
-          // because init() → next() → #scrollNext → #turnPage has a code path
-          // that crashes when this.#view is undefined on first render
-          // ("Cannot read properties of undefined (reading 'element')").
-          // firstSection() goes directly to #goTo({index: 0}) which creates
-          // the view via #createView() before accessing it.
-          try {
+          // section.
+          //
+          // No try/catch here — if firstSection() throws (e.g. corrupt PDF,
+          // pdfjs parse failure), the error should propagate to the outer
+          // catch block which calls setError() so the user sees a real error
+          // message instead of a blank panel. Silently catching here was the
+          // pattern that let the pdf.js ReferenceError bug ship unnoticed.
+          {
             const v = viewRef.current as unknown as {
               renderer?: { firstSection?: () => Promise<void> };
             } | null;
@@ -227,8 +228,6 @@ export function EpubReader() {
             if (!hasSavedPosition) {
               await v?.renderer?.firstSection?.();
             }
-          } catch (err) {
-            console.warn("[epub-reader] firstSection failed:", err);
           }
 
           // === AUTO-RESUME: jump to the saved reading position ===
