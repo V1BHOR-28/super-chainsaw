@@ -335,11 +335,26 @@ export async function getVoices(): Promise<VoicesResponse> {
 
 /** Fetch all jobs owned by this client (uses the abm_cid cookie for identity). */
 export async function getMyJobs(): Promise<MyJobsResponse> {
-  const res = await fetch(`${ABM_BASE}/my_jobs`, {
-    credentials: "include",
-  });
+  let res: Response;
+  try {
+    res = await fetch(`${ABM_BASE}/my_jobs`, {
+      credentials: "include",
+    });
+  } catch {
+    // Network-level failure — the proxy itself was unreachable (Docker not
+    // running, backend offline). Surface a clear "engine not online" message
+    // instead of a cryptic "Failed to fetch".
+    throw new Error("Audiobook engine is not online");
+  }
   if (!res.ok) {
-    throw new Error(`My jobs fetch failed (${res.status})`);
+    // 502 = the Next.js proxy reached out to the Flask service but the service
+    // was unreachable (returns "Audiobook service unavailable"). This is the
+    // Docker-offline case. Any other status (404, 500, etc.) is a genuine
+    // backend error — keep the status code so it's diagnosable.
+    if (res.status === 502) {
+      throw new Error("Audiobook engine is not online");
+    }
+    throw new Error(`Audiobook engine error (${res.status})`);
   }
   return (await res.json()) as MyJobsResponse;
 }

@@ -524,7 +524,10 @@ export function LibraryView() {
         ) : error && cards.length === 0 ? (
           <div className="text-center py-20">
             <p className="text-sm" style={{ color: "var(--aria-fg-muted)" }}>
-              Couldn&apos;t load your library — {error}
+              {error}
+            </p>
+            <p className="text-xs mt-1" style={{ color: "var(--aria-fg-dim)" }}>
+              Start the audiobook engine and try again.
             </p>
             <button
               onClick={fetchJobs}
