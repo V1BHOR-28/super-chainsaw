@@ -191,6 +191,11 @@ export function LibraryView() {
   const [uploading, setUploading] = useState(false);
   const [analyzeResponse, setAnalyzeResponse] = useState<AnalyzeResponse | null>(null);
   const [wholeBookJob, setWholeBookJob] = useState<LibraryCard | null>(null);
+  // Tracks whether the current analyzeResponse came from a fresh upload (true)
+  // or from re-opening an existing analyzed job via getJobChapters (false).
+  // When true, closing the selector without converting should delete the job
+  // from the backend so it doesn't linger as 'analyzed' in the library.
+  const [analyzeFromUpload, setAnalyzeFromUpload] = useState(false);
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
   const [resetting, setResetting] = useState<string | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -290,6 +295,7 @@ export function LibraryView() {
         });
       }
       setAnalyzeResponse(resp);
+      setAnalyzeFromUpload(true);
       toast({
         title: "Book analyzed",
         description: `${resp.title} — ${resp.total_chapters} chapters detected`,
@@ -340,6 +346,7 @@ export function LibraryView() {
       try {
         const chaptersResp = await getJobChapters(card.jobId);
         setAnalyzeResponse(chaptersResp);
+        setAnalyzeFromUpload(false);
       } catch (err) {
         console.error("[library-view] could not load chapters", err);
         // Fall back to whole-book mode if the chapter data is unavailable
@@ -411,8 +418,25 @@ export function LibraryView() {
   };
 
   const handleCloseSelector = () => {
+    // If the user closes the selector after a FRESH UPLOAD without starting
+    // conversion, delete the analyzed job from the backend. Otherwise it
+    // lingers in the in-memory jobs dict as 'analyzed' and reappears in the
+    // library on page refresh — annoying for users who uploaded by accident
+    // or changed their mind. Only applies to fresh uploads: re-opening an
+    // existing analyzed job (analyzeFromUpload=false) and closing it should
+    // keep the job in place.
+    if (analyzeFromUpload && analyzeResponse?.job_id) {
+      deleteJob(analyzeResponse.job_id).catch((err) => {
+        console.error("[library-view] failed to clean up analyzed job on close:", err);
+      });
+      // Optimistically remove it from the local card list so it disappears
+      // immediately without waiting for the next fetchJobs poll.
+      const jobId = analyzeResponse.job_id;
+      setCards((prev) => prev.filter((c) => c.jobId !== jobId));
+    }
     setAnalyzeResponse(null);
     setWholeBookJob(null);
+    setAnalyzeFromUpload(false);
   };
 
   const handleConvertStarted = () => {
@@ -426,6 +450,8 @@ export function LibraryView() {
         prev.map((c) => (c.jobId === jobId ? { ...c, status: "generating" } : c)),
       );
     }
+    // Conversion started — the job is now wanted, so don't delete it on close.
+    setAnalyzeFromUpload(false);
     handleCloseSelector();
     fetchJobs();
   };
