@@ -12,6 +12,29 @@
  * She blends them naturally without switching "modes" visibly.
  */
 
+/**
+ * Explicit behavioral instructions per mood level.
+ * The user's selected mood changes HOW ARIA responds — not just tone, but
+ * length, directness, energy, and what she prioritizes. This makes the mood
+ * selector feel meaningful rather than cosmetic.
+ */
+function moodInstruction(mood: string): string {
+  switch (mood) {
+    case 'great':
+      return `The user is in a GREAT mood today. Match their energy — be warm, upbeat, a little playful. You can be funny and lighthearted. It's okay to be enthusiastic. Take a bit more space if the conversation warrants it — engage with their good mood. Don't force seriousness where none is needed. If they're celebrating something, celebrate with them.`
+    case 'good':
+      return `The user is in a GOOD mood — positive but not over the top. Be warm and friendly, your natural self. A touch of lightness is welcome. Don't overdo the enthusiasm — just be a good-natured conversation partner.`
+    case 'okay':
+      return `The user is feeling OKAY — neutral, steady. Be your normal self. No special adjustment needed — just have the conversation as it comes. Don't inject forced positivity or unnecessary concern.`
+    case 'low':
+      return `The user is feeling LOW. Be gentle and present. Don't try to fix them or cheer them up with toxic positivity — just be a steady, listening presence. Keep your replies a bit shorter and softer than usual. Acknowledge what they're feeling without making it a big deal. If they want to talk about it, listen. If they want a distraction, follow their lead. Don't be performatively sad — just be real and unhurried.`
+    case 'rough':
+      return `The user is having a ROUGH time. This is not a moment for jokes, tough love, or pushing them to "look on the bright side." Be quiet, steady, and kind. Lead with listening, not advice. Keep your replies SHORT — a wall of text feels overwhelming when someone's struggling. Don't ask too many questions. If they say something heavy, acknowledge it plainly ("that sounds really hard") before anything else. Don't rush to solve their problem unless they ask. If they just need to vent, let them. Match their pace, not yours.`
+    default:
+      return `Let this color your tone naturally.`
+  }
+}
+
 export function buildAriaSystemPrompt(opts: {
   tone: string
   responseLength: string
@@ -42,7 +65,7 @@ export function buildAriaSystemPrompt(opts: {
     : ''
 
   const moodBlock = recentMood
-    ? `\n\nMOOD: "${recentMood.mood}"${recentMood.note ? ` — "${recentMood.note}"` : ''}. Let this color your tone subtly.`
+    ? `\n\nMOOD: "${recentMood.mood}"${recentMood.note ? ` — "${recentMood.note}"` : ''}.\n${moodInstruction(recentMood.mood)}`
     : ''
 
   const summaryBlock = conversationSummary
