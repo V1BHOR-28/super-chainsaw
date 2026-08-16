@@ -543,10 +543,6 @@ export function LibraryView() {
             <p className="text-sm" style={{ color: "var(--aria-fg-muted)" }}>
               No audiobooks yet.
             </p>
-            <p className="text-xs mt-2" style={{ color: "var(--aria-fg-dim)" }}>
-              Click <span className="font-medium">Upload book</span> above to pick an
-              EPUB — ARIA will analyze it and let you choose which chapters to narrate.
-            </p>
           </div>
         ) : (
           <div>
