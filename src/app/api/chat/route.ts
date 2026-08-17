@@ -676,8 +676,15 @@ export async function POST(req: NextRequest) {
                 throw err
               }
               const data = await res.json()
-              const content = data.choices?.[0]?.message?.content ?? ''
-              if (!content?.trim()) throw new Error('Sarvam: empty content')
+              // Sarvam 105B is a REASONING model — it puts its output in
+              // `reasoning_content` (the chain-of-thought), and `content` is
+              // often null until the reasoning completes. If `content` is
+              // empty/null, fall back to `reasoning_content` so the user
+              // still gets a response instead of "empty content" error.
+              const content = data.choices?.[0]?.message?.content
+                ?? data.choices?.[0]?.message?.reasoning_content
+                ?? ''
+              if (!content?.trim()) throw new Error('Sarvam: empty content (model returned no content and no reasoning_content)')
               return content.trim()
             }
 
