@@ -664,10 +664,18 @@ export async function POST(req: NextRequest) {
                 body: JSON.stringify({
                   model: 'sarvam-105b',
                   messages: sdkMessages,
-                  max_tokens: 1024,
+                  // Sarvam 105B is a reasoning model — it generates a chain-of-thought
+                  // in `reasoning_content` BEFORE writing the final answer in `content`.
+                  // 1024 tokens was too low: the reasoning phase consumed the entire
+                  // budget before `content` could be generated, so users saw raw
+                  // thinking instead of a polished reply. 4096 gives the reasoning
+                  // phase enough room to finish AND produce a proper `content` response.
+                  max_tokens: 4096,
                   temperature: 0.2,
                 }),
-                signal: AbortSignal.timeout(25000),
+                // Sarvam needs a longer timeout too — reasoning models take longer
+                // to respond than standard models. 45s instead of 25s.
+                signal: AbortSignal.timeout(45000),
               })
               if (!res.ok) {
                 const errBody = await res.text().catch(() => '')
