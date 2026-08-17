@@ -73,6 +73,8 @@ agent-ctx/
 
 # ─── Screenshots (dev only) ───
 *.png
+!public/*.png
+!public/**/*.png
 
 # ─── Skills directory (not part of the app) ───
 /skills/
