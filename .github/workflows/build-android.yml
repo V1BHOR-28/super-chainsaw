@@ -110,6 +110,9 @@ jobs:
           KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
           KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
         run: |
+          # Capacitor's build.gradle doesn't read signing.properties by default.
+          # We pass the signing config via gradle command-line properties instead,
+          # so this file is just for debugging the CI build locally.
           printf 'storeFile=../release.keystore\nstorePassword=%s\nkeyAlias=%s\nkeyPassword=%s\n' \
             "$KEYSTORE_PASSWORD" "$KEY_ALIAS" "$KEY_PASSWORD" > android/app/signing.properties
           cat android/app/signing.properties
@@ -117,7 +120,16 @@ jobs:
       - name: Build release APK
         if: env.signed == 'true'
         working-directory: android
-        run: ./gradlew assembleRelease --no-daemon -x lint -x lintVitalRelease
+        env:
+          KEYSTORE_PASSWORD: ${{ secrets.KEYSTORE_PASSWORD }}
+          KEY_ALIAS: ${{ secrets.KEY_ALIAS }}
+          KEY_PASSWORD: ${{ secrets.KEY_PASSWORD }}
+        run: |
+          ./gradlew assembleRelease --no-daemon -x lint -x lintVitalRelease \
+            -Pandroid.injected.signing.storeFile=$PWD/release.keystore \
+            -Pandroid.injected.signing.storePassword="$KEYSTORE_PASSWORD" \
+            -Pandroid.injected.signing.keyAlias="$KEY_ALIAS" \
+            -Pandroid.injected.signing.keyPassword="$KEY_PASSWORD"
 
       - name: Build debug APK
         if: env.signed != 'true'
@@ -154,7 +166,7 @@ jobs:
             URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           fi
           echo "install_url=$URL" >> $GITHUB_ENV
-          pip install --quiet qrcode
+          pip install --quiet qrcode[pil]
           python -c "import qrcode; qrcode.make('$URL').save('install-qr.png')"
 
       - name: Create GitHub Release
