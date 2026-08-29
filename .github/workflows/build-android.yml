@@ -16,7 +16,7 @@ jobs:
     timeout-minutes: 30
 
     env:
-      NEXT_PUBLIC_MOBILE_URL: ${{ vars.MOBILE_URL || 'https://ariaggn.vercel.app' }}
+      NEXT_PUBLIC_MOBILE_URL: "${{ vars.MOBILE_URL || 'https://ariaggn.vercel.app' }}"
 
     steps:
       - name: Checkout
