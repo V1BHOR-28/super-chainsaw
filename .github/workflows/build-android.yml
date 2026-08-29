@@ -96,9 +96,9 @@ jobs:
           cat "$MANIFEST"
 
       - name: Decode signing keystore
-        if: ${{ secrets.KEYSTORE_BASE64 != '' }}
         env:
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
+        if: ${{ env.KEYSTORE_BASE64 != '' }}
         run: |
           echo "$KEYSTORE_BASE64" | base64 -d > android/release.keystore
           echo "signed=true" >> $GITHUB_ENV
