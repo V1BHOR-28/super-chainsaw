@@ -3,15 +3,22 @@
  * to free native plugins. All native calls are no-ops on the web build so the
  * same code paths work everywhere.
  *
- * Free plugins used (all MIT/Apache-2.0):
+ * Free plugins used (all MIT/Apache-2.0, all confirmed published on npm):
  *   - @capacitor/filesystem             → native EPUB/PDF file picker fallback
- *   - @capacitor/preferences            → mirrors Zustand persist → native UserDefaults
- *   - @capacitor-community/biometric-auth → optional app lock
- *   - @capacitor-community/background-audio → iOS BG audio (Android uses Media Session)
+ *   - @capacitor/preferences            → mirror Zustand persist → native UserDefaults
+ *   - @capacitor/status-bar             → status bar styling
  *
- * The plugins are loaded lazily via dynamic import() so the web bundle is not
- * polluted with native-only code. Tree-shaking will exclude these from the
- * browser build entirely.
+ * Android background audio: handled by the existing Media Session API in
+ * use-audio-engine.ts — no extra plugin needed. Lock-screen controls + media
+ * notification work out-of-the-box once AndroidManifest.xml declares the
+ * foreground service permission (patched by the CI workflow).
+ *
+ * iOS lock-screen audio + biometric lock are intentionally NOT shipped in
+ * v0.1 — they require either an Apple Developer account ($99/yr) or a paid
+ * Capacitor plugin. Can be added later if iOS support is needed.
+ *
+ * All native plugin imports are wrapped in try/catch so the web build never
+ * crashes when the packages aren't installed.
  */
 
 import type { MyJob } from "./abm-api";
@@ -36,63 +43,25 @@ export async function isNative(): Promise<boolean> {
 }
 
 /**
- * Tell the iOS BackgroundAudio plugin what's currently playing so the
- * lock-screen media controls work. On Android this is a no-op — Android's
- * Media Session API (already wired up in use-audio-engine.ts) handles
- * lock-screen controls automatically without a native plugin.
+ * Notify any native background-audio plugin about the current track. On
+ * Android this is a no-op — the Media Session API (already wired up in
+ * use-audio-engine.ts) drives the lock-screen media notification natively.
  *
  * Safe to call on every chapter change. Idempotent.
  */
-export async function notifyBackgroundAudioOfMetadata(job: MyJob | null): Promise<void> {
-  if (!job) return;
-  const native = await isNative();
-  if (!native) return;
-
-  // Plugin only needed on iOS — Android uses navigator.mediaSession (handled
-  // in use-audio-engine.ts).
-  const platform = (await import("@capacitor/core")).Capacitor.getPlatform();
-  if (platform !== "ios") return;
-
-  try {
-    const { BackgroundAudio } = await import("@capacitor-community/background-audio");
-    await BackgroundAudio.updateMetadata({
-      artist: job.author || "Unknown author",
-      title: job.title,
-      album: "ARIA Audiobooks",
-      artwork: job.hasCover ? `/api/abm/cover/${job.jobId}` : undefined,
-    });
-  } catch {
-    /* non-blocking */
-  }
+export async function notifyBackgroundAudioOfMetadata(_job: MyJob | null): Promise<void> {
+  // Intentional no-op in v0.1. Android uses navigator.mediaSession (already
+  // wired up in use-audio-engine.ts). iOS would need @capacitor-community/
+  // background-audio but iOS is out of scope for free distribution.
+  return;
 }
 
 /**
- * Optional biometric lock. If the user enabled it, prompt for FaceID/TouchID/
- * fingerprint before unlocking the app. Returns true if access is granted OR
- * if no biometric is enrolled (fails open to never lock users out).
+ * Optional biometric lock. Returns true (fail-open) in v0.1 — no biometric
+ * plugin is shipped. Can be wired up later if needed.
  */
 export async function maybePromptBiometric(): Promise<boolean> {
-  const native = await isNative();
-  if (!native) return true;
-
-  try {
-    const { BiometricAuth } = await import("@capacitor-community/biometric-auth");
-    const available = await BiometricAuth.checkBiometry();
-    if (!available.isAvailable) return true; // fail open
-
-    await BiometricAuth.authenticate({
-      reason: "Unlock ARIA",
-      cancelTitle: "Cancel",
-      allowDeviceCredential: true,
-      iosBiometryType: 0, // 0 = any
-      androidTitle: "Unlock ARIA",
-      androidSubtitle: "Authenticate to continue",
-      androidConfirmationRequired: false,
-    });
-    return true;
-  } catch {
-    return false; // user cancelled — caller decides what to do
-  }
+  return true;
 }
 
 /**
@@ -120,10 +89,13 @@ export async function shouldEnableKeyboardShortcuts(): Promise<boolean> {
   const native = await isNative();
   if (!native) return true; // web — let the user keep shortcuts
 
-  // On a tablet with a hardware keyboard, still allow shortcuts.
-  const platform = (await import("@capacitor/core")).Capacitor.getPlatform();
-  if (platform === "ios" || platform === "android") {
-    return false; // touch-first
+  try {
+    const platform = (await import("@capacitor/core")).Capacitor.getPlatform();
+    if (platform === "ios" || platform === "android") {
+      return false; // touch-first
+    }
+    return true;
+  } catch {
+    return true;
   }
-  return true;
 }
