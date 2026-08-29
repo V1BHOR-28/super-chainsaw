@@ -1,3 +1,26 @@
+# .github/workflows/build-android.yml
+#
+# Free Android APK auto-build + release pipeline for ARIA.
+#
+# Trigger: any push to main OR a manually dispatched run, OR a tag v*.
+# On tag v*, creates a GitHub Release with the signed APK attached.
+# On push to main, uploads the APK as a build artifact (downloadable from
+# the Actions tab) - no Release is created, so users always get the freshest
+# build via the latest-artifact URL.
+#
+# Cost: $0. Public repos get unlimited GitHub Actions minutes.
+#
+# Signing secrets expected:
+#   KEYSTORE_BASE64       base64 of release keystore (.jks)
+#   KEYSTORE_PASSWORD     keystore password
+#   KEY_ALIAS             key alias inside the keystore
+#   KEY_PASSWORD          key password
+# If secrets are missing, falls back to a debug-signed APK.
+#
+# Architecture: the APK is a thin Capacitor WebView shell that loads the
+# deployed Next.js URL (MOBILE_URL repo variable) at runtime via
+# capacitor.config.ts server.url. No Next.js bundle is built here.
+
 name: build-android
 
 on:
