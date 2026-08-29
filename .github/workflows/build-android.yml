@@ -18,8 +18,12 @@
 # If secrets are missing, the workflow falls back to a debug-signed APK
 # (still installable via sideload, but with a different signature each build).
 #
-# See MOBILE.md for instructions on generating the keystore with
-# `npm run mobile:keystore`.
+# Architecture
+# ------------
+# The APK is a thin Capacitor WebView shell — it loads the deployed Next.js
+# URL (MOBILE_URL repo variable) at runtime via capacitor.config.ts's
+# server.url directive. We do NOT need to build a Next.js bundle here — just
+# produce a placeholder out/index.html + sync the native project.
 
 name: build-android
 
@@ -40,20 +44,17 @@ jobs:
 
     env:
       # The deployed Next.js backend URL — the WebView loads this at runtime.
-      # Override per-fork by setting the repo variable MOBILE_URL.
       NEXT_PUBLIC_MOBILE_URL: ${{ vars.MOBILE_URL || 'https://ariaggn.vercel.app' }}
-      NEXT_PUBLIC_MOBILE_APP: "1"
-      NODE_ENV: production
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Setup Node 20
+      - name: Setup Node 22 LTS
         uses: actions/setup-node@v4
         with:
-          node-version: 20
-          cache: npm
+          node-version: 22
+          # NOTE: no cache: npm — this repo uses bun.lock, not package-lock.json
 
       - name: Setup Java 17
         uses: actions/setup-java@v4
@@ -66,26 +67,63 @@ jobs:
         with:
           packages: 'platform-tools platforms;android-34 build-tools;34.0.0'
 
-      - name: Install dependencies
-        run: npm ci --no-audit --no-fund
+      - name: Install Capacitor CLI
+        run: npm install --no-audit --no-fund --no-save @capacitor/cli@^7 @capacitor/core@^7 @capacitor/android@^7
 
-      - name: Generate Prisma client
-        run: npx prisma generate
+      - name: Add Android platform
+        run: npx cap add android || true   # idempotent — skip if already added
 
-      - name: Build Next.js (mobile export)
-        run: npx next build
-        env:
-          NEXT_PUBLIC_MOBILE_APP: "1"
-          # Even though we're exporting, Prisma generates some types that
-          # check for these — supply empty strings so the build doesn't fail.
-          DATABASE_URL: "postgresql://placeholder@localhost:5432/placeholder"
-          NEXTAUTH_SECRET: "ci-build-only-not-used"
-          NEXTAUTH_URL: ${{ env.NEXT_PUBLIC_MOBILE_URL }}
-
-      - name: Install Capacitor CLI + Android platform
+      - name: Create placeholder web bundle
         run: |
-          npx cap add android || true
-          npx cap sync android
+          mkdir -p out
+          cat > out/index.html <<'HTML'
+          <!DOCTYPE html>
+          <html lang="en">
+            <head>
+              <meta charset="utf-8" />
+              <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+              <title>ARIA</title>
+              <style>
+                html, body {
+                  margin: 0; padding: 0; height: 100%;
+                  background: #0a0a0f; color: #fcd96a;
+                  font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+                  display: flex; align-items: center; justify-content: center;
+                }
+                .c { text-align: center; padding: 2rem; }
+                .l { width: 64px; height: 64px; margin: 0 auto 1rem;
+                     border: 3px solid #fcd96a; border-top-color: transparent;
+                     border-radius: 50%; animation: s 1s linear infinite; }
+                @keyframes s { to { transform: rotate(360deg); } }
+                h1 { font-size: 1.2rem; margin: 0 0 0.5rem; font-weight: 500; }
+                p { font-size: 0.875rem; opacity: 0.7; margin: 0; }
+              </style>
+            </head>
+            <body>
+              <div class="c">
+                <div class="l"></div>
+                <h1>ARIA</h1>
+                <p>Connecting…</p>
+              </div>
+              <script>
+                // When server.url is set in capacitor.config.ts, Capacitor loads
+                // that URL instead of this file. This placeholder is only shown
+                // if the remote URL is unreachable.
+                setTimeout(function() {
+                  var u = "${{ env.NEXT_PUBLIC_MOBILE_URL }}";
+                  if (location.href.indexOf(u) === -1) {
+                    window.location.href = u;
+                  }
+                }, 1500);
+              </script>
+            </body>
+          </html>
+          ls -la out/
+
+      - name: Sync Capacitor (reads NEXT_PUBLIC_MOBILE_URL → server.url)
+        run: npx cap sync android
+        env:
+          NEXT_PUBLIC_MOBILE_URL: ${{ env.NEXT_PUBLIC_MOBILE_URL }}
 
       - name: Patch AndroidManifest for foreground audio service
         run: |
@@ -100,18 +138,18 @@ jobs:
               sed -i '/<manifest/a\    <uses-permission android:name="android.permission.WAKE_LOCK" />' "$MANIFEST"
             grep -q 'POST_NOTIFICATIONS' "$MANIFEST" || \
               sed -i '/<manifest/a\    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />' "$MANIFEST"
-            # Add the media service declaration
+            # Add the media service declaration (Android 14+ requires foregroundServiceType)
             grep -q 'MediaSessionService' "$MANIFEST" || \
               sed -i '/<\/application>/i\        <service android:name="androidx.media.session.MediaSessionService" android:exported="false" android:foregroundServiceType="mediaPlayback" />' "$MANIFEST"
           fi
+          cat "$MANIFEST"
 
       - name: Decode signing keystore (if configured)
-        if: env.KEYSTORE_BASE64 != ''
+        if: ${{ secrets.KEYSTORE_BASE64 != '' }}
         env:
           KEYSTORE_BASE64: ${{ secrets.KEYSTORE_BASE64 }}
         run: |
           echo "$KEYSTORE_BASE64" | base64 -d > android/release.keystore
-          echo "keystore-path=android/release.keystore" >> $GITHUB_ENV
           echo "signed=true" >> $GITHUB_ENV
 
       - name: Configure Gradle signing (if keystore present)
@@ -123,8 +161,9 @@ jobs:
           keyAlias=${{ secrets.KEY_ALIAS }}
           keyPassword=${{ secrets.KEY_PASSWORD }}
           EOF
+          cat android/app/signing.properties
 
-      - name: Build release APK
+      - name: Build release APK (signed)
         if: env.signed == 'true'
         working-directory: android
         run: ./gradlew assembleRelease --no-daemon -x lint -x lintVitalRelease
@@ -139,13 +178,13 @@ jobs:
         run: |
           APK=$(find android/app/build/outputs/apk -name '*.apk' -type f | head -1)
           echo "apk_path=$APK" >> $GITHUB_ENV
-          # Determine a clean filename based on the trigger
           if [[ "${{ github.ref }}" == refs/tags/* ]]; then
             VERSION="${GITHUB_REF#refs/tags/}"
           else
             VERSION="nightly-${GITHUB_SHA::7}"
           fi
           echo "apk_name=aria-${VERSION}.apk" >> $GITHUB_ENV
+          echo "Found APK: $APK"
 
       - name: Rename APK
         run: |
@@ -155,26 +194,22 @@ jobs:
       - name: Upload APK as workflow artifact
         uses: actions/upload-artifact@v4
         with:
-          name: aria-android-${{ env.apk_name }}
+          name: aria-android
           path: ${{ env.apk_name }}
           retention-days: 30
           if-no-files-found: error
 
       - name: Generate QR code for install URL
-        id: qr
         run: |
-          # QR encodes the latest-artifact download URL (public repo only).
-          # For tagged releases, the URL is the release asset permalink.
           if [[ "${{ github.ref }}" == refs/tags/* ]]; then
             URL="https://github.com/${{ github.repository }}/releases/download/${GITHUB_REF#refs/tags/}/${apk_name}"
           else
-            URL="https://github.com/${{ github.repository }}/actions/runs/${GITHUB_RUN_ID}"
+            URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
           fi
           echo "install_url=$URL" >> $GITHUB_ENV
-          # Install qrcode generator
           pip install --quiet qrcode
           python -c "import qrcode; qrcode.make('$URL').save('install-qr.png')"
-          echo "qr_path=install-qr.png" >> $GITHUB_ENV
+          echo "QR encoded URL: $URL"
 
       - name: Create GitHub Release (on tag)
         if: startsWith(github.ref, 'refs/tags/v')
@@ -182,11 +217,11 @@ jobs:
         with:
           files: |
             ${{ env.apk_name }}
-            ${{ env.qr_path }}
+            install-qr.png
           body: |
             ## ARIA Android ${{ github.ref_name }}
 
-            Scan the QR code below with your phone's camera, or click the link:
+            Scan the QR code with your phone's camera, or click the link:
 
             👉 [Download APK](${{ env.install_url }})
 
@@ -196,7 +231,6 @@ jobs:
             3. Open ARIA — sign in (or create an account) and you're in
 
             > APK is signed with `${{ env.signed == 'true' && 'release' || 'debug' }}` keys.
-            > Debug builds will warn about "unknown developer" — this is expected for sideload.
 
             ![QR Code](install-qr.png)
           draft: false

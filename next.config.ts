@@ -1,7 +1,5 @@
 import type { NextConfig } from "next";
 
-const isMobileBuild = process.env.NEXT_PUBLIC_MOBILE_APP === "1";
-
 const nextConfig: NextConfig = {
   typescript: {
     ignoreBuildErrors: true,
@@ -11,24 +9,13 @@ const nextConfig: NextConfig = {
   // Next.js 16: serverExternalPackages is the new top-level key (replaces
   // experimental.serverComponentsExternalPackages from Next.js 15)
   serverExternalPackages: ["@prisma/client", "bcryptjs", "resend", "nodemailer", "epub2", "bluebird", "cheerio"],
-  // ─── Mobile-only settings ───
-  // When NEXT_PUBLIC_MOBILE_APP=1 (set by `npm run build:mobile`), export the
-  // Next.js app as a static bundle so Capacitor can package it. The backend
-  // stays on Vercel — the WebView loads `NEXT_PUBLIC_MOBILE_URL` (set as
-  // `server.url` in capacitor.config.ts) instead of the local bundle when
-  // that env var is present, so the static export is only used for offline
-  // fallback / app-store packaging parity.
-  ...(isMobileBuild
-    ? {
-        output: "export" as const,
-        images: { unoptimized: true },
-        // Capacitor WebViews load from capacitor://localhost or https://localhost
-        // — we must mark these as trusted so Next.js Image + Link components
-        // don't reject them.
-        assetPrefix: undefined,
-        trailingSlash: true,
-      }
-    : {}),
+  // NOTE: We intentionally do NOT use `output: "export"` for mobile builds.
+  // The Capacitor WebView loads the deployed Next.js URL directly via
+  // `server.url` in capacitor.config.ts — so the local JS bundle is never
+  // consumed. Building a static export would fail anyway because the app
+  // has many /api/* routes that can't exist in a static export.
+  // The CI workflow creates a minimal placeholder out/index.html for the
+  // Capacitor project to sync against.
 };
 
 export default nextConfig;
