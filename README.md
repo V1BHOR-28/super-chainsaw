@@ -144,6 +144,30 @@ ARIA features 10 hand-curated Kokoro neural voices:
 
 ---
 
+## 📱 Install ARIA on Android (Free, No Play Store)
+
+ARIA ships as a **sideloadable Android APK** — completely free, no Google Play
+account required. Every git tag `v*` triggers a GitHub Actions build that
+produces a signed APK + QR code, auto-published as a GitHub Release.
+
+👉 [**Latest APK download**](https://github.com/V1BHOR-28/super-chainsaw/releases/latest)
+
+Scan the QR code in the latest release with your phone's camera, tap the
+downloaded APK, allow "Install unknown apps" once, and you're in.
+
+### How the mobile wrapper works
+
+The Android app is a thin [Capacitor](https://capacitorjs.com) WebView that
+loads your deployed Next.js URL. All auth, Prisma, NextAuth, the Python TTS
+backend, and the IndexedDB caches stay exactly where they are — the WebView
+just consumes them over HTTPS. Background audiobook playback works via the
+Media Session API (already integrated in `use-audio-engine.ts`).
+
+See [`MOBILE.md`](./MOBILE.md) for the complete free-only setup guide
+(keystore generation, GitHub secrets, CI workflow details).
+
+---
+
 ## 🌐 Experience ARIA
 
 The production deployment of ARIA is live at:

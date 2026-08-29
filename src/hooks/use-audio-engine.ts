@@ -4,6 +4,7 @@ import { useEffect, useRef } from "react";
 import { usePlayerStore } from "@/lib/player-store";
 import { getChapterMp3Url } from "@/lib/abm-api";
 import { getAudioUrl } from "@/lib/audio-cache";
+import { notifyBackgroundAudioOfMetadata } from "@/lib/mobile";
 
 /**
  * Audio engine — playlist player for per-chapter MP3s.
@@ -350,6 +351,10 @@ export function useAudioEngine() {
     } catch {
       /* ignore */
     }
+    // Also notify the native iOS BackgroundAudio plugin so the lock-screen
+    // media controls show the current book's title + cover art. On Android
+    // this is a no-op (the Media Session API above already handles it).
+    notifyBackgroundAudioOfMetadata(currentJob);
   }, [currentJob, currentChapterIdx]);
 
   return null;

@@ -15,6 +15,16 @@ if (!NEXTAUTH_SECRET && process.env.NODE_ENV === 'production') {
 }
 const EFFECTIVE_SECRET = NEXTAUTH_SECRET || 'dev-only-not-for-production'
 
+// Mobile-aware cookie policy.
+// When the app is served inside a Capacitor WebView, the WebView origin
+// (https://localhost or capacitor://localhost) is cross-site relative to
+// the deployed Next.js API (e.g. https://ariaggn.vercel.app). Browsers
+// block third-party cookies unless they are marked SameSite=None; Secure.
+//
+// Web deployments keep the safer `lax` policy. Mobile builds flip to `none`.
+const IS_MOBILE_BUILD = process.env.NEXT_PUBLIC_MOBILE_APP === '1'
+const COOKIE_SAMESITE = IS_MOBILE_BUILD ? 'none' as const : 'lax' as const
+
 /**
  * NextAuth configuration — ARIA's authentication system.
  *
@@ -35,53 +45,53 @@ export const authOptions: NextAuthOptions = {
       name: `next-auth.session-token`,
       options: {
         httpOnly: true,
-        sameSite: 'lax',
+        sameSite: COOKIE_SAMESITE,
         path: '/',
-        secure: process.env.NODE_ENV === 'production',
+        secure: process.env.NODE_ENV === 'production' || IS_MOBILE_BUILD,
       },
     },
     callbackUrl: {
       name: `next-auth.callback-url`,
       options: {
-        sameSite: 'lax',
+        sameSite: COOKIE_SAMESITE,
         path: '/',
-        secure: process.env.NODE_ENV === 'production',
+        secure: process.env.NODE_ENV === 'production' || IS_MOBILE_BUILD,
       },
     },
     csrfToken: {
       name: `next-auth.csrf-token`,
       options: {
         httpOnly: true,
-        sameSite: 'lax',
+        sameSite: COOKIE_SAMESITE,
         path: '/',
-        secure: process.env.NODE_ENV === 'production',
+        secure: process.env.NODE_ENV === 'production' || IS_MOBILE_BUILD,
       },
     },
     pkceCodeVerifier: {
       name: `next-auth.pkce.code-verifier`,
       options: {
         httpOnly: true,
-        sameSite: 'lax',
+        sameSite: COOKIE_SAMESITE,
         path: '/',
-        secure: process.env.NODE_ENV === 'production',
+        secure: process.env.NODE_ENV === 'production' || IS_MOBILE_BUILD,
       },
     },
     state: {
       name: `next-auth.state`,
       options: {
         httpOnly: true,
-        sameSite: 'lax',
+        sameSite: COOKIE_SAMESITE,
         path: '/',
-        secure: process.env.NODE_ENV === 'production',
+        secure: process.env.NODE_ENV === 'production' || IS_MOBILE_BUILD,
       },
     },
     nonce: {
       name: `next-auth.nonce`,
       options: {
         httpOnly: true,
-        sameSite: 'lax',
+        sameSite: COOKIE_SAMESITE,
         path: '/',
-        secure: process.env.NODE_ENV === 'production',
+        secure: process.env.NODE_ENV === 'production' || IS_MOBILE_BUILD,
       },
     },
   },

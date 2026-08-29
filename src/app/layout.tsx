@@ -3,6 +3,7 @@ import { Space_Grotesk, JetBrains_Mono, Instrument_Serif } from "next/font/googl
 import "./globals.css";
 import { Toaster } from "@/components/ui/sonner";
 import { Providers } from "@/components/providers";
+import { MobileBoot } from "@/components/mobile-boot";
 
 const grotesk = Space_Grotesk({
   variable: "--font-grotesk",
@@ -42,6 +43,8 @@ export const viewport: Viewport = {
   width: "device-width",
   initialScale: 1,
   maximumScale: 1,
+  // Required for iOS WebView — lets content extend under the notch
+  viewportFit: "cover",
 };
 
 export default function RootLayout({
@@ -54,6 +57,7 @@ export default function RootLayout({
       <body
         className={`${grotesk.variable} ${jetbrains.variable} ${instrument.variable} antialiased aria-grain`}
       >
+        <MobileBoot />
         <Providers>
           {children}
         </Providers>
