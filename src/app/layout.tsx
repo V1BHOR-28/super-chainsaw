@@ -79,6 +79,9 @@ export const viewport: Viewport = {
   maximumScale: 1,
   // Required for iOS WebView — lets content extend under the notch
   viewportFit: "cover",
+  // Android/Chrome: resize the layout viewport when the on-screen keyboard
+  // opens (iOS is handled by the VisualViewport tracker in use-mobile-viewport).
+  interactiveWidget: "resizes-content",
 };
 
 // iOS PWA splash-screen links — must be raw <link> tags because Next.js

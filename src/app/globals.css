@@ -798,13 +798,140 @@
 }
 
 /* ============================================
+   MOBILE / iOS WEB + PWA FIXES
+   ============================================ */
+
+/* App-shell height that tracks the iOS visual viewport.
+   --app-height is set by use-mobile-viewport.ts (VisualViewport API) and
+   shrinks when the on-screen keyboard opens — 100dvh alone does NOT.
+   Non-iOS platforms fall through to 100dvh, which handles the URL bar. */
+
+/* ---- Chat layout: notch / home-indicator aware paddings -------------- */
+
+@layer utilities {
+  .h-app {
+    height: 100dvh;
+    height: var(--app-height, 100dvh);
+  }
+
+  /* Message list top padding: clears the floating header (56px mobile /
+     60px sm+) + the notch / status bar. Replaces Tailwind pt-16 sm:pt-20. */
+  .chat-scroll-padding {
+    padding-top: calc(64px + env(safe-area-inset-top, 0px));
+  }
+  @media (min-width: 640px) {
+    .chat-scroll-padding {
+      padding-top: calc(80px + env(safe-area-inset-top, 0px));
+    }
+  }
+
+  /* Input zone bottom padding: clears the home indicator.
+     Replaces Tailwind pb-6 sm:pb-8. */
+  .chat-input-padding {
+    padding-bottom: calc(24px + env(safe-area-inset-bottom, 0px));
+  }
+  @media (min-width: 640px) {
+    .chat-input-padding {
+      padding-bottom: calc(32px + env(safe-area-inset-bottom, 0px));
+    }
+  }
+
+  /* Floating chat header: sits below the notch instead of under it. */
+  .chat-header-safe {
+    padding-top: env(safe-area-inset-top, 0px);
+  }
+
+  /* Sidebar drawer (mobile): full-height panel that starts below the notch
+     and ends above the home indicator. */
+  .drawer-safe {
+    padding-top: calc(20px + env(safe-area-inset-top, 0px));
+    padding-bottom: calc(20px + env(safe-area-inset-bottom, 0px));
+  }
+
+  /* Audiobook workspace: top padding that clears the notch. */
+  .ws-safe-top {
+    padding-top: calc(40px + env(safe-area-inset-top, 0px));
+  }
+  @media (min-width: 640px) {
+    .ws-safe-top {
+      padding-top: calc(56px + env(safe-area-inset-top, 0px));
+    }
+  }
+
+  /* Player view: header padding that clears the notch. */
+  .player-safe-top {
+    padding-top: calc(24px + env(safe-area-inset-top, 0px));
+  }
+}
+
+/* Kill the 300ms tap delay + double-tap zoom on interactive elements.
+   Makes the sidebar toggle / buttons feel instant on iOS. */
+button,
+[role="button"],
+a,
+label,
+input,
+textarea,
+select {
+  touch-action: manipulation;
+}
+
+/* iOS Safari: prevent the automatic input-focus zoom. Safari zooms into
+   any input whose font-size is < 16px, which visually "breaks" the whole
+   chat screen when focusing the message box. maximum-scale=1 in the
+   viewport meta is not reliably honored, so enforce a 16px floor on iOS.
+   (max() keeps intentionally-larger inputs unchanged.) */
+@supports (-webkit-touch-callout: none) {
+  textarea,
+  input,
+  select {
+    font-size: max(16px, 1em) !important;
+  }
+}
+
+/* iOS Safari: the film-grain overlay uses mix-blend-mode: overlay, which
+   is a known iOS rendering-glitch trigger (flicker / corrupted repaints
+   while scrolling composited layers). Drop the blend mode on iOS and
+   keep the texture as a plain low-opacity layer. */
+@supports (-webkit-touch-callout: none) {
+  .aria-grain::before {
+    mix-blend-mode: normal;
+    opacity: 0.03;
+  }
+}
+
+/* iOS: hide the tap highlight flash on chrome-y elements (buttons keep
+   their own :active feedback). */
+.is-touch button,
+.is-touch [role="button"] {
+  -webkit-tap-highlight-color: transparent;
+}
+
+/* Make every Tailwind scroll container actually scroll on iOS:
+   momentum touch scrolling + no scroll chaining up to the body. Without
+   this, inner overflow-y-auto regions can feel frozen on iOS because the
+   touch gesture gets eaten by the page-level rubber-band. */
+@layer utilities {
+  .overflow-y-auto {
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior-y: contain;
+  }
+  .overflow-x-auto {
+    -webkit-overflow-scrolling: touch;
+    overscroll-behavior-x: contain;
+  }
+}
+
+/* ============================================
    CAPACITOR WEBVIEW — viewport + scroll fixups
    ============================================ */
 
 html, body {
-  /* Prevent rubber-band scroll on iOS WebView */
+  /* Prevent rubber-band scroll on iOS WebView. NOTE: do NOT put
+     -webkit-overflow-scrolling: touch here — forcing the whole page into
+     a momentum-scroll compositing layer freezes inner overflow containers
+     on iOS. Momentum scrolling is applied per scroll-container above. */
   overscroll-behavior: none;
-  -webkit-overflow-scrolling: touch;
 }
 
 /* When inside a Capacitor WebView, disable text selection on UI chrome

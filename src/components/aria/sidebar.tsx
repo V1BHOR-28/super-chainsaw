@@ -169,19 +169,24 @@ export function Sidebar() {
       {/* Mobile backdrop — clicking it closes the sidebar */}
       {!sidebarCollapsed && (
         <div
-          className="fixed inset-0 z-10 bg-black/50 md:hidden"
+          className="fixed inset-0 z-10 bg-black/60 md:hidden"
           onClick={() => setSidebarCollapsed(true)}
         />
       )}
+      {/* Mobile drawer: explicitly pinned top-0 left-0 with h-app (the
+          keyboard-aware visual-viewport height) — a fixed element without
+          explicit offsets relies on its static position, which iOS treats
+          unpredictably, and h-full resolves against the LARGE viewport so
+          the drawer could extend beneath the home indicator. */}
       <aside
-        className="flex flex-col flex-shrink-0 z-20 transition-all duration-300 overflow-hidden fixed md:relative h-full md:h-auto"
+        className="flex flex-col flex-shrink-0 z-20 transition-all duration-300 overflow-hidden fixed top-0 left-0 h-app md:relative md:h-auto"
         style={{
           width: sidebarCollapsed ? 0 : 260,
           background: 'var(--aria-bg-panel)',
           borderRight: sidebarCollapsed ? 'none' : '1px solid var(--aria-border)',
         }}
     >
-      <div className="w-[260px] h-full flex flex-col p-5">
+      <div className="w-[260px] h-full flex flex-col p-5 drawer-safe">
         {/* Logo */}
         <div
           className="flex items-center gap-2.5 pb-6 px-2 border-b mb-4"
@@ -757,7 +762,11 @@ function ConversationList({
               </div>
               <div
                 className={`flex-shrink-0 transition-opacity ${
-                  active ? 'opacity-100' : 'opacity-0 group-hover:opacity-100'
+                  active
+                    ? 'opacity-100'
+                    // Touch devices have no hover — always show the menu
+                    // button on phones/tablets, keep hover-reveal on desktop.
+                    : 'opacity-100 md:opacity-0 md:group-hover:opacity-100'
                 }`}
               >
                 <button

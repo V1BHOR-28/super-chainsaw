@@ -162,7 +162,7 @@ export default function HomePage() {
   if (authState === 'loading') {
     return (
       <div
-        className="flex items-center justify-center h-dvh"
+        className="flex items-center justify-center h-app"
         style={{ background: 'var(--aria-bg)' }}
       >
         <div className="aria-logo-dot" style={{ animation: 'pulse 2s infinite' }} />
@@ -188,7 +188,10 @@ export default function HomePage() {
   // Fully authenticated + onboarded → the app
   return (
     <>
-      <div className="flex h-dvh w-screen overflow-hidden">
+      {/* App shell — h-app tracks the iOS visual viewport (keyboard-aware
+          via --app-height from use-mobile-viewport); w-full avoids the iOS
+          100vw horizontal-overflow quirk that w-screen has. */}
+      <div className="flex h-app w-full overflow-hidden">
         <Sidebar />
         {activeWorkspace === 'audiobooks' ? (
           <div className="flex-1 overflow-y-auto">

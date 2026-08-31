@@ -106,13 +106,13 @@ export function PlayerView() {
   const progressPct = duration > 0 ? (currentTime / duration) * 100 : 0;
 
   return (
-    <div className="relative min-h-screen flex flex-col overflow-hidden">
+    <div className="relative min-h-full flex flex-col overflow-hidden">
       {/* ambient background tinted to the book's accent */}
       <AmbientGlow color={job.accent} opacity={0.18} size={700} className="-top-40 left-1/2 -translate-x-1/2" />
       <AmbientGlow color="#92400e" opacity={0.12} size={500} className="bottom-0 right-0" />
 
       {/* ============ Top bar ============ */}
-      <header className="relative z-20 flex items-center justify-between px-4 sm:px-8 pt-6 pb-4">
+      <header className="relative z-20 flex items-center justify-between px-4 sm:px-8 player-safe-top pb-4">
         <div className="flex items-center gap-3">
           <button
             onClick={closePlayer}

@@ -184,6 +184,19 @@ export function ChatArea() {
     setInput(e.target.value)
   }
 
+  // On iOS the on-screen keyboard shrinks the app shell (via --app-height).
+  // Give the layout a frame to settle after focus, then keep the latest
+  // message in view so the user can see ARIA's reply while typing.
+  const handleTextareaFocus = () => {
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        if (scrollRef.current && isNearBottomRef.current) {
+          scrollRef.current.scrollTo({ top: scrollRef.current.scrollHeight })
+        }
+      })
+    })
+  }
+
   const handleKeyDown = (e: React.KeyboardEvent) => {
     // Guard against IME composition (CJK / Japanese / Korean input methods):
     // when the user is mid-composition, Enter confirms the candidate, not
@@ -254,8 +267,10 @@ export function ChatArea() {
 
   return (
     <main className="flex-1 flex flex-col relative overflow-hidden" style={{ background: 'var(--aria-bg)' }}>
-      {/* Top bar */}
-      <div className="absolute top-0 left-0 right-0 h-[56px] sm:h-[60px] flex items-center justify-between px-4 sm:px-6 z-10">
+      {/* Top bar — padded below the iOS notch / status bar so the sidebar
+          toggle is actually tappable in PWA standalone mode. */}
+      <div className="absolute top-0 left-0 right-0 z-10 chat-header-safe">
+        <div className="h-[56px] sm:h-[60px] flex items-center justify-between px-4 sm:px-6">
         <button
           onClick={toggleSidebar}
           className="w-9 h-9 rounded-lg flex items-center justify-center transition-colors"
@@ -303,6 +318,7 @@ export function ChatArea() {
           )}
           <UsageMeter />
         </div>
+        </div>
       </div>
 
       {/* Ambient glow */}
@@ -319,8 +335,10 @@ export function ChatArea() {
         }}
       />
 
-      {/* Messages / greeting */}
-      <div ref={scrollRef} className="flex-1 overflow-y-auto pt-16 pb-4 px-4 sm:pt-20 sm:px-6 z-[1] flex flex-col gap-4 sm:gap-6">
+      {/* Messages / greeting — chat-scroll-padding clears the floating
+          header + notch; overscroll contained so touch scrolling works on
+          iOS without rubber-banding the whole page. */}
+      <div ref={scrollRef} className="flex-1 overflow-y-auto chat-scroll-padding pb-4 px-4 sm:px-6 z-[1] flex flex-col gap-4 sm:gap-6">
         {hasMessages ? (
           <>
             {messages.map((m) => (
@@ -351,8 +369,8 @@ export function ChatArea() {
         )}
       </div>
 
-      {/* Input zone */}
-      <div className="px-4 sm:px-6 pb-6 sm:pb-8 z-[2]" style={{ background: 'linear-gradient(to top, var(--aria-bg) 70%, transparent)' }}>
+      {/* Input zone — chat-input-padding clears the iOS home indicator */}
+      <div className="px-4 sm:px-6 chat-input-padding z-[2]" style={{ background: 'linear-gradient(to top, var(--aria-bg) 70%, transparent)' }}>
         <div className="max-w-[720px] mx-auto">
           {/* Pending attachments preview */}
           {pendingAttachments.length > 0 && (
@@ -427,6 +445,7 @@ export function ChatArea() {
                 value={input}
                 onChange={handleInputChange}
                 onKeyDown={handleKeyDown}
+                onFocus={handleTextareaFocus}
                 placeholder="Message ARIA..."
                 rows={1}
                 className="flex-1 bg-transparent border-none outline-none resize-none py-1.5 text-[15px] max-h-[140px] min-h-[24px]"
