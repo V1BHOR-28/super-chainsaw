@@ -257,7 +257,15 @@ that puts an app icon on a real iPhone.**
 
 - **No background audio** — iOS aggressively suspends PWAs when backgrounded.
   Audio playback will stop when the screen locks. (Android WebView via the
-  Capacitor build doesn't have this limitation.)
+  Capacitor build doesn't have this limitation.) Chapters already played once
+  are cached on-device (IndexedDB) and replay offline without the backend.
+- **Audiobook generation survives a locked phone (fire-and-forget)** — the
+  backend refreshes job heartbeats server-side (`ABM_SELF_HEARTBEAT_SEC=30`
+  in docker-compose.yml), so you can start a generation, lock the phone, and
+  come back later to a finished book. The generation runs on your computer,
+  not the phone — only the (tiny) progress poll needs the app open, and even
+  that is optional now. Without this flag, jobs are auto-cancelled ~60s
+  after the last client heartbeat.
 - **No push notifications** — iOS 16.4+ supports web push, but only for apps
   installed from the home screen AND only via the standard Notifications API
   with a user gesture. Limited and flaky.

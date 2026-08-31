@@ -15508,6 +15508,39 @@ CLEANUP_HEARTBEAT_TIMEOUT_SEC = 60          # heartbeat perso per 60s = browser 
 CLEANUP_INTERVAL_SEC = 60                   # check every 60 seconds
 CLEANUP_ORPHAN_DIR_AGE_SEC = 2 * 60 * 60   # cartelle orfane > 2h vengono rimosse
 
+# ARIA: fire-and-forget generation mode. When > 0, a background thread
+# refreshes last_poll for active/done jobs every N seconds server-side, so
+# jobs survive even when NO client is polling (iOS PWA locked = JS suspended
+# = client heartbeats stop; jobs would otherwise be auto-cancelled ~60s
+# later by both the generation-engine heartbeat check and the cleanup loop).
+# Explicit cancel / delete / regen-epoch checks are unaffected, as is the
+# 15-min stale-progress watchdog (dead-worker detection) and retention rules.
+# 0 (default) keeps the original client-driven heartbeat semantics.
+SELF_HEARTBEAT_SEC = int(os.environ.get("ABM_SELF_HEARTBEAT_SEC", "0"))
+
+# Job states the self-heartbeat keeps alive. "analyzed"/"optimized" are
+# intentionally excluded: they only hold RAM (parsed book, no files worth
+# keeping) and already have their own idle-retention rules — keeping them
+# alive forever on a long-running personal server would leak memory.
+SELF_HEARTBEAT_STATUSES = ("optimizing", "translating", "generating", "done")
+
+
+def _self_heartbeat_loop():
+    """Thread: periodically refresh last_poll so jobs never die from
+    'client disconnected' while the server itself is alive."""
+    print(f"[self-heartbeat] Fire-and-forget mode ON: refreshing "
+          f"{SELF_HEARTBEAT_STATUSES} jobs every {SELF_HEARTBEAT_SEC}s", flush=True)
+    while True:
+        time.sleep(SELF_HEARTBEAT_SEC)
+        try:
+            now = time.time()
+            with _jobs_lock:
+                for jid, job in jobs.items():
+                    if job.get("status") in SELF_HEARTBEAT_STATUSES:
+                        job["last_poll"] = now
+        except Exception as e:
+            print(f"[self-heartbeat] error: {e}", flush=True)
+
 
 def _evict_hot_local():
     """Cancella i file di output LOCALI dei job la cui finestra calda è scaduta
@@ -16614,6 +16647,9 @@ def _ensure_background_threads():
     _cleanup_started = True
     threading.Thread(target=get_voices, daemon=True).start()
     threading.Thread(target=_cleanup_supervisor, daemon=True).start()
+    # ARIA: fire-and-forget jobs (survive locked phone / closed browser).
+    if SELF_HEARTBEAT_SEC > 0:
+        threading.Thread(target=_self_heartbeat_loop, daemon=True).start()
     # Recupero job batch interrotti dal riavvio (eseguito una sola volta al boot).
     threading.Thread(target=_recover_orphan_jobs, daemon=True).start()
     if google_tts is not None:

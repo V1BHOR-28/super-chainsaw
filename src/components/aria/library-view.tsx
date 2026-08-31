@@ -274,6 +274,19 @@ export function LibraryView() {
     return () => clearInterval(interval);
   }, [cards, fetchJobs]);
 
+  // Refresh immediately when the app becomes visible again. iOS suspends all
+  // JS when the PWA is locked/backgrounded — the 10s poll loop freezes. On
+  // unlock, fetch right away so a job that finished while the phone was
+  // locked shows up instantly (and its heartbeats resume) instead of waiting
+  // for the next tick.
+  useEffect(() => {
+    const onVisibility = () => {
+      if (document.visibilityState === "visible") fetchJobs();
+    };
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => document.removeEventListener("visibilitychange", onVisibility);
+  }, [fetchJobs]);
+
   const handleUploadClick = () => fileInputRef.current?.click();
 
   const handleFileSelected = async (e: React.ChangeEvent<HTMLInputElement>) => {
