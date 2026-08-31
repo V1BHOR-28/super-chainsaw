@@ -4,6 +4,13 @@ services:
   audiobook:
     build: .
     env_file: .env
+    environment:
+      # ARIA fire-and-forget generation: backend refreshes job heartbeats
+      # itself every 30s, so audiobook jobs survive a locked phone / closed
+      # browser / suspended iOS PWA (client heartbeats stop when locked —
+      # without this, jobs are auto-cancelled after 60s). Takes precedence
+      # over .env. Set 0 to restore client-driven cancellation.
+      - ABM_SELF_HEARTBEAT_SEC=30
     ports:
       - "5601:5601"
     restart: unless-stopped
