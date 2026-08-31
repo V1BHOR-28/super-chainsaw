@@ -485,10 +485,10 @@ export function LibraryView() {
       : null;
 
   return (
-    <div className="relative min-h-screen overflow-hidden">
+    <div className="relative min-h-full overflow-hidden">
       <AmbientGlow color="#f59e0b" opacity={0.1} size={600} className="top-0 right-0" />
 
-      <div className="relative z-10 max-w-7xl mx-auto px-5 sm:px-8 pt-10 sm:pt-14 pb-16">
+      <div className="relative z-10 max-w-7xl mx-auto px-5 sm:px-8 ws-safe-top pb-16">
         {/* Back to chat — exits the audiobook workspace entirely */}
         <button
           onClick={() => setActiveWorkspace("chat")}
