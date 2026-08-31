@@ -51,6 +51,12 @@ export const metadata: Metadata = {
     statusBarStyle: "black-translucent",
     title: "ARIA",
   },
+  // Legacy iOS < 16.4 uses `apple-mobile-web-app-capable` instead of the
+  // modern `mobile-web-app-capable` that Next.js emits. Emit both for max
+  // compatibility — harmless on newer iOS, required on older.
+  other: {
+    "apple-mobile-web-app-capable": "yes",
+  },
   openGraph: {
     title: "ARIA",
     description: "Not a chatbot. A partner that remembers the shape of your thinking.",
