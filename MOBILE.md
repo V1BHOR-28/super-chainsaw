@@ -204,3 +204,76 @@ locally if you want to debug the native shell interactively.
 - [ ] Firebase Cloud Messaging (free) for push notifications
 - [ ] Capacitor native share sheet for "share this chapter"
 - [ ] In-app file picker that uses `@capacitor/filesystem` instead of `<input type="file">`
+
+---
+
+## 📱 iOS: PWA path (free, no Mac, no Apple Developer account)
+
+**Apple does NOT allow self-signed `.ipa` files to be installed on real iPhones.**
+Either you pay Apple $99/year for the Developer Program (then you can build
+signed `.ipa` files via CI), or you use the PWA path — which is what ARIA uses.
+
+A **PWA (Progressive Web App)** is a web page that iOS Safari will install as
+a real home-screen icon, launch fullscreen with no Safari chrome, persist
+storage like a native app, and even work offline. **It is the only $0 path
+that puts an app icon on a real iPhone.**
+
+### How it works
+
+1. The Next.js app serves a `manifest.webmanifest` (see `public/`) that
+   declares `display: "standalone"`, theme color, and icons.
+2. `src/app/layout.tsx` adds `appleWebApp` metadata + raw
+   `<link rel="apple-touch-startup-image" media="..." href="...">` tags for
+   per-iPhone-resolution launch screens.
+3. `src/components/pwa-register.tsx` registers `/sw.js` as a service worker
+   for offline support — required by iOS Safari to offer the install prompt.
+4. User opens `https://ariaggn.vercel.app` in iOS Safari → Share →
+   "Add to Home Screen" → ARIA icon appears alongside native apps.
+
+### Files added for iOS PWA
+
+| File | Purpose |
+|---|---|
+| `public/manifest.webmanifest` | PWA manifest: name, icons, start_url, shortcuts |
+| `public/sw.js` | Minimal offline-capable service worker |
+| `public/icons/icon-{16,32,167,180,192,512}x*.png` | Standard PWA icons |
+| `public/icons/icon-{192,512}x*-maskable.png` | Android adaptive-icon variants |
+| `public/icons/apple-touch-icon.png` | 180×180 Apple home-screen icon |
+| `public/icons/splash-{WxH}.png` | Per-iPhone-resolution launch screens |
+| `public/icons/og-image.png` | 1200×630 OpenGraph / Twitter card |
+| `src/components/pwa-register.tsx` | Client component that registers `/sw.js` |
+| `src/app/layout.tsx` | Metadata: manifest, appleWebApp, splash-screen links |
+
+### How to install on iPhone
+
+1. Open `https://ariaggn.vercel.app` in **Safari** (not Chrome — only Safari
+   can install PWAs on iOS).
+2. Tap the **Share** button (square with up-arrow).
+3. Scroll down and tap **Add to Home Screen**.
+4. Confirm — ARIA's icon appears on your home screen. Tap it to launch
+   fullscreen with no Safari chrome.
+
+### Caveats (iOS PWA limitations to know)
+
+- **No background audio** — iOS aggressively suspends PWAs when backgrounded.
+  Audio playback will stop when the screen locks. (Android WebView via the
+  Capacitor build doesn't have this limitation.)
+- **No push notifications** — iOS 16.4+ supports web push, but only for apps
+  installed from the home screen AND only via the standard Notifications API
+  with a user gesture. Limited and flaky.
+- **Storage limits** — iOS gives PWAs a smaller quota than native apps. Avoid
+  caching huge files in the service worker.
+- **Updates** — Safari checks for SW updates every ~24h. Users may need to
+  close and reopen the app to pick up new versions.
+
+### Regenerating the icon set
+
+If you change the source logo (`public/aria-logo.png`), regenerate the icons:
+
+```bash
+python3 scripts/generate_pwa_icons.py
+```
+
+The script lives in this repo at `scripts/generate_pwa_icons.py` and uses
+Pillow to resize the source into all required PWA / Apple icon / splash
+screen sizes.
