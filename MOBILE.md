@@ -235,7 +235,7 @@ that puts an app icon on a real iPhone.**
 | File | Purpose |
 |---|---|
 | `public/manifest.webmanifest` | PWA manifest: name, icons, start_url, shortcuts |
-| `public/sw.js` | Offline-first service worker (v3 — full install-time precache) |
+| `public/sw.js` | Offline-first service worker (v4 — full precache + non-destructive updates) |
 | `public/icons/icon-{16,32,167,180,192,512}x*.png` | Standard PWA icons |
 | `public/icons/icon-{192,512}x*-maskable.png` | Android adaptive-icon variants |
 | `public/icons/apple-touch-icon.png` | 180×180 Apple home-screen icon |
@@ -253,22 +253,31 @@ that puts an app icon on a real iPhone.**
 4. Confirm — ARIA's icon appears on your home screen. Tap it to launch
    fullscreen with no Safari chrome.
 
-### Offline mode (service worker v3)
+### Offline mode (service worker v4)
 
 The app is **offline-first**: it opens and plays your saved audiobooks with
 zero internet — airplane mode, backend stopped, whatever.
 
 How it works:
-- The service worker (`public/sw.js`, v3) caches the app shell, **every
+- The service worker (`public/sw.js`, v4) caches the app shell, **every
   Next.js JS/CSS/font chunk the shell references** (parsed at install time —
   this was the v2 white-screen bug: chunks were only cached at runtime, and
   the first visit after a deploy loaded them before the SW activated, so
-  the offline boot had HTML but zero scripts), your auth session, and the
+  the offline boot had HTML but zero scripts), your auth session, the
   library job list (Set-Cookie headers are stripped before caching — Safari
   rejects cookie-carrying responses, which silently broke the v2 jobs
-  cache). Opening
+  cache), the **complete EPUB reader engine (foliate-js)**, and **per-book
+  chapter lists + covers for every book in your library** — so the reader
+  and the player's book metadata work offline after a single online visit
+  (this was the v3 bug: the reader engine and book metadata were only
+  runtime-cached, and the v3 update wiped them). Opening
   the PWA offline boots straight into the app instead of a blank screen.
 - Chapter audio is stored as blobs in IndexedDB (`src/lib/audio-cache.ts`).
+- **Updates are non-destructive**: when a new service-worker version
+  activates, cached offline assets (reader engine, book metadata, covers,
+  BGM, icons) are migrated into the new version's caches instead of being
+  wiped. Only immutable build chunks are discarded (they belong to the old
+  deploy).
 - If the cache is ever incomplete (e.g. you went offline before ever opening
   the app online since the last deploy), the SW serves a small branded
   "You're offline" page explaining the one-time online visit — never a
@@ -283,7 +292,11 @@ How it works:
 What works offline:
 - App boots (shell + session + library from cache; header shows OFFLINE)
 - Playing any book that was saved offline (IndexedDB, no network)
-- Reading EPUBs previously opened (epub-cache, IndexedDB)
+- **Opening any book** — its chapter list + cover are cached for the whole
+  library at install time
+- Reading EPUBs previously opened (epub-cache, IndexedDB) — the reader
+  engine itself is cached too, so the reader opens offline even for a
+  fresh install
 - Playback position memory, reading positions, settings
 
 What needs internet:
@@ -294,8 +307,9 @@ What needs internet:
 
 First-run rule: open the app **online once** after each deploy and leave it
 a few seconds — the service worker installs and precaches the full shell
-(HTML + all JS chunks + session + library list) in the background during
-that visit. After that, offline works until the next deploy.
+(HTML + all JS chunks + session + library list + reader engine + every
+book's chapter list and cover) in the background during that visit. After
+that, offline works until the next deploy.
 
 **Offline white screen?** It means the current install was never opened
 online since the last deploy (nothing is cached yet). Reconnect, open ARIA,
