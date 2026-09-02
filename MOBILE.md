@@ -253,6 +253,39 @@ that puts an app icon on a real iPhone.**
 4. Confirm — ARIA's icon appears on your home screen. Tap it to launch
    fullscreen with no Safari chrome.
 
+### Offline mode (service worker v2)
+
+The app is **offline-first**: it opens and plays your saved audiobooks with
+zero internet — airplane mode, backend stopped, whatever.
+
+How it works:
+- The service worker (`public/sw.js`, v2) caches the app shell, all
+  Next.js JS chunks, your auth session, and the library job list. Opening
+  the PWA offline boots straight into the app instead of a blank screen.
+- Chapter audio is stored as blobs in IndexedDB (`src/lib/audio-cache.ts`).
+- **Save a whole book offline**: open the book in the player → Chapters
+  panel → **Save offline**. Every chapter MP3 downloads to the device
+  (skips already-cached chapters, resumable). A green "Offline ready"
+  state confirms the book will play with no network.
+- The download also requests `navigator.storage.persist()` so iOS is less
+  likely to evict the audio cache under storage pressure.
+
+What works offline:
+- App boots (shell + session + library from cache; header shows OFFLINE)
+- Playing any book that was saved offline (IndexedDB, no network)
+- Reading EPUBs previously opened (epub-cache, IndexedDB)
+- Playback position memory, reading positions, settings
+
+What needs internet:
+- Generating new audiobooks (your computer's Docker backend)
+- Chat (LLM APIs)
+- Chapters never played/downloaded before
+- New deploys of the app itself
+
+First-run rule: open the app **online once** after each deploy so the new
+service worker version installs and caches the fresh shell. After that,
+offline works until the next deploy.
+
 ### Caveats (iOS PWA limitations to know)
 
 - **No background audio** — iOS aggressively suspends PWAs when backgrounded.
@@ -269,8 +302,9 @@ that puts an app icon on a real iPhone.**
 - **No push notifications** — iOS 16.4+ supports web push, but only for apps
   installed from the home screen AND only via the standard Notifications API
   with a user gesture. Limited and flaky.
-- **Storage limits** — iOS gives PWAs a smaller quota than native apps. Avoid
-  caching huge files in the service worker.
+- **Storage limits** — iOS gives PWAs a smaller quota than native apps
+  (usually 1-2GB+; a full offline book is typically 4-40MB). The storage
+  persistence grant mitigates eviction, but don't hoard dozens of books.
 - **Updates** — Safari checks for SW updates every ~24h. Users may need to
   close and reopen the app to pick up new versions.
 
