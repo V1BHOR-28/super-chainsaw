@@ -12,6 +12,7 @@ import {
   CheckCircle2,
   Trash2,
   RotateCcw,
+  WifiOff,
 } from "lucide-react";
 import { AmbientGlow, GradientText } from "./primitives";
 import { ScrollReveal } from "./scroll-reveal";
@@ -141,6 +142,24 @@ export function LibraryView() {
   const setActiveWorkspace = useAriaStore((s) => s.setActiveWorkspace);
   const STORAGE_KEY = "aria-audiobook-library";
   const DELETED_KEY = "aria-audiobook-deleted";
+
+  // Online/offline tracking — drives the "OFFLINE" chip in the header. When
+  // offline, the SW serves the last cached my_jobs response, so the library
+  // still renders; the chip just tells the user why nothing is refreshing.
+  const [offline, setOffline] = useState(false);
+  useEffect(() => {
+    const update = () => setOffline(!navigator.onLine);
+    update();
+    window.addEventListener("offline", update);
+    window.addEventListener("online", update);
+    // Some browsers don't fire reliably — also poll on visibility changes.
+    document.addEventListener("visibilitychange", update);
+    return () => {
+      window.removeEventListener("offline", update);
+      window.removeEventListener("online", update);
+      document.removeEventListener("visibilitychange", update);
+    };
+  }, []);
 
   // Load from localStorage on mount — instant display before the API responds.
   const [cards, setCards] = useState<LibraryCard[]>(() => {
@@ -514,8 +533,24 @@ export function LibraryView() {
         <ScrollReveal>
           <div className="flex flex-col sm:flex-row sm:items-end justify-between gap-4 mb-10">
             <div>
-              <div className="font-mono text-[11px] tracking-[0.2em] uppercase text-[var(--aria-accent-glow)] mb-3">
-                The library
+              <div className="flex items-center gap-3 mb-3">
+                <div className="font-mono text-[11px] tracking-[0.2em] uppercase text-[var(--aria-accent-glow)]">
+                  The library
+                </div>
+                {offline && (
+                  <span
+                    className="flex items-center gap-1.5 text-[10px] font-mono tracking-wide px-2 py-0.5 rounded-full"
+                    style={{
+                      color: "var(--aria-fg-muted)",
+                      border: "1px solid var(--aria-border)",
+                      background: "rgba(255,255,255,0.03)",
+                    }}
+                    title="No internet connection. Showing your library from cache — books saved offline keep playing."
+                  >
+                    <WifiOff size={10} />
+                    OFFLINE
+                  </span>
+                )}
               </div>
               <h1 className="font-serif text-4xl sm:text-5xl tracking-tight leading-none">
                 Stories worth{" "}
