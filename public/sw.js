@@ -1,55 +1,71 @@
 /* eslint-disable */
 /**
- * ARIA service worker v3 — offline-first, install-time complete.
+ * ARIA service worker v4 — offline-first, complete offline media layer.
  *
- * v2 had a fatal race: it precached the shell HTML at install but relied on
- * RUNTIME caching for the /_next/static/ JS chunks. On the first visit after
- * a deploy, the page loads its chunks BEFORE the new service worker
- * activates, so those chunks were never intercepted and never cached.
- * Offline: the shell HTML loaded from cache, every script request failed,
- * React never booted → white screen stuck forever.
+ * v3 fixed the offline white screen (install-time precache of the shell +
+ * all /_next/static chunks) but audio + EPUB reading still broke offline:
  *
- * v3 fixes the boot chain end-to-end:
- *   - INSTALL precaches the shell AND every /_next/static/ chunk the shell
- *     HTML references (scripts, styles, fonts, modulepreloads) — one online
- *     visit after a deploy is now genuinely enough.
- *   - INSTALL also warms /api/auth/session + /api/abm/my_jobs (cookies are
- *     included, Set-Cookie stripped so Safari's cache.put doesn't reject),
- *     so the app boots authenticated with the library visible offline.
- *   - ACTIVATE heals: if the shell didn't land at install (flaky network,
- *     mid-deploy 503), it is retried — no SW byte-change needed.
- *   - Navigation offline falls back to shell → then to a small inline
- *     branded offline page, so the app NEVER shows a blank white screen.
+ *   BUG A (reader):  foliate-js (the EPUB rendering engine) was only
+ *     runtime-cached — and v3's activate handler DELETED the v2 asset cache
+ *     that contained it, so offline the reader's module import failed and
+ *     the panel hung on its loading spinner forever.
+ *   BUG B (audio):   per-book metadata (job_chapters) and covers were
+ *     stale-while-revalidate entries that only existed if the book had been
+ *     opened online while the CURRENT sw version was active — v3's cache
+ *     wipe destroyed v2's entries, so offline library → player was degraded.
+ *   BUG C (audio):   chapters never played while online are not in the
+ *     IndexedDB audio cache and can never stream offline (the backend is
+ *     unreachable) — the app now degrades with a clear per-book state.
  *
- * Runtime strategies (unchanged from v2):
- *   - /_next/static/* (immutable, content-hashed): CACHE-FIRST.
- *   - Other static assets (/icons, /bgm, /foliate-js, ...): CACHE-FIRST.
- *   - Navigation (HTML): NETWORK-FIRST so deploys arrive promptly, falling
- *     back to the cached shell when offline. Every successful navigation
- *     refreshes the cached shell (under its own URL and under "/"), so the
- *     offline copy tracks deploys.
- *   - GET /api/auth/session + /api/abm/my_jobs: NETWORK-FIRST with offline
- *     cache fallback.
- *   - GET /api/abm/cover/* + /api/abm/job_chapters/*: STALE-WHILE-
- *     REVALIDATE.
- *   - Everything else (POSTs, chapter_mp3 streams, SSE, /api/chat, ...):
- *     passthrough — never cached here.
+ * v4 fixes:
+ *   - INSTALL precaches the complete foliate-js EPUB engine (8 files,
+ *     ~180KB) so the reader works offline from the first install.
+ *   - INSTALL parses the warmed my_jobs list and prefetches
+ *     job_chapters/<id> + cover/<id> for EVERY book — the whole library
+ *     metadata + cover set is offline after one online visit.
+ *   - ACTIVATE is now non-destructive: entries from the previous version's
+ *     caches (foliate-js, bgm, icons, job_chapters, covers … everything
+ *     except immutable /_next chunks) are MIGRATED into the new caches
+ *     before the old caches are deleted, so deploys no longer wipe assets
+ *     the app needs offline.
+ *   - Navigation fallback chain (exact URL → "/" shell → branded offline
+ *     page) kept from v3; Set-Cookie sanitizer kept from v3.
  *
- * Chapter MP3s are deliberately excluded from the SW: they are large, need
- * HTTP Range support, and are already cached as blobs in IndexedDB by
- * audio-cache.ts ("Save offline" in the Chapters panel).
+ * Runtime strategies (unchanged):
+ *   - /_next/static/* + static prefixes + foliate-js: CACHE-FIRST.
+ *   - Navigation: NETWORK-FIRST, cached shell fallback.
+ *   - /api/auth/session + /api/abm/my_jobs: NETWORK-FIRST w/ offline cache.
+ *   - /api/abm/cover/* + job_chapters/*: STALE-WHILE-REVALIDATE.
+ *   - POSTs / chapter_mp3 streams / SSE: passthrough (audio bytes live in
+ *     the app's IndexedDB blob cache — audio-cache.ts / "Save offline").
  */
 
-const VERSION = "aria-pwa-v3";
+const VERSION = "aria-pwa-v4";
 const SHELL_CACHE = `aria-shell-${VERSION}`; // "/" HTML + manifest + icons
-const ASSET_CACHE = `aria-assets-${VERSION}`; // /_next/static + static assets
-const API_CACHE = `aria-api-${VERSION}`; // session + my_jobs + covers
+const ASSET_CACHE = `aria-assets-${VERSION}`; // /_next/static + foliate + static
+const API_CACHE = `aria-api-${VERSION}`; // session + my_jobs + chapters + covers
 
 const SHELL_URLS = [
   "/manifest.webmanifest",
   "/icons/apple-touch-icon.png",
   "/icons/icon-192x192.png",
   "/icons/icon-512x512.png",
+];
+
+// The complete foliate-js EPUB engine: view.js statically imports the first
+// five; epub.js + paginator.js + vendor/zip.js are dynamically imported when
+// a book is opened. Total ~180KB — cheap to precache, priceless offline.
+// (pdf.js + its vendor bundle are intentionally excluded: heavy, and only
+// needed for PDF reading — runtime caching + migration cover them.)
+const FOLIATE_URLS = [
+  "/foliate-js/view.js",
+  "/foliate-js/epubcfi.js",
+  "/foliate-js/progress.js",
+  "/foliate-js/overlayer.js",
+  "/foliate-js/text-walker.js",
+  "/foliate-js/epub.js",
+  "/foliate-js/paginator.js",
+  "/foliate-js/vendor/zip.js",
 ];
 
 const API_WARM_URLS = ["/api/auth/session", "/api/abm/my_jobs"];
@@ -65,7 +81,7 @@ const STATIC_PREFIXES = [
   "/manifest.webmanifest",
 ];
 
-/** Inline last-resort page — replaces v2's bare 503 white screen. */
+/** Inline last-resort page — never a blank white screen. */
 const OFFLINE_HTML = `<!doctype html><html lang="en"><head><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
 <title>ARIA — Offline</title><style>
@@ -145,15 +161,30 @@ function extractNextAssetUrls(html) {
   return Array.from(found);
 }
 
+/** Fetch + cache a URL with credentials; returns the JSON text or null. */
+async function warmJson(url) {
+  try {
+    const res = await fetch(new Request(url, { credentials: "same-origin" }));
+    if (!res.ok) return null;
+    const clone = res.clone();
+    putInCache(API_CACHE, url, res);
+    return await clone.text();
+  } catch (e) {
+    return null;
+  }
+}
+
 /**
- * v3 heart: at install (and as an activate-time heal), fetch the shell HTML,
- * cache it, then precache EVERY /_next/static/ chunk it references, then warm
- * the session + jobs API responses. All failures are non-fatal.
+ * v4 heart: complete install-time precache.
+ *   shell HTML + every /_next chunk it references + manifest/icons +
+ *   the full foliate-js engine + session + my_jobs +
+ *   job_chapters/cover for every book in my_jobs.
  */
 async function precacheShell() {
   const shellCache = await caches.open(SHELL_CACHE);
+  const assetCache = await caches.open(ASSET_CACHE);
 
-  // 1. Shell HTML — one fetch, used both for the cache and for parsing.
+  // 1. Shell HTML
   let html = null;
   try {
     const res = await fetch(new Request("/", { cache: "reload", credentials: "same-origin" }));
@@ -166,7 +197,7 @@ async function precacheShell() {
     /* non-fatal — activate-time heal will retry */
   }
 
-  // 2. Manifest + core icons (individually, so one 404 can't kill install).
+  // 2. Manifest + core icons
   await Promise.all(
     SHELL_URLS.map(async (url) => {
       try {
@@ -177,39 +208,130 @@ async function precacheShell() {
     })
   );
 
-  // 3. THE v3 FIX — precache every chunk the shell references. Without this,
-  // the first visit after a deploy left the chunks uncached (the page loaded
-  // them before this SW activated) and offline boot = white screen.
+  // 3. Every /_next/static chunk the shell references (v3 fix)
   if (html) {
     const refs = extractNextAssetUrls(html);
-    const assetCache = await caches.open(ASSET_CACHE);
     await Promise.all(
       refs.map(async (path) => {
         try {
-          // Immutable + content-hashed: the HTTP cache may legally serve these.
           await assetCache.add(path);
         } catch (e) {
-          /* non-fatal — runtime cacheFirst still backfills on later visits */
+          /* non-fatal — runtime cacheFirst still backfills */
         }
       })
     );
   }
 
-  // 4. Warm the API responses the offline boot needs. Credentials are
-  // included (same-origin) so a logged-in session/library snapshot lands in
-  // the cache; every later online load refreshes it via network-first.
+  // 4. The complete foliate-js EPUB engine (v4 fix — BUG A)
   await Promise.all(
-    API_WARM_URLS.map(async (url) => {
+    FOLIATE_URLS.map(async (url) => {
       try {
-        const res = await fetch(new Request(url, { credentials: "same-origin" }));
-        if (res.ok) {
-          await putInCache(API_CACHE, url, res);
-        }
+        await assetCache.add(new Request(url, { cache: "reload" }));
       } catch (e) {
-        /* non-fatal */
+        /* non-fatal — migration may restore it from the previous version */
       }
     })
   );
+
+  // 5. Warm session + my_jobs (v3 fix)
+  const jobsText = await warmJson("/api/abm/my_jobs");
+  await warmJson("/api/auth/session");
+
+  // 6. Warm job_chapters + cover for EVERY book in the library (v4 fix —
+  //    BUG B): parse the my_jobs JSON we just fetched and prefetch each
+  //    book's metadata + cover. ~1 request per book, all non-fatal.
+  if (jobsText) {
+    try {
+      const data = JSON.parse(jobsText);
+      const jobs = (data && data.jobs) || [];
+      await Promise.all(
+        jobs.map(async (job) => {
+          const id = job && job.job_id;
+          if (!id || typeof id !== "string" || !/^[A-Za-z0-9_-]{6,}$/.test(id)) return;
+          warmJson(`/api/abm/job_chapters/${id}`).catch(() => {});
+          // covers: plain binary — cache directly, only if the book has one
+          if (job.has_cover) {
+            try {
+              const res = await fetch(new Request(`/api/abm/cover/${id}`, { credentials: "same-origin" }));
+              if (res.ok) putInCache(API_CACHE, `/api/abm/cover/${id}`, res);
+            } catch (e) {
+              /* non-fatal */
+            }
+          }
+        })
+      );
+    } catch (e) {
+      /* non-fatal — my_jobs parse issue */
+    }
+  }
+}
+
+/**
+ * v4 non-destructive version upgrade (BUG C / regression guard): before
+ * deleting the previous version's caches, MIGRATE their entries into the
+ * new caches (existing new entries win). Immutable /_next/static chunks are
+ * NOT migrated (they belong to the old build); everything else — foliate
+ * engine, bgm, icons, job_chapters, covers, my_jobs — is preserved so a
+ * deploy never strips assets the offline app depends on.
+ */
+async function migrateOldCaches() {
+  const keys = await caches.keys();
+  const oldKeys = keys.filter(
+    (key) => key.startsWith("aria-") && !key.endsWith(VERSION)
+  );
+  if (!oldKeys.length) return;
+
+  const shellCache = await caches.open(SHELL_CACHE);
+  const assetCache = await caches.open(ASSET_CACHE);
+  const apiCache = await caches.open(API_CACHE);
+  const newAssetKeys = new Set(
+    (await assetCache.keys()).map((r) => new URL(r.url).pathname)
+  );
+  const newApiKeys = new Set(
+    (await apiCache.keys()).map((r) => new URL(r.url).pathname)
+  );
+  const newShellKeys = new Set(
+    (await shellCache.keys()).map((r) => new URL(r.url).pathname)
+  );
+
+  for (const key of oldKeys) {
+    try {
+      const old = await caches.open(key);
+      const entries = await old.keys();
+      for (const req of entries) {
+        const path = new URL(req.url).pathname;
+        try {
+          if (key.includes("-shell-")) {
+            if (!newShellKeys.has(path)) {
+              const res = await old.match(req);
+              if (res) await shellCache.put(req, res);
+              newShellKeys.add(path);
+            }
+          } else if (key.includes("-assets-")) {
+            if (path.startsWith("/_next/static/")) continue; // old build
+            if (!newAssetKeys.has(path)) {
+              const res = await old.match(req);
+              if (res) await assetCache.put(req, res);
+              newAssetKeys.add(path);
+            }
+          } else if (key.includes("-api-")) {
+            if (!newApiKeys.has(path)) {
+              const res = await old.match(req);
+              if (res) await apiCache.put(req, res);
+              newApiKeys.add(path);
+            }
+          }
+        } catch (e) {
+          /* non-fatal — entry skipped */
+        }
+      }
+    } catch (e) {
+      /* non-fatal — cache skipped */
+    }
+  }
+
+  // Old caches are now fully merged — safe to delete.
+  await Promise.all(oldKeys.map((key) => caches.delete(key)));
 }
 
 /** Cache-first (for immutable /_next/static and static assets). */
@@ -289,7 +411,7 @@ async function handleNavigation(request) {
   }
 }
 
-// ----- INSTALL: precache the complete app shell -----
+// ----- INSTALL: precache the complete offline app -----
 self.addEventListener("install", (event) => {
   event.waitUntil(
     (async () => {
@@ -299,10 +421,15 @@ self.addEventListener("install", (event) => {
   );
 });
 
-// ----- ACTIVATE: clean old caches + heal + claim -----
+// ----- ACTIVATE: migrate old caches, clean up, heal, claim -----
 self.addEventListener("activate", (event) => {
   event.waitUntil(
     (async () => {
+      // 1. Non-destructive migration of the previous version's entries,
+      //    then deletion of the old caches.
+      await migrateOldCaches();
+
+      // 2. Remove any OTHER stale aria-* caches (e.g. from aborted installs).
       const keys = await caches.keys();
       await Promise.all(
         keys
@@ -310,9 +437,8 @@ self.addEventListener("activate", (event) => {
           .map((key) => caches.delete(key))
       );
 
-      // Heal: if the shell didn't land at install time (flaky network, a
-      // mid-deploy 503, or the app being closed mid-install), retry now so
-      // offline works without waiting for another SW byte-change.
+      // 3. Heal: if the shell didn't land at install time (flaky network,
+      //    mid-deploy 503, app closed mid-install), retry now.
       try {
         const shellCache = await caches.open(SHELL_CACHE);
         if (!(await shellCache.match("/"))) {
@@ -343,7 +469,7 @@ self.addEventListener("fetch", (event) => {
     return;
   }
 
-  // 2. Immutable build assets + static assets — cache-first
+  // 2. Immutable build assets + static assets + foliate engine — cache-first
   if (STATIC_PREFIXES.some((p) => url.pathname.startsWith(p))) {
     event.respondWith(cacheFirst(request, ASSET_CACHE));
     return;
