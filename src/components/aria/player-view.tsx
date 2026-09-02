@@ -22,6 +22,9 @@ import {
   SkipForward,
   BookOpen,
   Music,
+  Download,
+  CloudOff,
+  Loader2,
 } from "lucide-react";
 import { usePlayerStore } from "@/lib/player-store";
 import { useAriaStore } from "@/lib/store";
@@ -32,6 +35,7 @@ import { NowPlayingBars } from "./waveform";
 import { BookCover } from "./book-cover";
 import { EpubReader } from "./epub-reader";
 import { getJobChapters, type AnalyzeResponse, type ChapterMp3Info } from "@/lib/abm-api";
+import { useOfflineDownload } from "@/hooks/use-offline-download";
 
 /**
  * PlayerView — plays the single MP3 produced by the audiobook-maker Flask
@@ -954,6 +958,103 @@ function SettingsPanel() {
 
 /* ============ Chapters browser panel ============ */
 
+/**
+ * OfflineSaveRow — "Save this book offline" control in the Chapters panel.
+ *
+ * Downloads every chapter MP3 into the persistent IndexedDB cache so the
+ * whole book plays with zero network (airplane mode, backend stopped, etc).
+ * Cached chapters are skipped, so re-running after a partial failure
+ * resumes instead of restarting. Once fully saved, shows a green
+ * "Offline ready" state; the button stays available to refresh (e.g. after
+ * regenerating the book with more chapters).
+ */
+function OfflineSaveRow() {
+  const { status, progress, downloadAll } = useOfflineDownload();
+
+  if (status === "checking") {
+    return (
+      <div className="flex items-center justify-center gap-2 px-4 py-2.5 border-b border-[var(--aria-border)] text-xs" style={{ color: "var(--aria-fg-dim)" }}>
+        <Loader2 size={12} className="animate-spin" />
+        Checking offline copy…
+      </div>
+    );
+  }
+
+  if (status === "downloading") {
+    const pct = progress.total > 0 ? Math.round((progress.done / progress.total) * 100) : 0;
+    return (
+      <div className="px-4 py-2.5 border-b border-[var(--aria-border)]">
+        <div className="flex items-center justify-between text-xs mb-1.5" style={{ color: "var(--aria-fg-muted)" }}>
+          <span className="flex items-center gap-1.5">
+            <Loader2 size={12} className="animate-spin" style={{ color: "var(--aria-accent-glow)" }} />
+            Saving offline…
+          </span>
+          <span className="font-mono text-[10px]">
+            {progress.done}/{progress.total} · {pct}%
+          </span>
+        </div>
+        <div className="h-1.5 rounded-full overflow-hidden" style={{ background: "rgba(255,255,255,0.08)" }}>
+          <div
+            className="h-full rounded-full transition-all duration-300"
+            style={{ width: `${pct}%`, background: "var(--aria-accent)" }}
+          />
+        </div>
+      </div>
+    );
+  }
+
+  if (status === "done") {
+    return (
+      <div className="flex items-center justify-between gap-2 px-4 py-2.5 border-b border-[var(--aria-border)]">
+        <span className="flex items-center gap-1.5 text-xs" style={{ color: "#4ade80" }}>
+          <Check size={13} className="text-green-400" />
+          Offline ready — {progress.cached || progress.done}/{progress.total} chapters on device
+        </span>
+        <button
+          onClick={downloadAll}
+          className="text-[10px] px-2 py-1 rounded-md transition-colors hover:bg-white/10"
+          style={{ color: "var(--aria-fg-muted)", border: "1px solid var(--aria-border)" }}
+          title="Re-check and download any missing chapters"
+        >
+          Refresh
+        </button>
+      </div>
+    );
+  }
+
+  if (status === "error") {
+    return (
+      <div className="flex items-center justify-between gap-2 px-4 py-2.5 border-b border-[var(--aria-border)]">
+        <span className="flex items-center gap-1.5 text-xs" style={{ color: "var(--aria-fg-dim)" }}>
+          <CloudOff size={13} style={{ color: "var(--aria-accent)" }} />
+          Download failed — is the backend online?
+        </span>
+        <button
+          onClick={downloadAll}
+          className="text-[10px] px-2 py-1 rounded-md transition-colors hover:bg-white/10"
+          style={{ color: "var(--aria-fg-muted)", border: "1px solid var(--aria-border)" }}
+        >
+          Retry
+        </button>
+      </div>
+    );
+  }
+
+  // idle / partial — offer the download
+  const partialNote = status === "partial" && progress.cached > 0 ? ` (${progress.cached}/${progress.total} already saved)` : "";
+  return (
+    <button
+      onClick={downloadAll}
+      className="w-full flex items-center justify-center gap-2 px-4 py-2.5 border-b border-[var(--aria-border)] text-xs transition-colors hover:bg-white/5"
+      style={{ color: "var(--aria-accent-glow)" }}
+      title="Download all chapters to this device for offline playback"
+    >
+      <Download size={13} />
+      Save offline{partialNote}
+    </button>
+  );
+}
+
 function ChaptersPanel({
   loading,
   chaptersData,
@@ -1067,6 +1168,7 @@ function ChaptersPanel({
         }
         onClose={onClose}
       />
+      {hasChapterMp3s && <OfflineSaveRow />}
       {audioChapters.length > 1 && (
         <div className="flex items-center gap-2 px-4 py-2 border-b border-[var(--aria-border)]">
           <button

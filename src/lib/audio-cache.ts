@@ -139,6 +139,32 @@ export async function getAudioUrl(
   }
 }
 
+/** Ensure a chapter is cached for offline playback (bulk "save offline").
+ *  Returns true if the chapter is in the cache after this call (either it
+ *  already was, or the download succeeded). Never throws — used by the
+ *  offline-download loop which counts successes itself. */
+export async function ensureChapterCached(
+  jobId: string,
+  chapterIndex: number,
+  networkUrl: string,
+): Promise<boolean> {
+  // 1. Already cached?
+  const cached = await getCachedAudio(jobId, chapterIndex);
+  if (cached) return true;
+
+  // 2. Download + persist
+  try {
+    const resp = await fetch(networkUrl, { credentials: "include" });
+    if (!resp.ok) return false;
+    const blob = await resp.blob();
+    if (blob.size === 0) return false;
+    await cacheAudio(jobId, chapterIndex, blob);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
 /** Remove a cached chapter (e.g. when a job is deleted). Fail-soft. */
 export async function removeCachedAudio(
   jobId: string,
