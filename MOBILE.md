@@ -235,7 +235,7 @@ that puts an app icon on a real iPhone.**
 | File | Purpose |
 |---|---|
 | `public/manifest.webmanifest` | PWA manifest: name, icons, start_url, shortcuts |
-| `public/sw.js` | Minimal offline-capable service worker |
+| `public/sw.js` | Offline-first service worker (v3 — full install-time precache) |
 | `public/icons/icon-{16,32,167,180,192,512}x*.png` | Standard PWA icons |
 | `public/icons/icon-{192,512}x*-maskable.png` | Android adaptive-icon variants |
 | `public/icons/apple-touch-icon.png` | 180×180 Apple home-screen icon |
@@ -253,16 +253,26 @@ that puts an app icon on a real iPhone.**
 4. Confirm — ARIA's icon appears on your home screen. Tap it to launch
    fullscreen with no Safari chrome.
 
-### Offline mode (service worker v2)
+### Offline mode (service worker v3)
 
 The app is **offline-first**: it opens and plays your saved audiobooks with
 zero internet — airplane mode, backend stopped, whatever.
 
 How it works:
-- The service worker (`public/sw.js`, v2) caches the app shell, all
-  Next.js JS chunks, your auth session, and the library job list. Opening
+- The service worker (`public/sw.js`, v3) caches the app shell, **every
+  Next.js JS/CSS/font chunk the shell references** (parsed at install time —
+  this was the v2 white-screen bug: chunks were only cached at runtime, and
+  the first visit after a deploy loaded them before the SW activated, so
+  the offline boot had HTML but zero scripts), your auth session, and the
+  library job list (Set-Cookie headers are stripped before caching — Safari
+  rejects cookie-carrying responses, which silently broke the v2 jobs
+  cache). Opening
   the PWA offline boots straight into the app instead of a blank screen.
 - Chapter audio is stored as blobs in IndexedDB (`src/lib/audio-cache.ts`).
+- If the cache is ever incomplete (e.g. you went offline before ever opening
+  the app online since the last deploy), the SW serves a small branded
+  "You're offline" page explaining the one-time online visit — never a
+  blank white screen.
 - **Save a whole book offline**: open the book in the player → Chapters
   panel → **Save offline**. Every chapter MP3 downloads to the device
   (skips already-cached chapters, resumable). A green "Offline ready"
@@ -282,9 +292,16 @@ What needs internet:
 - Chapters never played/downloaded before
 - New deploys of the app itself
 
-First-run rule: open the app **online once** after each deploy so the new
-service worker version installs and caches the fresh shell. After that,
-offline works until the next deploy.
+First-run rule: open the app **online once** after each deploy and leave it
+a few seconds — the service worker installs and precaches the full shell
+(HTML + all JS chunks + session + library list) in the background during
+that visit. After that, offline works until the next deploy.
+
+**Offline white screen?** It means the current install was never opened
+online since the last deploy (nothing is cached yet). Reconnect, open ARIA,
+wait ~10 seconds, then try airplane mode again. If it still happens, open
+the app once in Safari proper (not the home-screen icon) to force a reload,
+then reopen via the icon.
 
 ### Caveats (iOS PWA limitations to know)
 
@@ -305,8 +322,10 @@ offline works until the next deploy.
 - **Storage limits** — iOS gives PWAs a smaller quota than native apps
   (usually 1-2GB+; a full offline book is typically 4-40MB). The storage
   persistence grant mitigates eviction, but don't hoard dozens of books.
-- **Updates** — Safari checks for SW updates every ~24h. Users may need to
-  close and reopen the app to pick up new versions.
+- **Updates** — Safari checks for SW updates on every PWA launch (`sw.js`
+  is served with `Cache-Control: max-age=0, must-revalidate`), so new
+  versions arrive on the next open; close and reopen the app once to pick
+  them up.
 
 ### Regenerating the icon set
 
