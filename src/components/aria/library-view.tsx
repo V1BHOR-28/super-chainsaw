@@ -13,6 +13,7 @@ import {
   Trash2,
   RotateCcw,
   WifiOff,
+  Download,
 } from "lucide-react";
 import { AmbientGlow, GradientText } from "./primitives";
 import { ScrollReveal } from "./scroll-reveal";
@@ -35,6 +36,8 @@ import {
   type ChapterMp3Info,
 } from "@/lib/abm-api";
 import { toast } from "@/hooks/use-toast";
+import { useOfflineManager } from "@/hooks/use-offline-manager";
+import { downloadJob, formatBytes, type DownloadableJob } from "@/lib/offline-manager";
 
 /** Deterministic accent color from a job's title — used because the Flask
  *  API doesn't return an accent color per book. */
@@ -113,6 +116,18 @@ function toCard(job: MyJob): LibraryCard {
   };
 }
 
+/** Map a library card to the minimal shape the offline manager needs. */
+function cardToDownloadable(card: LibraryCard): DownloadableJob {
+  return {
+    jobId: card.jobId,
+    title: card.title,
+    author: card.author,
+    accent: card.accent,
+    hasCover: card.hasCover,
+    chapterMp3s: card.chapterMp3s,
+  };
+}
+
 function progressPct(card: LibraryCard): number {
   if (card.status === "done") return 100;
   // ARIA: during finalization, creep 90→100 based on the sub-progress
@@ -142,6 +157,16 @@ export function LibraryView() {
   const setActiveWorkspace = useAriaStore((s) => s.setActiveWorkspace);
   const STORAGE_KEY = "aria-audiobook-library";
   const DELETED_KEY = "aria-audiobook-deleted";
+
+  // ── Offline manager ──
+  // statuses: per-job "what's on this device" (live-updated while a
+  // download runs). refresh(): recompute from IndexedDB ground truth.
+  const { statuses, refresh, download, remove } = useOfflineManager();
+  // Jobs we've already auto-saved this session (guarded so polling never
+  // double-triggers the download).
+  const autoSavedRef = useRef<Set<string>>(new Set());
+  // Last-seen status per job — used to detect generating → done transitions.
+  const prevStatusRef = useRef<Map<string, string>>(new Map());
 
   // Online/offline tracking — drives the "OFFLINE" chip in the header. When
   // offline, the SW serves the last cached my_jobs response, so the library
@@ -229,6 +254,20 @@ export function LibraryView() {
     }
   }, [cards]);
 
+  // ── Offline badge data ──
+  // Recompute which books are on device when the SET of finished books
+  // changes (mount, a generation completing, a delete). doneKey (a stable
+  // string) avoids re-running on every 10s poll, which creates fresh card
+  // object identities even when nothing changed.
+  const doneKey = cards
+    .filter((c) => c.status === "done")
+    .map((c) => c.jobId)
+    .sort()
+    .join(",");
+  useEffect(() => {
+    refresh(cards.filter((c) => c.status === "done"));
+  }, [doneKey, refresh]);
+
   // Fetch the job list from the backend. The backend runs in Docker (always
   // on — no cold start), so a simple single fetch with no retry/backoff is
   // correct. If the fetch fails, we surface the error immediately so the
@@ -255,6 +294,43 @@ export function LibraryView() {
         return [...apiCards, ...staleCards];
       });
       setError(null);
+
+      // ── ARIA: auto-save offline ──
+      // When a job transitions to 'done' while we're watching (its
+      // generation just finished) and we're online, download it to the
+      // device automatically. After this the book works in airplane mode
+      // with zero further action. An offline observation does NOT consume
+      // the trigger (autoSavedRef is only marked when online), so the
+      // download starts on the next online poll. Existing books that were
+      // already 'done' before this app opened are NOT auto-downloaded —
+      // the user decides with the per-book "Save offline" button.
+      for (const c of apiCards) {
+        const prev = prevStatusRef.current.get(c.jobId);
+        if (
+          c.status === "done" &&
+          prev &&
+          prev !== "done" &&
+          !autoSavedRef.current.has(c.jobId) &&
+          navigator.onLine
+        ) {
+          autoSavedRef.current.add(c.jobId);
+          toast({
+            title: "Narration finished",
+            description: `Saving "${c.title}" for offline listening…`,
+          });
+          downloadJob(cardToDownloadable(c))
+            .then((st) => {
+              if (st.phase === "complete") {
+                toast({
+                  title: "Offline ready",
+                  description: `"${c.title}" now works in airplane mode.`,
+                });
+              }
+            })
+            .catch(() => {});
+        }
+        prevStatusRef.current.set(c.jobId, c.status);
+      }
     } catch (err) {
       console.error("[library-view] fetch failed:", err);
       if (cards.length === 0) {
@@ -597,6 +673,27 @@ export function LibraryView() {
           </div>
         </ScrollReveal>
 
+        {/* Offline guidance banner — shown only when the device has no
+            connection. Sets expectations: what works (everything saved on
+            device) vs. what doesn't (new downloads + generation). */}
+        {offline && (
+          <div
+            className="flex items-center gap-2.5 px-4 py-2.5 rounded-xl mb-6 text-xs"
+            style={{
+              color: "var(--aria-fg-muted)",
+              border: "1px solid var(--aria-border)",
+              background: "rgba(245,158,11,0.05)",
+            }}
+          >
+            <WifiOff size={13} style={{ color: "var(--aria-accent-glow)" }} />
+            <span>
+              You&rsquo;re offline — books marked{" "}
+              <span style={{ color: "#22c55e" }}>On device</span> play and read
+              normally. Everything else needs a connection.
+            </span>
+          </div>
+        )}
+
         {loading && cards.length === 0 ? (
           <div className="text-center py-20" style={{ color: "var(--aria-fg-dim)" }}>
             <Loader2 size={28} strokeWidth={1} className="mx-auto mb-3 animate-spin" />
@@ -739,6 +836,93 @@ export function LibraryView() {
                       <div className="flex items-center gap-2 mt-1 flex-wrap">
                         {isDone ? (
                           <>
+                            {/* ── Offline status / download control ──
+                                The source of truth for what's on this device.
+                                Tapping "On device" removes the offline copy
+                                (confirm-gated); everything else downloads or
+                                resumes. */}
+                            {(() => {
+                              const st = statuses[card.jobId];
+                              if (!st) return null;
+                              if (st.phase === "active") {
+                                const pct =
+                                  st.chaptersTotal > 0
+                                    ? Math.round((st.chaptersDone / st.chaptersTotal) * 100)
+                                    : 0;
+                                return (
+                                  <span
+                                    className="text-[11px] flex items-center gap-1"
+                                    style={{ color: "var(--aria-accent-glow)" }}
+                                  >
+                                    <Loader2 size={10} className="animate-spin" />
+                                    Saving offline… {st.chaptersDone}/{st.chaptersTotal} · {pct}%
+                                  </span>
+                                );
+                              }
+                              if (st.phase === "complete") {
+                                return (
+                                  <button
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      if (
+                                        window.confirm(
+                                          `Remove "${card.title}" from this device? You can download it again anytime.`,
+                                        )
+                                      ) {
+                                        remove(card.jobId);
+                                      }
+                                    }}
+                                    className="text-[11px] px-2 py-0.5 rounded-md flex items-center gap-1 transition-colors hover:bg-white/5"
+                                    style={{ color: "#22c55e", border: "1px solid rgba(34,197,94,0.3)" }}
+                                    title="Saved on this device — tap to remove the offline copy"
+                                  >
+                                    <CheckCircle2 size={10} />
+                                    On device{st.bytes > 0 ? ` · ${formatBytes(st.bytes)}` : ""}
+                                  </button>
+                                );
+                              }
+                              if (st.phase === "partial") {
+                                return (
+                                  <button
+                                    onClick={(e) => {
+                                      e.stopPropagation();
+                                      download(cardToDownloadable(card));
+                                    }}
+                                    className="text-[11px] px-2 py-0.5 rounded-md flex items-center gap-1 transition-colors hover:bg-white/5"
+                                    style={{ color: "var(--aria-accent-glow)", border: "1px solid var(--aria-border)" }}
+                                    title="Finish downloading the missing chapters + EPUB"
+                                  >
+                                    <Download size={10} />
+                                    Finish saving ({st.chaptersDone}/{st.chaptersTotal})
+                                  </button>
+                                );
+                              }
+                              // idle — offer the download (or explain when offline)
+                              if (offline) {
+                                return (
+                                  <span
+                                    className="text-[11px] flex items-center gap-1"
+                                    style={{ color: "var(--aria-fg-dim)" }}
+                                    title="Not saved on this device — reconnect and tap Save offline"
+                                  >
+                                    <WifiOff size={10} /> Not on device
+                                  </span>
+                                );
+                              }
+                              return (
+                                <button
+                                  onClick={(e) => {
+                                    e.stopPropagation();
+                                    download(cardToDownloadable(card));
+                                  }}
+                                  className="text-[11px] px-2 py-0.5 rounded-md flex items-center gap-1 transition-colors hover:bg-white/5"
+                                  style={{ color: "var(--aria-accent-glow)", border: "1px solid var(--aria-border)" }}
+                                  title="Download all chapters + the book to this device for airplane-mode listening + reading"
+                                >
+                                  <Download size={10} /> Save offline
+                                </button>
+                              );
+                            })()}
                             <p className="text-[11px] text-[var(--aria-accent-glow)]">
                               {card.outputFormat?.toUpperCase() || "MP3"} · tap to play
                             </p>

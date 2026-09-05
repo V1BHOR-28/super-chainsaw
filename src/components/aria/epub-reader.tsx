@@ -5,6 +5,7 @@ import { Book, X, Type, ChevronLeft, ChevronRight, Loader2, Bookmark } from "luc
 import { usePlayerStore } from "@/lib/player-store";
 import { getEpubFileUrl } from "@/lib/abm-api";
 import { getCachedEpub, cacheEpub } from "@/lib/epub-cache";
+import { markEpubCached } from "@/lib/offline-manager";
 
 /**
  * EpubReader — in-browser EPUB reader using foliate-js.
@@ -98,7 +99,8 @@ export function EpubReader() {
 
     const init = async () => {
       // Wait for foliate-js to be ready
-      if (!window.__foliateReady) {
+      const w = window as unknown as { __foliateReady?: boolean };
+      if (!w.__foliateReady) {
         await new Promise<void>((resolve) => {
           window.addEventListener("foliate-ready", () => resolve(), {
             once: true,
@@ -165,10 +167,12 @@ export function EpubReader() {
       });
 
       // Fetch the EPUB — check IndexedDB cache first, then network.
-      // This makes the reader work offline (Docker stopped) after the
-      // first open, same pattern as audio-cache + cover-cache.
+      // This makes the reader work offline (Docker stopped / airplane
+      // mode) after the book is saved to the device, same pattern as
+      // audio-cache + cover-cache.
       try {
         let blob: Blob | null = null;
+        let fromNetwork = false;
 
         // 1. Check cache
         blob = await getCachedEpub(job.jobId);
@@ -184,8 +188,15 @@ export function EpubReader() {
           if (blob.size === 0) {
             throw new Error("empty file");
           }
-          // Cache for next time (non-blocking)
-          cacheEpub(job.jobId, blob).catch(() => {});
+          fromNetwork = true;
+        }
+
+        // Cache for next time (non-blocking) + keep the offline manager's
+        // status in sync so the library badge reflects the saved book.
+        if (fromNetwork && blob) {
+          cacheEpub(job.jobId, blob)
+            .then(() => markEpubCached(job.jobId))
+            .catch(() => {});
         }
 
         // foliate-js expects a File object (with .name) or a URL string.
@@ -287,10 +298,16 @@ export function EpubReader() {
       } catch (err) {
         if (!cancelled) {
           console.error("[epub-reader] Failed to open book:", err);
+          // Offline-aware message: the most common failure is "book not on
+          // device + no connection" — tell the user exactly what to do
+          // instead of pointing at the backend.
+          const isOffline = typeof navigator !== "undefined" && !navigator.onLine;
           setError(
-            err instanceof Error
-              ? `Could not load book (${err.message}). Make sure the backend is running.`
-              : "Could not load book.",
+            isOffline
+              ? "This book isn't saved on your device. Reconnect once and open the reader (or tap Save offline in the library) — after that it works in airplane mode."
+              : err instanceof Error
+                ? `Could not load book (${err.message}). Make sure the backend is running.`
+                : "Could not load book.",
           );
           setLoading(false);
         }

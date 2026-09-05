@@ -82,30 +82,29 @@ export async function getCachedAudio(
   }
 }
 
+/** Low-level put: store a Blob under an exact key. Fail-soft. */
+function putBlob(key: string, blob: Blob): Promise<void> {
+  return new Promise(async (resolve) => {
+    try {
+      const db = await openDB();
+      if (!db) return resolve();
+      const tx = db.transaction(STORE_NAME, "readwrite");
+      tx.objectStore(STORE_NAME).put(blob, key);
+      tx.oncomplete = () => resolve();
+      tx.onerror = () => resolve();
+    } catch {
+      resolve();
+    }
+  });
+}
+
 /** Cache a chapter audio Blob. Fail-soft: never throws. */
 export async function cacheAudio(
   jobId: string,
   chapterIndex: number,
   blob: Blob,
 ): Promise<void> {
-  try {
-    const db = await openDB();
-    if (!db) return;
-    const key = `${jobId}:${chapterIndex}`;
-    await new Promise<void>((resolve) => {
-      try {
-        const tx = db.transaction(STORE_NAME, "readwrite");
-        const store = tx.objectStore(STORE_NAME);
-        store.put(blob, key);
-        tx.oncomplete = () => resolve();
-        tx.onerror = () => resolve();
-      } catch {
-        resolve();
-      }
-    });
-  } catch {
-    // non-fatal — the cache is a nicety
-  }
+  await putBlob(`${jobId}:${chapterIndex}`, blob);
 }
 
 /** Fetch a chapter URL, cache the bytes, return a blob: URL.
@@ -218,5 +217,78 @@ export async function removeCachedAudioForJob(jobId: string): Promise<void> {
     });
   } catch {
     // non-fatal
+  }
+}
+
+/* ============ Legacy single-file jobs (single_file=true) ============ */
+
+/**
+ * Old jobs (single_file=true) produce ONE merged MP3 at /api/download/<id>
+ * instead of per-chapter files. They share the same store with the key
+ * `<jobId>:single` so removeCachedAudioForJob() (prefix match) cleans them
+ * up too — no separate lifecycle needed.
+ */
+
+function singleKey(jobId: string): string {
+  return `${jobId}:single`;
+}
+
+/** Get the cached single-file audio Blob. Returns null on any failure. */
+export async function getCachedSingleFile(jobId: string): Promise<Blob | null> {
+  try {
+    const db = await openDB();
+    if (!db) return null;
+    return new Promise((resolve) => {
+      try {
+        const tx = db.transaction(STORE_NAME, "readonly");
+        const req = tx.objectStore(STORE_NAME).get(singleKey(jobId));
+        req.onsuccess = () => {
+          resolve(req.result instanceof Blob ? req.result : null);
+        };
+        req.onerror = () => resolve(null);
+      } catch {
+        resolve(null);
+      }
+    });
+  } catch {
+    return null;
+  }
+}
+
+/** Ensure the merged single-file audio is cached. True = on device. */
+export async function ensureSingleFileCached(
+  jobId: string,
+  networkUrl: string,
+): Promise<boolean> {
+  const cached = await getCachedSingleFile(jobId);
+  if (cached) return true;
+  try {
+    const resp = await fetch(networkUrl, { credentials: "include" });
+    if (!resp.ok) return false;
+    const blob = await resp.blob();
+    if (blob.size === 0) return false;
+    await putBlob(singleKey(jobId), blob);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Cache-first blob URL for the single-file audio (mirrors getAudioUrl). */
+export async function getSingleFileAudioUrl(
+  jobId: string,
+  networkUrl: string,
+): Promise<string> {
+  const cached = await getCachedSingleFile(jobId);
+  if (cached) return URL.createObjectURL(cached);
+  try {
+    const resp = await fetch(networkUrl, { credentials: "include" });
+    if (!resp.ok) return networkUrl;
+    const blob = await resp.blob();
+    if (blob.size === 0) return networkUrl;
+    putBlob(singleKey(jobId), blob).catch(() => {});
+    return URL.createObjectURL(blob);
+  } catch {
+    return networkUrl;
   }
 }

@@ -1,46 +1,40 @@
-/* eslint-disable */
 /**
- * ARIA service worker v4 — offline-first, complete offline media layer.
+ * ARIA service worker v5 — offline-first, complete offline media layer.
  *
- * v3 fixed the offline white screen (install-time precache of the shell +
- * all /_next/static chunks) but audio + EPUB reading still broke offline:
+ * v4 fixed offline audio + reader metadata (foliate precache, per-book
+ * job_chapters/cover prefetch, non-destructive cache migration). What
+ * still hurt was UX: updates needed a "stay online ~10s" ritual and the
+ * app never told the user what was actually saved on device.
  *
- *   BUG A (reader):  foliate-js (the EPUB rendering engine) was only
- *     runtime-cached — and v3's activate handler DELETED the v2 asset cache
- *     that contained it, so offline the reader's module import failed and
- *     the panel hung on its loading spinner forever.
- *   BUG B (audio):   per-book metadata (job_chapters) and covers were
- *     stale-while-revalidate entries that only existed if the book had been
- *     opened online while the CURRENT sw version was active — v3's cache
- *     wipe destroyed v2's entries, so offline library → player was degraded.
- *   BUG C (audio):   chapters never played while online are not in the
- *     IndexedDB audio cache and can never stream offline (the backend is
- *     unreachable) — the app now degrades with a clear per-book state.
+ * v5 changes (app-side, SW just follows):
+ *   - Registered with `updateViaCache: "none"` (pwa-register.tsx) — the
+ *     browser always re-fetches sw.js from the network, so deploys are
+ *     picked up on first launch after they ship. Combined with skipWaiting
+ *     + clients.claim() (kept from v3/v4), a new version activates in the
+ *     background while the running page keeps its (complete, cached) old
+ *     shell. Next cold launch = new shell. No reload ritual.
+ *   - Audio/EPUB/cover downloads are now orchestrated by the app's
+ *     offline-manager (IndexedDB blobs) — this SW intentionally keeps
+ *     chapter_mp3 + epub_file as passthrough (Range requests + large
+ *     bodies don't belong in the Cache API).
+ *   - Version bump triggers the v4 non-destructive migration + a fresh
+ *     install-time precache so the first launch after this deploy
+ *     re-caches the new build's chunks.
  *
- * v4 fixes:
- *   - INSTALL precaches the complete foliate-js EPUB engine (8 files,
- *     ~180KB) so the reader works offline from the first install.
- *   - INSTALL parses the warmed my_jobs list and prefetches
- *     job_chapters/<id> + cover/<id> for EVERY book — the whole library
- *     metadata + cover set is offline after one online visit.
- *   - ACTIVATE is now non-destructive: entries from the previous version's
- *     caches (foliate-js, bgm, icons, job_chapters, covers … everything
- *     except immutable /_next chunks) are MIGRATED into the new caches
- *     before the old caches are deleted, so deploys no longer wipe assets
- *     the app needs offline.
- *   - Navigation fallback chain (exact URL → "/" shell → branded offline
- *     page) kept from v3; Set-Cookie sanitizer kept from v3.
+ * Install precache (kept from v4):
+ *   shell HTML + every /_next chunk it references + manifest/icons +
+ *   the complete foliate-js engine (8 files) + session + my_jobs +
+ *   job_chapters/cover for every book in the library.
  *
  * Runtime strategies (unchanged):
  *   - /_next/static/* + static prefixes + foliate-js: CACHE-FIRST.
  *   - Navigation: NETWORK-FIRST, cached shell fallback.
  *   - /api/auth/session + /api/abm/my_jobs: NETWORK-FIRST w/ offline cache.
  *   - /api/abm/cover/* + job_chapters/*: STALE-WHILE-REVALIDATE.
- *   - POSTs / chapter_mp3 streams / SSE: passthrough (audio bytes live in
- *     the app's IndexedDB blob cache — audio-cache.ts / "Save offline").
+ *   - POSTs / chapter_mp3 streams / SSE: passthrough.
  */
 
-const VERSION = "aria-pwa-v4";
+const VERSION = "aria-pwa-v5";
 const SHELL_CACHE = `aria-shell-${VERSION}`; // "/" HTML + manifest + icons
 const ASSET_CACHE = `aria-assets-${VERSION}`; // /_next/static + foliate + static
 const API_CACHE = `aria-api-${VERSION}`; // session + my_jobs + chapters + covers

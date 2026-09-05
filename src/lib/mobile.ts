@@ -21,7 +21,6 @@
  * crashes when the packages aren't installed.
  */
 
-import type { MyJob } from "./abm-api";
 
 /** True when this code is running inside the Capacitor native shell. */
 export const isNativeMobile = async (): Promise<boolean> => {
@@ -49,7 +48,7 @@ export async function isNative(): Promise<boolean> {
  *
  * Safe to call on every chapter change. Idempotent.
  */
-export async function notifyBackgroundAudioOfMetadata(_job: MyJob | null): Promise<void> {
+export async function notifyBackgroundAudioOfMetadata(_job: unknown): Promise<void> {
   // Intentional no-op in v0.1. Android uses navigator.mediaSession (already
   // wired up in use-audio-engine.ts). iOS would need @capacitor-community/
   // background-audio but iOS is out of scope for free distribution.

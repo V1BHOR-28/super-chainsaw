@@ -235,7 +235,7 @@ that puts an app icon on a real iPhone.**
 | File | Purpose |
 |---|---|
 | `public/manifest.webmanifest` | PWA manifest: name, icons, start_url, shortcuts |
-| `public/sw.js` | Offline-first service worker (v4 — full precache + non-destructive updates) |
+| `public/sw.js` | Offline-first service worker (v5 — full precache + non-destructive updates + `updateViaCache: none`) |
 | `public/icons/icon-{16,32,167,180,192,512}x*.png` | Standard PWA icons |
 | `public/icons/icon-{192,512}x*-maskable.png` | Android adaptive-icon variants |
 | `public/icons/apple-touch-icon.png` | 180×180 Apple home-screen icon |
@@ -253,68 +253,75 @@ that puts an app icon on a real iPhone.**
 4. Confirm — ARIA's icon appears on your home screen. Tap it to launch
    fullscreen with no Safari chrome.
 
-### Offline mode (service worker v4)
+### Offline mode (service worker v5 + offline manager)
 
-The app is **offline-first**: it opens and plays your saved audiobooks with
-zero internet — airplane mode, backend stopped, whatever.
+The app is **offline-first**: it opens, plays, and reads your saved
+audiobooks with zero internet — airplane mode, backend stopped, whatever.
 
-How it works:
-- The service worker (`public/sw.js`, v4) caches the app shell, **every
-  Next.js JS/CSS/font chunk the shell references** (parsed at install time —
-  this was the v2 white-screen bug: chunks were only cached at runtime, and
-  the first visit after a deploy loaded them before the SW activated, so
-  the offline boot had HTML but zero scripts), your auth session, the
-  library job list (Set-Cookie headers are stripped before caching — Safari
-  rejects cookie-carrying responses, which silently broke the v2 jobs
-  cache), the **complete EPUB reader engine (foliate-js)**, and **per-book
-  chapter lists + covers for every book in your library** — so the reader
-  and the player's book metadata work offline after a single online visit
-  (this was the v3 bug: the reader engine and book metadata were only
-  runtime-cached, and the v3 update wiped them). Opening
-  the PWA offline boots straight into the app instead of a blank screen.
-- Chapter audio is stored as blobs in IndexedDB (`src/lib/audio-cache.ts`).
-- **Updates are non-destructive**: when a new service-worker version
-  activates, cached offline assets (reader engine, book metadata, covers,
-  BGM, icons) are migrated into the new version's caches instead of being
-  wiped. Only immutable build chunks are discarded (they belong to the old
-  deploy).
-- If the cache is ever incomplete (e.g. you went offline before ever opening
-  the app online since the last deploy), the SW serves a small branded
-  "You're offline" page explaining the one-time online visit — never a
-  blank white screen.
-- **Save a whole book offline**: open the book in the player → Chapters
-  panel → **Save offline**. Every chapter MP3 downloads to the device
-  (skips already-cached chapters, resumable). A green "Offline ready"
-  state confirms the book will play with no network.
-- The download also requests `navigator.storage.persist()` so iOS is less
-  likely to evict the audio cache under storage pressure.
+The mental model is simple: **a book is either "On device" or it isn't.**
+
+- In the library, every finished book shows its device state:
+  **Save offline** (not on the device) → **Saving… 3/12** (downloading,
+  live progress) → **On device · 42 MB** (everything saved, tap to remove).
+- The player header has the same control (download icon → spinner → green
+  check) so you can save the book you're reading in one tap.
+- Saving a book downloads **everything**: all chapter MP3s, the EPUB file
+  (for the reader), and the cover. It's resumable — re-running after a
+  partial download only fetches what's missing.
+- **New books save themselves**: the moment a generation finishes while
+  the app is open, it's downloaded to the device automatically. You can
+  go airplane the second it's done.
+- While offline, books marked *On device* work completely: library list,
+  covers, playback (all chapters, gapless), EPUB reading, positions,
+  sleep timer. Books NOT on the device show "Not on device" and the
+  player shows a clear "Can't load audio — reconnect once to download"
+  notice instead of failing silently.
+- The download requests `navigator.storage.persist()` so iOS is less
+  likely to evict the saved data under storage pressure.
+
+How it works (stack):
+- The service worker (`public/sw.js`, v5) caches the app shell, **every
+  Next.js JS/CSS/font chunk the shell references** (parsed at install
+  time — this was the v2 white-screen bug), your auth session, the
+  library job list (Set-Cookie headers are stripped before caching —
+  Safari rejects cookie-carrying responses), the **complete EPUB reader
+  engine (foliate-js)**, and **per-book chapter lists + covers for every
+  book in your library**.
+- Media blobs (audio, EPUB, covers) live in IndexedDB, orchestrated by
+  `src/lib/offline-manager.ts` — one module that knows what's on the
+  device (`computeStatus` reads the caches as ground truth, so the
+  badges never lie), downloads complete books with live progress, and
+  persists per-job snapshots so the library rehydrates even if
+  localStorage is wiped.
+- Legacy single-file books (old `single_file=true` jobs) are cached too,
+  under a `<jobId>:single` key in the same audio store.
 
 What works offline:
 - App boots (shell + session + library from cache; header shows OFFLINE)
-- Playing any book that was saved offline (IndexedDB, no network)
-- **Opening any book** — its chapter list + cover are cached for the whole
-  library at install time
-- Reading EPUBs previously opened (epub-cache, IndexedDB) — the reader
-  engine itself is cached too, so the reader opens offline even for a
-  fresh install
-- Playback position memory, reading positions, settings
+- Playing any book marked *On device* — every chapter, no network
+- **Reading any book marked *On device*** — EPUB from IndexedDB, reader
+  engine precached by the SW
+- Playback position memory, reading positions, settings, sleep timer
+- Books that finished generating while the app was open (auto-saved)
 
 What needs internet:
 - Generating new audiobooks (your computer's Docker backend)
 - Chat (LLM APIs)
-- Chapters never played/downloaded before
+- Books you never tapped *Save offline* on (and never played/opened)
 - New deploys of the app itself
 
-First-run rule: open the app **online once** after each deploy and leave it
-a few seconds — the service worker installs and precaches the full shell
-(HTML + all JS chunks + session + library list + reader engine + every
-book's chapter list and cover) in the background during that visit. After
-that, offline works until the next deploy.
+**No update ritual.** Deploys install themselves: the SW is registered
+with `updateViaCache: "none"`, so a new version is detected on the first
+launch after it ships, activates in the background, and the next cold
+launch uses the new shell. While offline you keep running on the
+already-cached, fully functional shell. The only first-run requirement
+in the app's lifetime: open it online once after installing the PWA so
+the shell can cache itself (a few seconds, one time ever, not per-deploy).
 
-**Offline white screen?** It means the current install was never opened
-online since the last deploy (nothing is cached yet). Reconnect, open ARIA,
-wait ~10 seconds, then try airplane mode again. If it still happens, open
-the app once in Safari proper (not the home-screen icon) to force a reload,
+**Offline white screen?** It means the PWA was never opened online since
+it was installed (nothing is cached yet). Reconnect, open ARIA, wait a
+few seconds, then try airplane mode again. If it still happens, open the
+app once in Safari proper (not the home-screen icon) to force a reload,
 then reopen via the icon.
 
 ### Caveats (iOS PWA limitations to know)
