@@ -17,6 +17,7 @@ import {
   Clock,
   ListChecks,
   Check,
+  CheckCircle2,
   PlayCircle,
   SkipBack,
   SkipForward,
@@ -35,7 +36,8 @@ import { NowPlayingBars } from "./waveform";
 import { BookCover } from "./book-cover";
 import { EpubReader } from "./epub-reader";
 import { getJobChapters, type AnalyzeResponse, type ChapterMp3Info } from "@/lib/abm-api";
-import { useOfflineDownload } from "@/hooks/use-offline-download";
+import { useOfflineManager } from "@/hooks/use-offline-manager";
+import { formatBytes } from "@/lib/offline-manager";
 
 /**
  * PlayerView — plays the single MP3 produced by the audiobook-maker Flask
@@ -64,6 +66,11 @@ export function PlayerView() {
   const setBgmVolume = usePlayerStore((s) => s.setBgmVolume);
   const sleepTimerMinutes = usePlayerStore((s) => s.sleepTimerMinutes);
   const resumedFrom = usePlayerStore((s) => s.resumedFrom);
+  const audioError = usePlayerStore((s) => s.audioError);
+
+  // ── Offline manager ── download the whole book (chapters + EPUB + cover)
+  // to this device; live status for the header chip + error notice.
+  const { statuses, download } = useOfflineManager();
 
   const toggle = usePlayerStore((s) => s.toggle);
   const skip = usePlayerStore((s) => s.skip);
@@ -103,6 +110,20 @@ export function PlayerView() {
       if (usePlayerStore.getState().showSettings) toggleSettings();
       loadChapters();
     }
+  };
+
+  // Download the current book (all chapters + EPUB + cover) to this device.
+  // Uses the freshest chapter list available (API > store token > library).
+  const handleDownloadBook = () => {
+    if (!job) return;
+    download({
+      jobId: job.jobId,
+      title: job.title,
+      author: job.author,
+      accent: job.accent,
+      hasCover: !!job.coverImgUrl,
+      chapterMp3s: job.chapterMp3s ?? chaptersData?.chapter_mp3s,
+    });
   };
 
   if (!job) return null;
@@ -163,6 +184,50 @@ export function PlayerView() {
               toggleReader();
             }}
           />
+          {/* ── Offline download chip ── always visible in the header so
+              "save this book" is one tap away, not buried in the chapters
+              panel. States: download → saving… → on device ✓ */}
+          {(() => {
+            const st = job ? statuses[job.jobId] : undefined;
+            if (st && st.phase === "active") {
+              const pct =
+                st.chaptersTotal > 0
+                  ? Math.round((st.chaptersDone / st.chaptersTotal) * 100)
+                  : 0;
+              return (
+                <span
+                  className="w-9 h-9 sm:w-10 sm:h-10 rounded-full flex flex-col items-center justify-center border border-[rgba(245,158,11,0.4)] bg-[rgba(245,158,11,0.12)]"
+                  title={`Saving offline — ${st.chaptersDone}/${st.chaptersTotal} · ${pct}%`}
+                >
+                  <Loader2 className="w-3.5 h-3.5 animate-spin" style={{ color: "var(--aria-accent-glow)" }} />
+                </span>
+              );
+            }
+            if (st && st.phase === "complete") {
+              return (
+                <span
+                  className="w-9 h-9 sm:w-10 sm:h-10 rounded-full flex items-center justify-center border border-[rgba(34,197,94,0.4)] bg-[rgba(34,197,94,0.1)]"
+                  title={`On device — ${st.chaptersDone}/${st.chaptersTotal} chapters + book${st.bytes ? ` · ${formatBytes(st.bytes)}` : ""}`}
+                >
+                  <CheckCircle2 className="w-4 h-4 text-green-400" />
+                </span>
+              );
+            }
+            const partialNote =
+              st && st.phase === "partial" && st.chaptersTotal > 0
+                ? ` (${st.chaptersDone}/${st.chaptersTotal} saved — tap to finish)`
+                : "";
+            return (
+              <button
+                onClick={handleDownloadBook}
+                className="w-9 h-9 sm:w-10 sm:h-10 rounded-full flex items-center justify-center transition-all border border-transparent text-[var(--aria-fg-muted)] hover:text-[var(--aria-accent-glow)] hover:bg-[var(--aria-card)]"
+                title={`Save offline — download all chapters + the book to this device${partialNote}`}
+                aria-label="Save offline"
+              >
+                <Download className="w-4 h-4" />
+              </button>
+            );
+          })()}
           <SidePanelToggle
             kind="settings"
             active={showSettings}
@@ -264,6 +329,42 @@ export function PlayerView() {
               </p>
             )}
           </div>
+
+          {/* ARIA: offline playback failure notice — replaces the silent
+              dead play button. Shown when the audio source errors (typical:
+              chapter not on device + no connection). */}
+          {audioError && (
+            <div
+              className="flex items-center gap-3 px-4 py-3 rounded-xl"
+              style={{
+                border: "1px solid rgba(245,158,11,0.35)",
+                background: "rgba(245,158,11,0.07)",
+              }}
+            >
+              <CloudOff className="w-4 h-4 shrink-0" style={{ color: "var(--aria-accent-glow)" }} />
+              <div className="flex-1 min-w-0">
+                <p className="text-xs font-medium" style={{ color: "var(--aria-fg)" }}>
+                  Can&rsquo;t load audio
+                </p>
+                <p className="text-[11px]" style={{ color: "var(--aria-fg-muted)" }}>
+                  This chapter isn&rsquo;t saved on the device and there&rsquo;s no connection.
+                </p>
+              </div>
+              {navigator.onLine ? (
+                <button
+                  onClick={handleDownloadBook}
+                  className="text-[11px] px-3 py-1.5 rounded-md shrink-0 flex items-center gap-1.5"
+                  style={{ border: "1px solid var(--aria-border)", color: "var(--aria-accent-glow)" }}
+                >
+                  <Download size={11} /> Save offline
+                </button>
+              ) : (
+                <span className="text-[11px] shrink-0" style={{ color: "var(--aria-fg-dim)" }}>
+                  Reconnect once to download
+                </span>
+              )}
+            </div>
+          )}
 
           {/* Progress bar */}
           <ProgressBar
@@ -961,27 +1062,38 @@ function SettingsPanel() {
 /**
  * OfflineSaveRow — "Save this book offline" control in the Chapters panel.
  *
- * Downloads every chapter MP3 into the persistent IndexedDB cache so the
- * whole book plays with zero network (airplane mode, backend stopped, etc).
- * Cached chapters are skipped, so re-running after a partial failure
- * resumes instead of restarting. Once fully saved, shows a green
- * "Offline ready" state; the button stays available to refresh (e.g. after
- * regenerating the book with more chapters).
+ * Driven by the offline manager: downloads EVERYTHING (all chapter MP3s +
+ * the EPUB for the reader + the cover) into the persistent IndexedDB
+ * caches, so airplane mode gives full playback AND full reading. Cached
+ * artifacts are skipped, so re-running after a partial failure resumes
+ * instead of restarting. Once fully saved, shows a green "Offline ready"
+ * state; the button stays available to refresh (e.g. after re-generating
+ * the book with more chapters).
  */
 function OfflineSaveRow() {
-  const { status, progress, downloadAll } = useOfflineDownload();
+  const job = usePlayerStore((s) => s.currentJob);
+  const { statuses, download } = useOfflineManager();
 
-  if (status === "checking") {
-    return (
-      <div className="flex items-center justify-center gap-2 px-4 py-2.5 border-b border-[var(--aria-border)] text-xs" style={{ color: "var(--aria-fg-dim)" }}>
-        <Loader2 size={12} className="animate-spin" />
-        Checking offline copy…
-      </div>
-    );
-  }
+  if (!job) return null;
+  const st = statuses[job.jobId];
+  if (!st) return null;
 
-  if (status === "downloading") {
-    const pct = progress.total > 0 ? Math.round((progress.done / progress.total) * 100) : 0;
+  const doDownload = () => {
+    download({
+      jobId: job.jobId,
+      title: job.title,
+      author: job.author,
+      accent: job.accent,
+      hasCover: !!job.coverImgUrl,
+      chapterMp3s: job.chapterMp3s,
+    });
+  };
+
+  if (st.phase === "active") {
+    const pct =
+      st.chaptersTotal > 0
+        ? Math.round((st.chaptersDone / st.chaptersTotal) * 100)
+        : 0;
     return (
       <div className="px-4 py-2.5 border-b border-[var(--aria-border)]">
         <div className="flex items-center justify-between text-xs mb-1.5" style={{ color: "var(--aria-fg-muted)" }}>
@@ -990,7 +1102,7 @@ function OfflineSaveRow() {
             Saving offline…
           </span>
           <span className="font-mono text-[10px]">
-            {progress.done}/{progress.total} · {pct}%
+            {st.chaptersDone}/{st.chaptersTotal} · {pct}%
           </span>
         </div>
         <div className="h-1.5 rounded-full overflow-hidden" style={{ background: "rgba(255,255,255,0.08)" }}>
@@ -1003,18 +1115,19 @@ function OfflineSaveRow() {
     );
   }
 
-  if (status === "done") {
+  if (st.phase === "complete") {
     return (
       <div className="flex items-center justify-between gap-2 px-4 py-2.5 border-b border-[var(--aria-border)]">
         <span className="flex items-center gap-1.5 text-xs" style={{ color: "#4ade80" }}>
           <Check size={13} className="text-green-400" />
-          Offline ready — {progress.cached || progress.done}/{progress.total} chapters on device
+          Offline ready — {st.chaptersDone}/{st.chaptersTotal} chapters + book on device
+          {st.bytes > 0 ? ` · ${formatBytes(st.bytes)}` : ""}
         </span>
         <button
-          onClick={downloadAll}
+          onClick={doDownload}
           className="text-[10px] px-2 py-1 rounded-md transition-colors hover:bg-white/10"
           style={{ color: "var(--aria-fg-muted)", border: "1px solid var(--aria-border)" }}
-          title="Re-check and download any missing chapters"
+          title="Re-check and download any missing parts"
         >
           Refresh
         </button>
@@ -1022,32 +1135,17 @@ function OfflineSaveRow() {
     );
   }
 
-  if (status === "error") {
-    return (
-      <div className="flex items-center justify-between gap-2 px-4 py-2.5 border-b border-[var(--aria-border)]">
-        <span className="flex items-center gap-1.5 text-xs" style={{ color: "var(--aria-fg-dim)" }}>
-          <CloudOff size={13} style={{ color: "var(--aria-accent)" }} />
-          Download failed — is the backend online?
-        </span>
-        <button
-          onClick={downloadAll}
-          className="text-[10px] px-2 py-1 rounded-md transition-colors hover:bg-white/10"
-          style={{ color: "var(--aria-fg-muted)", border: "1px solid var(--aria-border)" }}
-        >
-          Retry
-        </button>
-      </div>
-    );
-  }
-
   // idle / partial — offer the download
-  const partialNote = status === "partial" && progress.cached > 0 ? ` (${progress.cached}/${progress.total} already saved)` : "";
+  const partialNote =
+    st.phase === "partial" && (st.chaptersDone > 0 || st.epubDone)
+      ? ` (${st.chaptersDone}/${st.chaptersTotal} saved)`
+      : "";
   return (
     <button
-      onClick={downloadAll}
+      onClick={doDownload}
       className="w-full flex items-center justify-center gap-2 px-4 py-2.5 border-b border-[var(--aria-border)] text-xs transition-colors hover:bg-white/5"
       style={{ color: "var(--aria-accent-glow)" }}
-      title="Download all chapters to this device for offline playback"
+      title="Download all chapters + the book to this device for offline playback and reading"
     >
       <Download size={13} />
       Save offline{partialNote}
@@ -1168,7 +1266,7 @@ function ChaptersPanel({
         }
         onClose={onClose}
       />
-      {hasChapterMp3s && <OfflineSaveRow />}
+      <OfflineSaveRow />
       {audioChapters.length > 1 && (
         <div className="flex items-center gap-2 px-4 py-2 border-b border-[var(--aria-border)]">
           <button

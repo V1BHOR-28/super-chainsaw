@@ -3,7 +3,7 @@
 import { useEffect, useRef } from "react";
 import { usePlayerStore } from "@/lib/player-store";
 import { getChapterMp3Url } from "@/lib/abm-api";
-import { getAudioUrl } from "@/lib/audio-cache";
+import { getAudioUrl, getSingleFileAudioUrl } from "@/lib/audio-cache";
 import { notifyBackgroundAudioOfMetadata } from "@/lib/mobile";
 
 /**
@@ -57,10 +57,22 @@ export function useAudioEngine() {
     const a = audioRef.current;
     if (!a || !currentJob) return;
 
-    // Backward compat: single-file mode (no chapterMp3s)
+    // Reset the offline-failure flag for the new source — it will re-set
+    // via the 'error' listener if this source also fails to load.
+    usePlayerStore.getState().setAudioError(false);
+
+    // Backward compat: single-file mode (no chapterMp3s) — same cache-first
+    // treatment via the `<jobId>:single` key, so legacy jobs play offline too.
     if (!currentJob.chapterMp3s || currentJob.chapterMp3s.length === 0) {
-      a.src = currentJob.downloadUrl;
-      a.load();
+      getSingleFileAudioUrl(currentJob.jobId, currentJob.downloadUrl)
+        .then((url) => {
+          a.src = url;
+          a.load();
+        })
+        .catch(() => {
+          a.src = currentJob.downloadUrl;
+          a.load();
+        });
       return;
     }
 
@@ -160,6 +172,7 @@ export function useAudioEngine() {
 
     const onLoadedMetadata = () => {
       isLoadingNewChapter.current = false;
+      usePlayerStore.getState().setAudioError(false);
       const job = usePlayerStore.getState().currentJob;
       if (!job) return;
 
@@ -215,15 +228,27 @@ export function useAudioEngine() {
       usePlayerStore.getState().pause();
     };
 
+    // ── Source failure surfacing ──
+    // Fires when a.src can't load at all (offline + not cached, 404, …).
+    // Without this the play button just silently does nothing offline —
+    // with it the player view shows a "Not saved on device" notice.
+    const onError = () => {
+      if (!a.src || a.src === "") return;
+      usePlayerStore.getState().setAudioError(true);
+      usePlayerStore.getState().pause();
+    };
+
     a.addEventListener("timeupdate", onTimeUpdate);
     a.addEventListener("loadedmetadata", onLoadedMetadata);
     a.addEventListener("durationchange", onLoadedMetadata);
     a.addEventListener("ended", onEnded);
+    a.addEventListener("error", onError);
     return () => {
       a.removeEventListener("timeupdate", onTimeUpdate);
       a.removeEventListener("loadedmetadata", onLoadedMetadata);
       a.removeEventListener("durationchange", onLoadedMetadata);
       a.removeEventListener("ended", onEnded);
+      a.removeEventListener("error", onError);
     };
   }, [setCurrentTime, setDuration]);
 

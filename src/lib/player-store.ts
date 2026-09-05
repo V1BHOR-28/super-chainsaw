@@ -73,6 +73,13 @@ interface PlayerState {
   resumedFrom: number | null;
   clearResumedFrom: () => void;
 
+  // ARIA: offline playback failure — set by the audio engine when the
+  // <audio> element errors (typically: chapter not on device + no network).
+  // The player view shows a "Not saved on device" notice instead of a
+  // silent dead play button. Cleared on chapter/job change + successful load.
+  audioError: boolean;
+  setAudioError: (v: boolean) => void;
+
   // UI
   showSettings: boolean;
   showReader: boolean;
@@ -161,6 +168,7 @@ export const usePlayerStore = create<PlayerState>()(
           duration: totalDuration,
           isPlaying: false,
           resumedFrom,
+          audioError: false,
         });
         if (typeof window !== "undefined") {
           window.scrollTo({ top: 0, behavior: "instant" as ScrollBehavior });
@@ -219,6 +227,10 @@ export const usePlayerStore = create<PlayerState>()(
       // saved position. The player view shows a toast + clears it.
       resumedFrom: null,
       clearResumedFrom: () => set({ resumedFrom: null }),
+
+      // ARIA: offline playback failure flag (see interface comment)
+      audioError: false,
+      setAudioError: (v) => set({ audioError: v }),
 
       showSettings: false,
       showReader: false,
